@@ -19,7 +19,7 @@ trait Pasteboard {
     fn name(&self) -> &'static str;
 }
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 impl Pasteboard for arboard::Clipboard {
     fn read_text(&mut self) -> Result<Option<String>, String> {
         // `ContentNotAvailable` is arboard's empty clipboard, not a failure.
@@ -49,10 +49,11 @@ impl Pasteboard for arboard::Clipboard {
 /// The Wayland half; the gate must match `smithay-clipboard`'s target in `Cargo.toml`.
 /// iNilla: the iOS half — `UIPasteboard.generalPasteboard`, through `inilla-platform`. Store
 /// backed like NSPasteboard, so holding the handle is only for symmetry with the other backends.
-#[cfg(target_os = "ios")]
+/// Vanillish: Android's `ClipboardManager` goes through the same `inilla-platform` calls.
+#[cfg(any(target_os = "ios", target_os = "android"))]
 struct UiPasteboard;
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 impl Pasteboard for UiPasteboard {
     fn read_text(&mut self) -> Result<Option<String>, String> {
         Ok(inilla_platform::pasteboard::get())
@@ -62,24 +63,28 @@ impl Pasteboard for UiPasteboard {
         if inilla_platform::pasteboard::set(text) {
             Ok(())
         } else {
-            Err("UIPasteboard is unavailable".into())
+            Err(format!("{} is unavailable", self.name()))
         }
     }
 
     fn name(&self) -> &'static str {
-        "UIPasteboard"
+        if cfg!(target_os = "android") {
+            "ClipboardManager"
+        } else {
+            "UIPasteboard"
+        }
     }
 }
 
 /// The platform's own pasteboard, where there is no Wayland one.
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn open_default() -> Result<Box<dyn Pasteboard>, String> {
     arboard::Clipboard::new()
         .map(|c| Box::new(c) as Box<dyn Pasteboard>)
         .map_err(|e| e.to_string())
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn open_default() -> Result<Box<dyn Pasteboard>, String> {
     Ok(Box::new(UiPasteboard))
 }

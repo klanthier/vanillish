@@ -109,7 +109,8 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 
 # The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. iNilla: not
 # on iOS, where arboard has no backend (it would build its X11 one) — `inilla-platform::pasteboard` is.
-[target.'cfg(not(target_os = "ios"))'.dependencies]
+# Vanillish: nor on Android, where arboard has no backend either.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 arboard = "3"
 
 # iNilla: the game's UIView behind Bevy's raw window handle (the safe-area insets), and winit's
