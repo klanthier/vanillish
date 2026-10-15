@@ -10,6 +10,9 @@
 //! Main-thread rule: the UIKit calls (`device`, `pasteboard`, `gamepad`) must be made from the
 //! main thread — in Bevy terms, from a system that takes a `NonSend` parameter or runs in the
 //! main schedule on iOS, where Bevy's main thread *is* UIKit's.
+//!
+//! Vanillish: on Android every call may come from any thread — the Java side hops to the UI
+//! thread where Android needs it (`crate::android`).
 
 pub mod audio;
 pub mod device;
@@ -21,3 +24,7 @@ pub mod stdio;
 
 #[cfg(target_os = "ios")]
 mod objc;
+
+/// Vanillish: the Android host (JNI into the app's `Bridge` class, the NDK).
+#[cfg(target_os = "android")]
+pub mod android;

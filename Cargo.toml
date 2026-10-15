@@ -94,3 +94,13 @@ debug = false
 strip = false
 incremental = false
 
+# Vanillish: the Android app. Release optimisation, built as `libvanillish.so` with cargo-ndk
+# (`android/build-rust.sh`). No LTO, as for iOS: a warm CI build stays minutes, not tens of them.
+# Symbols stay in (`strip = false`), so a panic's backtrace in logcat and the session log names
+# functions; Gradle keeps them too (`keepDebugSymbols`), the APK's zip compression shrinks them.
+[profile.android]
+inherits = "release"
+debug = false
+strip = false
+incremental = false
+

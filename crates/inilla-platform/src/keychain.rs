@@ -5,6 +5,10 @@
 //! Off iOS there is no keychain wired up, so secrets fall back to one TOML file in a directory
 //! the caller names ([`set_fallback_dir`]) — the desktop build is a development tool, and the
 //! file says so in its header. Nothing is stored anywhere until a fallback dir is set.
+//!
+//! Vanillish: on Android they are sealed with a key in the **Android Keystore** and kept in the
+//! app's private storage (`crate::android::keychain`); the fallback dir — on Android a folder a
+//! PC can browse — is never used there.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -28,7 +32,11 @@ pub fn get(key: &str) -> Option<String> {
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        crate::android::keychain::get(key)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         file::load().remove(key)
     }
@@ -40,7 +48,11 @@ pub fn set(key: &str, secret: &str) -> Result<(), String> {
         security_framework::passwords::set_generic_password(SERVICE, key, secret.as_bytes())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        crate::android::keychain::set(key, secret)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let mut all = file::load();
         all.insert(key.to_string(), secret.to_string());
@@ -53,7 +65,11 @@ pub fn delete(key: &str) {
     {
         let _ = security_framework::passwords::delete_generic_password(SERVICE, key);
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        crate::android::keychain::delete(key);
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let mut all = file::load();
         if all.remove(key).is_some() {
@@ -62,7 +78,7 @@ pub fn delete(key: &str) {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod file {
     use std::collections::BTreeMap;
 
@@ -103,7 +119,7 @@ mod file {
     }
 }
 
-#[cfg(all(test, not(target_os = "ios")))]
+#[cfg(all(test, not(any(target_os = "ios", target_os = "android"))))]
 mod tests {
     use super::*;
 

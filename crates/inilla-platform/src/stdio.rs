@@ -8,6 +8,10 @@
 //! it to the log file (flushed per line, so a crash leaves everything up to its last words) and
 //! passes the original bytes through to the old stderr (Xcode's console, `idevicesyslog`, a
 //! terminal on desktop).
+//!
+//! Vanillish: an Android app's stdout and stderr are `/dev/null`, so there the pass-through goes
+//! to **logcat** instead — except tracing's own lines, which bevy_log already sends to logcat
+//! itself (they stay in the ring and the session log).
 
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
@@ -68,10 +72,18 @@ pub fn capture(log_file: Option<&Path>) -> Result<(), String> {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
+                #[cfg(not(target_os = "android"))]
                 if let Some(p) = pass.as_mut() {
                     let _ = p.write_all(&raw);
                 }
                 let line = strip_ansi(&String::from_utf8_lossy(&raw));
+                #[cfg(target_os = "android")]
+                {
+                    let _ = &mut pass;
+                    if !is_tracing_line(&line) {
+                        crate::android::log::write_line(&line);
+                    }
+                }
                 inilla_core::logring::global().push(&line);
                 if let Some(f) = file.as_mut() {
                     let _ = f.write_all(line.as_bytes());
@@ -115,9 +127,54 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// A line in tracing-subscriber's fmt shape (`2026-10-15T04:20:00.123Z  INFO target: …`), which
+/// bevy_log on Android also writes to logcat by itself.
+pub fn is_tracing_line(line: &str) -> bool {
+    let b = line.as_bytes();
+    let stamp = b.len() > 20
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T';
+    if !stamp {
+        return false;
+    }
+    let head = &line[..line.len().min(48)];
+    [" TRACE ", " DEBUG ", " INFO ", " WARN ", " ERROR "]
+        .iter()
+        .any(|l| head.contains(l))
+}
+
+/// The logcat priority (`ANDROID_LOG_*`) a captured line deserves.
+pub fn logcat_priority(line: &str) -> i32 {
+    let head = &line[..line.len().min(64)];
+    if head.contains("ERROR") || line.contains("panicked") || head.starts_with("error") {
+        6
+    } else if head.contains("WARN") || head.starts_with("warning") {
+        5
+    } else {
+        4
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{is_tracing_line, logcat_priority, strip_ansi};
+
+    #[test]
+    fn tracing_lines_are_told_from_prints() {
+        assert!(is_tracing_line(
+            "2026-10-15T04:20:00.123456Z  INFO bevy_render::renderer: AdapterInfo"
+        ));
+        assert!(is_tracing_line(
+            "2026-10-15T04:20:00.123456Z  WARN benilla_app::inilla: x"
+        ));
+        assert!(!is_tracing_line("inilla: game data ready — 12 archives"));
+        assert!(!is_tracing_line("2026 was a year"));
+        assert_eq!(logcat_priority("thread 'main' panicked at x"), 6);
+        assert_eq!(logcat_priority("warning: something"), 5);
+        assert_eq!(logcat_priority("inilla: state /x"), 4);
+    }
 
     #[test]
     fn colours_are_stripped() {

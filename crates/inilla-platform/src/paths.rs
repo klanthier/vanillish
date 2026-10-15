@@ -13,9 +13,34 @@
 //! points at the guest app's container). Off iOS every function answers `None` unless
 //! `$INILLA_CONTAINER` names a folder to play the container: the desktop build otherwise keeps
 //! benilla's own resolution (`$BENILLA_HOME`, `$WOW_DATA`, beside the binary).
+//!
+//! **Vanillish (Android).** The app's corner of shared storage plays `Documents/`:
+//! `Android/data/<package>/files/` (`getExternalFilesDir`), which a PC sees over USB (File
+//! transfer). benilla's state folder lives there, and it is the drop box for a copied `Data`
+//! folder. The game data sits beside it in `.vanillish/Data` — the same mount, so the import is a
+//! rename (instant) and not a 5 GB copy, while the dot keeps it out of the way. Caches go to the
+//! private cache dir. If shared storage is not mounted, everything falls back to private storage.
 
 use std::path::PathBuf;
 
+/// Vanillish: the Android roots, `(documents, app_support, caches)`.
+#[cfg(target_os = "android")]
+fn android_roots() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let dirs = crate::android::paths::dirs();
+    let docs = dirs
+        .external
+        .clone()
+        .or_else(|| dirs.internal.as_ref().map(|d| d.join("Documents")))?;
+    let support = docs.join(".vanillish");
+    let caches = dirs
+        .cache
+        .as_ref()
+        .map(|c| c.join("vanillish"))
+        .unwrap_or_else(|| support.join("Caches"));
+    Some((docs, support, caches))
+}
+
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn home() -> Option<PathBuf> {
     if cfg!(target_os = "ios") {
         return std::env::var_os("HOME").map(PathBuf::from);
@@ -29,22 +54,50 @@ fn home() -> Option<PathBuf> {
 
 /// Whether paths resolve into an (emulated or real) app container.
 pub fn in_container() -> bool {
-    home().is_some()
+    #[cfg(target_os = "android")]
+    {
+        android_roots().is_some()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        home().is_some()
+    }
 }
 
-/// `Documents/` — visible in the Files app.
+/// `Documents/` — visible in the Files app (Android: over USB from a PC).
 pub fn documents() -> Option<PathBuf> {
-    home().map(|h| h.join("Documents"))
+    #[cfg(target_os = "android")]
+    {
+        android_roots().map(|r| r.0)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        home().map(|h| h.join("Documents"))
+    }
 }
 
-/// `Library/Application Support/iNilla/`.
+/// `Library/Application Support/iNilla/` (Android: `<documents>/.vanillish/`).
 pub fn app_support() -> Option<PathBuf> {
-    home().map(|h| h.join("Library").join("Application Support").join("iNilla"))
+    #[cfg(target_os = "android")]
+    {
+        android_roots().map(|r| r.1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        home().map(|h| h.join("Library").join("Application Support").join("iNilla"))
+    }
 }
 
 /// `Library/Caches/iNilla/` — may be purged by the OS under storage pressure.
 pub fn caches() -> Option<PathBuf> {
-    home().map(|h| h.join("Library").join("Caches").join("iNilla"))
+    #[cfg(target_os = "android")]
+    {
+        android_roots().map(|r| r.2)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        home().map(|h| h.join("Library").join("Caches").join("iNilla"))
+    }
 }
 
 /// The game data folder (`WOW_DATA`).
@@ -65,9 +118,14 @@ pub enum Host {
     App,
     LiveContainer,
     Desktop,
+    /// Vanillish: the Android app.
+    Android,
 }
 
 pub fn host() -> Host {
+    if cfg!(target_os = "android") {
+        return Host::Android;
+    }
     if !cfg!(target_os = "ios") {
         return Host::Desktop;
     }
@@ -91,8 +149,21 @@ pub fn classify_home(home: &str, lc_env: bool) -> Host {
 
 /// Where the Files app shows `Documents/`, as the taps to get there.
 pub fn files_location() -> String {
+    if host() == Host::Android {
+        let docs = documents()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        return files_location_for(Host::Android, &docs);
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     files_location_for(host(), &home)
+}
+
+/// Vanillish: the package name out of an Android app-specific path
+/// (`…/Android/data/<package>/files`).
+pub fn android_package(path: &str) -> Option<&str> {
+    let rest = path.split("/Android/data/").nth(1)?;
+    rest.split('/').next().filter(|p| !p.is_empty())
 }
 
 pub fn files_location_for(host: Host, home: &str) -> String {
@@ -108,6 +179,13 @@ pub fn files_location_for(host: Host, home: &str) -> String {
                 .to_string()
         }
         Host::App => "On My iPhone → iNilla".to_string(),
+        // `home` is the documents folder here.
+        Host::Android => match android_package(home) {
+            Some(pkg) => format!(
+                "from a PC over USB (File transfer): Internal storage → Android → data → {pkg} → files"
+            ),
+            None => home.to_string(),
+        },
         Host::Desktop => match documents() {
             Some(d) => d.display().to_string(),
             None => "benilla-config beside the binary".to_string(),
@@ -118,6 +196,18 @@ pub fn files_location_for(host: Host, home: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_android_drop_box_is_named_by_its_package() {
+        let docs = "/storage/emulated/0/Android/data/io.github.klanthier.vanillish/files";
+        assert_eq!(android_package(docs), Some("io.github.klanthier.vanillish"));
+        assert_eq!(
+            files_location_for(Host::Android, docs),
+            "from a PC over USB (File transfer): Internal storage → Android → data → \
+             io.github.klanthier.vanillish → files"
+        );
+        assert_eq!(android_package("/data/user/0/x/files"), None);
+    }
 
     #[test]
     fn an_installed_app_is_not_a_guest() {

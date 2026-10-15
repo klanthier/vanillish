@@ -9,12 +9,30 @@
 //! | no  | yes | `Playback` |
 //! | yes | yes | `Playback` + `MixWithOthers` |
 
+///
+/// Vanillish: on Android the same choice is **audio focus** — not mixing asks for
+/// `AUDIOFOCUS_GAIN` (the player's music pauses, as with `SoloAmbient`), mixing never asks.
+/// Android has no silent switch: its media stream ignores the ringer mode, so that half is moot.
 pub fn configure_session(mix_with_others: bool, ignore_silent_switch: bool) -> Result<(), String> {
     #[cfg(target_os = "ios")]
     {
         ios::configure(mix_with_others, ignore_silent_switch)
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        let _ = ignore_silent_switch;
+        let exclusive = !mix_with_others;
+        if crate::android::call_bridge_void(
+            "audioFocus",
+            "(Z)V",
+            &[jni::objects::JValue::Bool(exclusive.into())],
+        ) {
+            Ok(())
+        } else {
+            Err("the audio focus request did not reach Java".into())
+        }
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = (mix_with_others, ignore_silent_switch);
         Ok(())

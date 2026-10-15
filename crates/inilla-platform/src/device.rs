@@ -1,5 +1,9 @@
 //! The device: screen-awake, safe area, haptics, thermal state, memory headroom, backup
 //! exclusion, identity. Every call is a cheap no-op off iOS.
+//!
+//! Vanillish: each call also has an Android arm (`crate::android::device`), and Android adds the
+//! fold ([`fold`]), the display's frame rate ([`set_frame_rate`]), the orientation policy and
+//! [`relaunch`] — no-ops on iOS and the desktop.
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -9,7 +13,10 @@ use std::path::Path;
 pub fn set_idle_timer_disabled(disabled: bool) {
     #[cfg(target_os = "ios")]
     ios::set_idle_timer_disabled(disabled);
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: `FLAG_KEEP_SCREEN_ON` on the game's window.
+    #[cfg(target_os = "android")]
+    crate::android::device::keep_screen_on(disabled);
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let _ = disabled;
 }
 
@@ -20,7 +27,13 @@ pub fn safe_area_insets(ui_view: *mut c_void) -> [f32; 4] {
     {
         ios::safe_area_insets(ui_view)
     }
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: the display-cutout insets in dp; `ui_view` is not used (pass null).
+    #[cfg(target_os = "android")]
+    {
+        let _ = ui_view;
+        crate::android::device::safe_area().0
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = ui_view;
         [0.0; 4]
@@ -49,7 +62,14 @@ pub fn camera_side(ui_view: *mut c_void) -> Option<Side> {
             _ => None,
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: Android's cutout insets are per side, so the side with the hole is the one with
+    // an inset.
+    #[cfg(target_os = "android")]
+    {
+        let _ = ui_view;
+        crate::android::device::safe_area().1
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = ui_view;
         None
@@ -78,7 +98,10 @@ pub enum Haptic {
 pub fn haptic(kind: Haptic) {
     #[cfg(target_os = "ios")]
     ios::haptic(kind);
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: the Vibrator's click/tick primitives.
+    #[cfg(target_os = "android")]
+    crate::android::device::haptic(kind);
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let _ = kind;
 }
 
@@ -97,9 +120,38 @@ pub fn thermal_state() -> Thermal {
     {
         ios::thermal_state()
     }
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: `AThermal`'s status, kept current by a listener (an atomic load).
+    #[cfg(target_os = "android")]
+    {
+        thermal_from_android(crate::android::thermal::status())
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         Thermal::Nominal
+    }
+}
+
+/// `ATHERMAL_STATUS_*` → [`Thermal`]: light is "warm", moderate is where throttling begins.
+pub fn thermal_from_android(status: i32) -> Thermal {
+    match status {
+        1 => Thermal::Fair,
+        2 => Thermal::Serious,
+        3..=6 => Thermal::Critical,
+        _ => Thermal::Nominal,
+    }
+}
+
+/// How close the device is to severe throttling in `forecast_secs` (`1.0` = severe), where the
+/// OS says (Android's thermal headroom). `None` elsewhere.
+pub fn thermal_headroom(forecast_secs: i32) -> Option<f32> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::thermal::headroom(forecast_secs)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = forecast_secs;
+        None
     }
 }
 
@@ -113,10 +165,24 @@ pub fn available_memory() -> Option<u64> {
         // SAFETY: a libSystem query with no arguments, available since iOS 13.
         Some(unsafe { os_proc_available_memory() } as u64)
     }
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: system-wide room before the low-memory killer (Android has no per-app limit).
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::available_memory()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         None
     }
+}
+
+/// `MemAvailable` from the text of `/proc/meminfo`, in bytes.
+pub fn parse_mem_available(meminfo: &str) -> Option<u64> {
+    meminfo.lines().find_map(|l| {
+        let rest = l.strip_prefix("MemAvailable:")?;
+        let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+        Some(kb * 1024)
+    })
 }
 
 /// Keep `path` (and, for a folder, everything in it) out of iCloud/iTunes backups.
@@ -141,7 +207,12 @@ pub fn describe() -> String {
             _ => ios::describe(),
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: maker, model, Android release and the SoC, from the system properties.
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::describe()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
     }
@@ -151,8 +222,126 @@ pub fn describe() -> String {
 pub fn open_url(url: &str) {
     #[cfg(target_os = "ios")]
     ios::open_url(url);
-    #[cfg(not(target_os = "ios"))]
+    // Vanillish: an `ACTION_VIEW` intent; `app-settings:` opens the app's system settings page.
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::open_url(url);
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let _ = url;
+}
+
+/// Start the app over in a fresh process, where the OS allows an app to (Android). `false` where
+/// it does not: the caller then exits and the player opens the app again.
+pub fn relaunch() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::relaunch()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// Ask the display to refresh at `hz` (`0` = its highest), so a 120 Hz panel runs the High preset
+/// at 120 and settles to the frame cap's rate otherwise. A no-op where the OS picks by itself.
+pub fn set_frame_rate(hz: f32) {
+    #[cfg(target_os = "android")]
+    crate::android::device::set_frame_rate(hz);
+    #[cfg(not(target_os = "android"))]
+    let _ = hz;
+}
+
+/// Which orientations the game may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Orientation {
+    /// Landscape, either way up (the sensor picks).
+    #[default]
+    Landscape,
+    /// Whatever the device is held in — on a foldable's near-square inner screen, portrait plays
+    /// too.
+    Any,
+}
+
+pub fn set_orientation(o: Orientation) {
+    #[cfg(target_os = "android")]
+    crate::android::device::set_orientation_mode(match o {
+        Orientation::Landscape => 0,
+        Orientation::Any => 1,
+    });
+    #[cfg(not(target_os = "android"))]
+    let _ = o;
+}
+
+/// A foldable's hinge, as the OS reports it (Jetpack WindowManager's `FoldingFeature`).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Fold {
+    pub state: FoldState,
+    /// The hinge runs left to right across the window (the device is held like a laptop: the
+    /// tabletop posture when half open), rather than top to bottom (a book).
+    pub horizontal: bool,
+    /// The hinge's bounds in the window, in logical pixels: `[left, top, right, bottom]`.
+    pub bounds: [f32; 4],
+    /// The fold splits the window into two areas (half open, or a physical gap).
+    pub separating: bool,
+    /// The hinge hides content (`OcclusionType.FULL`), rather than only creasing it.
+    pub occluding: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FoldState {
+    /// Fully open (180°).
+    #[default]
+    Flat,
+    /// Somewhere between closed and flat: the posture a game can split around.
+    HalfOpen,
+}
+
+impl Fold {
+    /// Half open with the hinge horizontal: the laptop / "Flex mode" posture.
+    pub fn tabletop(&self) -> bool {
+        self.state == FoldState::HalfOpen && self.horizontal
+    }
+
+    /// Half open with the hinge vertical: held like a book.
+    pub fn book(&self) -> bool {
+        self.state == FoldState::HalfOpen && !self.horizontal
+    }
+}
+
+/// `Bridge.fold()`'s array: `{present, halfOpen, horizontal, left, top, right, bottom, separating,
+/// occluding}`. `None` when the window has no hinge across it (the cover screen, a closed device,
+/// a phone that does not fold).
+pub fn fold_from_floats(v: &[f32]) -> Option<Fold> {
+    if v.len() < 9 || v[0] < 0.5 {
+        return None;
+    }
+    Some(Fold {
+        state: if v[1] > 0.5 {
+            FoldState::HalfOpen
+        } else {
+            FoldState::Flat
+        },
+        horizontal: v[2] > 0.5,
+        bounds: [v[3], v[4], v[5], v[6]],
+        separating: v[7] > 0.5,
+        occluding: v[8] > 0.5,
+    })
+}
+
+/// The hinge across the game's window, if the device folds and the window spans it. Desktop runs
+/// rehearse one with `$INILLA_FOLD=tabletop` / `book` (a hinge across the middle of the window,
+/// sized when the window size is known: see the app's `inilla::fold`).
+pub fn fold() -> Option<Fold> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::fold::fold()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
 }
 
 #[cfg(target_os = "ios")]
