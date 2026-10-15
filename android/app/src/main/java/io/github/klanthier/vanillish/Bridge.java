@@ -11,6 +11,7 @@ import android.content.pm.ActivityInfo;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -549,6 +550,27 @@ public final class Bridge {
                     Math.round(v[i + 2] * density), Math.round(v[i + 3] * density)));
         }
         decor.setSystemGestureExclusionRects(rects);
+    }
+
+    // ---- [connect] quick connect -----------------------------------------------------------------
+
+    /**
+     * Whether the network the phone is on now costs by the byte (mobile data, a hotspot the
+     * player marked metered): 1 metered, 0 not, -1 no network or no answer. Quick connect starts
+     * the 5 GB game download by itself only on 0. Needs ACCESS_NETWORK_STATE (the manifest has
+     * it).
+     */
+    public static int networkMetered() {
+        Context c = app;
+        if (c == null) return -1;
+        try {
+            ConnectivityManager cm = c.getSystemService(ConnectivityManager.class);
+            if (cm == null || cm.getActiveNetwork() == null) return -1;
+            return cm.isActiveNetworkMetered() ? 1 : 0;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "networkMetered: " + e);
+            return -1;
+        }
     }
 
     // ---- [input] the soft keyboard and the host pointer ---------------------------------------

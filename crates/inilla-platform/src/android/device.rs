@@ -129,6 +129,16 @@ pub(crate) fn relaunch() -> bool {
     super::call_bridge_void("relaunch", "()V", &[])
 }
 
+/// Whether the active network is metered (`Bridge.networkMetered`: 1 metered, 0 not, -1 no
+/// network or no answer).
+pub(crate) fn network_metered() -> Option<bool> {
+    match super::call_bridge("networkMetered", "()I", &[], |_, v| v.i())? {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    }
+}
+
 /// Ask the display for `hz` (0 = the panel's highest), so a 120 Hz panel runs at 120 in the High
 /// preset and drops to 60/30 with the frame cap instead of idling at a mismatched rate.
 pub(crate) fn set_frame_rate(hz: f32) {

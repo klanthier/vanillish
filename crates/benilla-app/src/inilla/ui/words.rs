@@ -6,6 +6,7 @@
 //! Only glyphs the font test (`super::tests`) has proven: the arrow, the bullet, the middle dot,
 //! the em dash and the ellipsis.
 
+use inilla_core::connect::RegisterError;
 use inilla_core::settings::Quality;
 use inilla_platform::paths::{self, Host};
 
@@ -156,11 +157,17 @@ pub(crate) const REMEMBER_PASSWORD: &str = if ANDROID {
 
 pub(crate) const AUTO_LOGIN: &str = concat!("Log in automatically when ", app!(), " starts");
 
-pub(crate) const NO_SIGN_UP: &str = concat!(
-    app!(),
-    " cannot create accounts: 1.12 has no in-game sign-up. Register on your server's website or \
-     with `account create` on its console, then add the account here."
-);
+pub(crate) const NO_SIGN_UP: &str = if ANDROID {
+    "1.12 has no in-game sign-up. On a server that takes sign-ups, Connect creates the account; \
+     otherwise register on the server's website or with `account create` on its console, then add \
+     the account here."
+} else {
+    concat!(
+        app!(),
+        " cannot create accounts: 1.12 has no in-game sign-up. Register on your server's website \
+         or with `account create` on its console, then add the account here."
+    )
+};
 
 pub(crate) const NOT_SAVED: &str = if ANDROID {
     "Password not saved: the Android Keystore refused it"
@@ -295,6 +302,202 @@ pub(crate) const CREDIT: &str = if ANDROID {
 
 pub(crate) const RESET_ALL: &str = concat!("Reset all ", app!(), " settings");
 
+// ── connect.rs (Vanillish) ──
+
+/// Vanillish: the first screen is Connect — one field, the server's address — on Android, and on
+/// a desktop rehearsing it with `$INILLA_QUICK_CONNECT=1`. Never on iOS, which keeps iNilla's flow.
+pub(crate) fn quick_connect() -> bool {
+    ANDROID
+        || (!cfg!(target_os = "ios") && std::env::var("INILLA_QUICK_CONNECT").as_deref() == Ok("1"))
+}
+
+pub(crate) const CONNECT_TITLE: &str = "Connect";
+pub(crate) const CONNECT_TO_SERVER: &str = "Connect to a server…";
+pub(crate) const CONNECT_INTRO: &str = concat!(
+    "Type the address of the computer that runs your server. ",
+    app!(),
+    " sets up the rest: the server, the game files and your account."
+);
+pub(crate) const ADDRESS_ROW: &str = "Server address";
+pub(crate) const ADDRESS_EXAMPLE: &str = "192.168.1.20";
+pub(crate) const ADDRESS_HINT: &str = "The IP the server printed when it started, or its name \
+     (my-mac.local). host:port and http:// links work too.";
+pub(crate) const CONNECT_BUTTON: &str = "Connect";
+pub(crate) const ASKING: &str = "Asking the server…";
+pub(crate) const MANUAL: &str = "Enter the details myself";
+pub(crate) const OTHER_WAYS: &str = "Other ways to get the game files…";
+
+/// Nothing answered at `host`: what to check.
+pub(crate) fn unreachable(host: &str) -> String {
+    let device = if ANDROID { "phone" } else { "device" };
+    let mut s = format!(
+        "Nothing answers at {host}. Is the server running, and is this {device} on the same Wi-Fi \
+         as it (not a guest network, not mobile data)? On the server's computer the firewall \
+         must let in ports 3724, 8085 and 8099."
+    );
+    if cfg!(target_os = "ios") {
+        s.push_str(
+            " And iNilla must be allowed on the local network (Settings → Privacy & Security → \
+             Local Network).",
+        );
+    }
+    s
+}
+
+/// A plain 1.12.1 realm answered, with nothing that describes it.
+pub(crate) fn plain_realm(host: &str) -> String {
+    format!(
+        "A 1.12.1 realm answers at {host}, but it does not describe itself: no game files to \
+         download, no sign-up. Check the details and save."
+    )
+}
+
+/// The server described itself in a way this app cannot use.
+pub(crate) fn unusable(why: &str) -> String {
+    format!(concat!(app!(), " cannot use this server: {}."), why)
+}
+
+/// `✔ Vanillish · vmangos · realm Vanillish (PvE) · LAN`
+pub(crate) fn summary(
+    name: &str,
+    core: &str,
+    realm: Option<(&str, Option<&str>)>,
+    lan: bool,
+) -> String {
+    let mut s = format!("✔ {name} · {core}");
+    match realm {
+        Some((realm, Some(kind))) => s.push_str(&format!(" · realm {realm} ({kind})")),
+        Some((realm, None)) => s.push_str(&format!(" · realm {realm}")),
+        None => {}
+    }
+    s.push_str(if lan { " · LAN" } else { " · Internet" });
+    s
+}
+
+/// A data host from before `server.json`: its data, and nothing else known.
+pub(crate) const DATA_ONLY: &str =
+    "This server shares its game files, but says nothing about its realm: it is reached on the \
+     usual port 3724.";
+
+pub(crate) const FILES_TITLE: &str = "The game files";
+
+pub(crate) fn files_ready(archives: usize, gb: f64) -> String {
+    format!("✔ The game files are here — {archives} archives, {gb:.1} GB.")
+}
+
+pub(crate) fn download_game(gb: f64) -> String {
+    format!("Download the game ({gb:.1} GB)")
+}
+
+pub(crate) const DOWNLOAD_RESUME: &str = "Resume the download";
+pub(crate) const ASKING_FILES: &str = "Asking for the list of game files…";
+pub(crate) const TRY_AGAIN: &str = "Try again";
+
+pub(crate) fn not_enough_space(need_gb: f64, free_gb: f64) -> String {
+    format!("Not enough space: {need_gb:.1} GB needed, {free_gb:.1} GB free.")
+}
+
+pub(crate) const METERED: &str = "This phone is on a metered connection (mobile data or a \
+     hotspot): the download counts against your plan.";
+pub(crate) const PICK_LANGUAGE: &str = "The server has the game in several languages. Pick one: \
+     quests, items and NPCs follow it.";
+pub(crate) const TOKEN_ROW: &str = "Access code";
+pub(crate) const TOKEN_HINT: &str = if ANDROID {
+    "The server's owner protected the game files with an access code (INILLA_DATA_TOKEN in its \
+     .env). It is saved on this phone."
+} else {
+    "The server's owner protected the game files with an access code (INILLA_DATA_TOKEN in its \
+     .env). It is saved on this device."
+};
+pub(crate) const TOKEN_REFUSED_HERE: &str = "The server did not accept that access code.";
+pub(crate) const CONTINUE: &str = "Continue";
+pub(crate) const BRING_YOUR_OWN: &str =
+    "This server does not share the game files. Bring your own:";
+
+pub(crate) const ACCOUNT_TITLE: &str = "Your account";
+pub(crate) const CREATE_TAB: &str = "Create an account";
+pub(crate) const HAVE_TAB: &str = "I have an account";
+pub(crate) const NAME_ROW: &str = "Account name";
+pub(crate) const PASSWORD_ROW: &str = "Password";
+
+pub(crate) fn name_hint(min: usize, max: usize) -> String {
+    format!("{min} to {max} letters or digits")
+}
+
+pub(crate) fn password_hint(min: usize, max: usize) -> String {
+    format!(
+        "{min} to {max} characters, no spaces or quotes. Capitals do not matter: 1.12 sends \
+         passwords in capitals."
+    )
+}
+
+pub(crate) const SHOW_PASSWORD: &str = "Show";
+pub(crate) const HIDE_PASSWORD: &str = "Hide";
+pub(crate) const CREATE_ACCOUNT: &str = "Create account";
+pub(crate) const SAVE_ACCOUNT: &str = "Save";
+pub(crate) const CREATING: &str = "Creating the account…";
+pub(crate) const ANOTHER_ACCOUNT: &str = "Use another account";
+pub(crate) const NAME_NEEDED: &str = "Enter the account name.";
+pub(crate) const PASSWORD_NEEDED: &str = "Enter the password, or let it be asked at each login.";
+
+pub(crate) fn created(name: &str) -> String {
+    format!("Account {name} created.")
+}
+
+pub(crate) fn account_saved(name: &str) -> String {
+    format!("✔ Account {name}")
+}
+
+/// The account is saved; the game files are not all here yet.
+pub(crate) fn logs_in_later(name: &str) -> String {
+    format!(
+        concat!(app!(), " logs in as {} once the game files are in."),
+        name
+    )
+}
+
+/// The account is saved; the game files arrived, and a restart opens them.
+pub(crate) fn logs_in_after_restart(name: &str) -> String {
+    format!(
+        concat!(app!(), " logs in as {} when it starts again."),
+        name
+    )
+}
+
+pub(crate) const NO_SIGN_UP_HERE: &str = "This server does not take sign-ups from the app: ask \
+     its owner for an account, then enter it here.";
+
+/// Why a sign-up did not happen, for the player.
+pub(crate) fn register_error(e: &RegisterError) -> String {
+    match e {
+        RegisterError::BadName(m) | RegisterError::BadPassword(m) => m.clone(),
+        RegisterError::NameTaken => {
+            "That account name is taken. If it is yours, choose \"I have an account\".".into()
+        }
+        RegisterError::Closed => "This server does not take sign-ups from here.".into(),
+        RegisterError::TokenRequired => "The server wants its access code for sign-ups.".into(),
+        RegisterError::RateLimited {
+            retry_after: Some(secs),
+        } => match secs.div_ceil(60) {
+            0 | 1 => "Too many new accounts from here: try again in a minute.".into(),
+            mins => format!("Too many new accounts from here: try again in {mins} minutes."),
+        },
+        RegisterError::RateLimited { retry_after: None } => {
+            "Too many new accounts from here: try again later.".into()
+        }
+        RegisterError::Unavailable => "The server is still starting. Try again in a minute.".into(),
+        RegisterError::Unreachable(why) => format!(
+            "No answer from the server ({why}). Try again: the same request goes out, so the \
+             account is never made twice."
+        ),
+        RegisterError::Failed(m) => format!("Sign-up failed: {m}. Ask the server's owner."),
+    }
+}
+
+pub(crate) fn play_as(name: &str) -> String {
+    format!("▶ Play as {name}")
+}
+
 // ── logs.rs ──
 
 pub(crate) const LOG_COPIED: &str = "Log copied";
@@ -329,5 +532,35 @@ mod tests {
              game commands, screenshots and the benilla-config files. Anyone with the address \
              can drive the game — turn it off when you are done."
         );
+    }
+
+    /// Vanillish: what Connect says about the server and about a refused sign-up.
+    #[test]
+    fn connect_says_what_happened() {
+        assert_eq!(
+            summary("Vanillish", "vmangos", Some(("Azeroth", Some("PvE"))), true),
+            "✔ Vanillish · vmangos · realm Azeroth (PvE) · LAN"
+        );
+        assert_eq!(
+            summary("Files", "other 1.12.1", None, false),
+            "✔ Files · other 1.12.1 · Internet"
+        );
+        let limited = |s| register_error(&RegisterError::RateLimited { retry_after: s });
+        assert_eq!(
+            limited(Some(540)),
+            "Too many new accounts from here: try again in 9 minutes."
+        );
+        assert_eq!(
+            limited(Some(30)),
+            "Too many new accounts from here: try again in a minute."
+        );
+        assert!(limited(None).ends_with("try again later."));
+        assert!(register_error(&RegisterError::NameTaken).contains("I have an account"));
+        assert_eq!(
+            register_error(&RegisterError::BadName("Too short.".into())),
+            "Too short."
+        );
+        assert!(unreachable("10.0.0.5").contains("3724, 8085 and 8099"));
+        assert!(unusable("it is for client build 6005").ends_with("build 6005."));
     }
 }

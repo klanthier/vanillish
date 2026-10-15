@@ -4,8 +4,9 @@
 //! Vanillish: each call also has an Android arm (`crate::android::device`), and Android adds the
 //! fold ([`fold`]), the display's frame rate ([`set_frame_rate`]), the orientation policy, the
 //! background session ([`set_session_service`]), the edges the system's swipes hold off
-//! ([`set_gesture_exclusion`]) and [`relaunch`] — no-ops on iOS and the desktop, where
-//! `$INILLA_FOLD` rehearses a hinge ([`fold_in_window`]).
+//! ([`set_gesture_exclusion`]), [`relaunch`] and whether the network is metered
+//! ([`network_metered`]) — no-ops on iOS and the desktop, where `$INILLA_FOLD` rehearses a hinge
+//! ([`fold_in_window`]).
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -250,6 +251,29 @@ pub fn relaunch() -> bool {
     #[cfg(not(target_os = "android"))]
     {
         false
+    }
+}
+
+/// Vanillish: whether the network the device is on now costs by the byte — mobile data, or a
+/// hotspot marked so (Android's `ConnectivityManager.isActiveNetworkMetered`). Quick connect starts
+/// a 5 GB download by itself only on `Some(false)`. `None` where the OS does not say, or with no
+/// network; a desktop rehearses either answer with `$INILLA_METERED=1` or `0`.
+pub fn network_metered() -> Option<bool> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::network_metered()
+    }
+    #[cfg(target_os = "ios")]
+    {
+        None
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        match std::env::var("INILLA_METERED").as_deref() {
+            Ok("1") => Some(true),
+            Ok("0") => Some(false),
+            _ => None,
+        }
     }
 }
 

@@ -13,6 +13,8 @@
 //! - [`logring`] — the process-wide log ring the console and the log viewer read.
 
 pub mod addons;
+/// Vanillish: quick connect — the server's address to a profile, its game data and an account.
+pub mod connect;
 pub mod data;
 /// Vanillish: foldables — screen classes, the hinge, the per-class layouts.
 pub mod fold;
