@@ -148,6 +148,12 @@ pub(crate) fn take_back_presses() -> u32 {
         .max(0) as u32
 }
 
+/// Start or stop the session service (`GameSessionService`, a foreground service), which keeps the
+/// process alive in the background while the player is in the world.
+pub(crate) fn set_session_service(on: bool) {
+    super::call_bridge_void("sessionService", "(Z)V", &[JValue::Bool(on.into())]);
+}
+
 /// Which orientations the game may take: `0` landscape (either way up, by the sensor), `1` any.
 pub(crate) fn set_orientation_mode(mode: i32) {
     super::call_bridge_void("setOrientationMode", "(I)V", &[JValue::Int(mode)]);

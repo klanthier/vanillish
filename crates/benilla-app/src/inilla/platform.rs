@@ -1,6 +1,10 @@
 //! **The iOS host**, as Bevy systems: the window's iOS options, the screen kept awake, the audio
 //! session, the safe area and the Dynamic Island, the on-screen keyboard, the frame cap, and the
 //! iNilla settings that land on benilla CVars (render scale, UI scale, the quality preset).
+//!
+//! Vanillish: the same systems run on Android, through `inilla_platform`'s Android arms; what only
+//! Android has (the soft keyboard's text, Back, the native window, the lifecycle, the frame-rate
+//! vote) is `inilla::android`.
 
 use std::time::{Duration, Instant};
 
@@ -70,6 +74,14 @@ impl SyntheticKeys {
     pub(crate) fn tap(&mut self, key: KeyCode) {
         self.queued.push(key);
     }
+
+    /// Vanillish: an Enter or an Escape waits to go down — the line being typed is about to be sent
+    /// or dropped, so the word the Android keyboard is still composing must reach the box first.
+    pub(crate) fn ends_line(&self) -> bool {
+        self.queued
+            .iter()
+            .any(|k| matches!(k, KeyCode::Enter | KeyCode::Escape))
+    }
 }
 
 pub(crate) struct PlatformPlugin;
@@ -108,6 +120,9 @@ impl Plugin for PlatformPlugin {
 
 /// Full screen as a game wants it: no home indicator, no status bar, and the screen edges defer
 /// the system gestures (a swipe from an edge shows the grabber first instead of leaving the game).
+///
+/// Vanillish: nothing here on Android — the Activity does the same in Java (immersive, drawn under
+/// the camera cut-out, the keyboard floating over the game rather than resizing it).
 fn window_options(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     if !cfg!(target_os = "ios") {
         return;
@@ -160,6 +175,9 @@ fn lock_landscape() {}
 
 /// The iOS keyboard's Return arrives as the text `"\n"` with no key code; benilla's text law keys
 /// submit on `Enter`. Rewrite it before Bevy's keyboard system sees it.
+///
+/// Vanillish: Android's soft keyboard never reaches winit (the IME bridge in `inilla::android`
+/// turns its newline into Enter), and a hardware keyboard's Enter is rewritten there too.
 fn return_key_is_enter(mut keys: ResMut<Messages<KeyboardInput>>) {
     if !cfg!(target_os = "ios") {
         return;
@@ -184,7 +202,7 @@ fn return_key_is_enter(mut keys: ResMut<Messages<KeyboardInput>>) {
     }
 }
 
-fn synthetic_keys(
+pub(super) fn synthetic_keys(
     mut keys: ResMut<SyntheticKeys>,
     mut out: ResMut<Messages<KeyboardInput>>,
     windows: Query<Entity, With<PrimaryWindow>>,
@@ -198,6 +216,8 @@ fn synthetic_keys(
     let logical = |k: KeyCode| match k {
         KeyCode::Enter => Key::Enter,
         KeyCode::Escape => Key::Escape,
+        // Vanillish: the Android keyboard's tab (a hardware keyboard typing into its buffer).
+        KeyCode::Tab => Key::Tab,
         _ => Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
     };
     for key in std::mem::take(&mut keys.down) {
@@ -260,12 +280,21 @@ fn track_safe_area(
     }
 }
 
+/// Keep the screen on in the world (the setting), and — Vanillish — while a data job runs: a
+/// 5 GB download or import outlives the screen timeout, and a locked phone suspends the app.
 fn keep_screen_awake(
     state: Res<Inilla>,
     client: Res<State<ClientState>>,
+    data: Res<super::data::DataState>,
+    mut busy: Local<bool>,
     mut last: Local<Option<bool>>,
 ) {
-    let want = state.settings.keep_screen_on && *client.get() == ClientState::InWorld;
+    // A job starts and ends through a mutable borrow of the data state, so its busy flag can only
+    // move on a frame where the resource changed.
+    if data.is_changed() {
+        *busy = data.busy().is_some();
+    }
+    let want = (state.settings.keep_screen_on && *client.get() == ClientState::InWorld) || *busy;
     if *last != Some(want) {
         device::set_idle_timer_disabled(want);
         *last = Some(want);
@@ -287,17 +316,30 @@ fn audio_session(state: Res<Inilla>, mut last: Local<Option<(bool, bool)>>) {
 }
 
 /// Show the keyboard while a text box has focus (chat, the stock popups) or a HUD button asked.
+///
+/// Vanillish: an iNilla screen's own field (the launcher's host and account, the setup's address)
+/// asks too. Its focus is egui's, which no stock edit box sees; the egui context remembers it from
+/// the last pass, and only a running lane has a live one.
 fn keyboard_policy(
     state: Res<Inilla>,
     capture: Res<UiKeyboardCapture>,
     request: Res<KeyboardRequest>,
+    lane: Res<super::EguiWanted>,
+    mut egui: Query<&mut bevy_egui::EguiContext, With<bevy_egui::PrimaryEguiContext>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut last: Local<bool>,
 ) {
     if !super::touch_device() {
         return;
     }
-    let want = request.0 || (state.settings.auto_keyboard && capture.typing);
+    // A read: `get_mut` is the only getter bevy_egui offers without its `immutable_ctx` feature.
+    let egui_typing = lane.0
+        && egui.iter_mut().any(|mut ctx| {
+            ctx.bypass_change_detection()
+                .get_mut()
+                .wants_keyboard_input()
+        });
+    let want = request.0 || (state.settings.auto_keyboard && (capture.typing || egui_typing));
     if want == *last {
         return;
     }
@@ -347,7 +389,13 @@ fn apply_cvar_settings(
 /// The preset's frame cap (`0` = the display's rate). Sleeping at the end of the frame is crude,
 /// but it is the one limiter that works the same on every platform, and at 30 fps it halves the
 /// work the phone does — which is the whole point of the battery preset.
-fn frame_cap(state: Res<Inilla>, mut last: Local<Option<Instant>>) {
+///
+/// Vanillish: Android also asks the display for the cap's rate (the frame-rate vote in
+/// `inilla::android`). Where the panel then runs at it, presenting (Fifo) already paces every
+/// frame, and a sleep on top only shifts frames against the refresh — two land in one interval,
+/// none in the next. So while the panel reports the cap's rate, and the frames measure as paced,
+/// the sleep stands down ([`Pacing`]).
+fn frame_cap(state: Res<Inilla>, mut last: Local<Option<Instant>>, mut pacing: Local<Pacing>) {
     if !super::touch_device() {
         return;
     }
@@ -357,12 +405,141 @@ fn frame_cap(state: Res<Inilla>, mut last: Local<Option<Instant>>) {
         let budget = Duration::from_secs_f64(1.0 / f64::from(cap));
         if let Some(prev) = *last {
             let spent = now.duration_since(prev);
-            if spent < budget {
+            let paced = cfg!(target_os = "android")
+                && pacing.display_paces(cap, spent, now, || {
+                    device::refresh_rate().map_or(0.0, |(current, _)| current)
+                });
+            if spent < budget && !paced {
                 std::thread::sleep(budget - spent);
             }
         }
     }
     *last = Some(Instant::now());
+}
+
+/// Vanillish: does the display already pace frames at the cap (Android)? The panel's rate is read
+/// once a second (a Java call). While it is at or under the cap the sleep stands down, and the
+/// unslept frame interval is measured: should frames still come clearly faster than the cap (a
+/// rate override that throttles the app's vsync but not its presents), the report is not trusted
+/// for a while and the sleep caps again.
+#[derive(Default)]
+struct Pacing {
+    cap: u32,
+    display_hz: f32,
+    read_at: Option<Instant>,
+    /// The smoothed frame interval while not sleeping (s), and how many frames it has seen.
+    interval: f64,
+    samples: u32,
+    distrust_until: Option<Instant>,
+}
+
+impl Pacing {
+    /// Frames to measure before judging the display's pacing.
+    const SAMPLES: u32 = 30;
+    /// How long a disproved report is ignored.
+    const DISTRUST: Duration = Duration::from_secs(10);
+
+    /// `display_hz` reads the panel's current rate (`0` = unknown).
+    fn display_paces(
+        &mut self,
+        cap: u32,
+        spent: Duration,
+        now: Instant,
+        display_hz: impl FnOnce() -> f32,
+    ) -> bool {
+        if self.cap != cap {
+            *self = Pacing { cap, ..default() };
+        }
+        if self
+            .read_at
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+        {
+            self.display_hz = display_hz();
+            self.read_at = Some(now);
+        }
+        let at_cap = self.display_hz > 0.0 && self.display_hz <= cap as f32 * 1.05;
+        if !at_cap || self.distrust_until.is_some_and(|t| now < t) {
+            self.interval = 0.0;
+            self.samples = 0;
+            return false;
+        }
+        // Not sleeping, so `spent` is the whole frame; a hitch is clamped so it cannot pass for
+        // pacing on its own.
+        let budget = 1.0 / f64::from(cap);
+        let s = spent.as_secs_f64().min(2.0 * budget);
+        self.interval = if self.samples == 0 {
+            s
+        } else {
+            self.interval * 0.9 + s * 0.1
+        };
+        self.samples = self.samples.saturating_add(1);
+        if self.samples >= Self::SAMPLES && self.interval < 0.8 * budget {
+            self.distrust_until = Some(now + Self::DISTRUST);
+            self.interval = 0.0;
+            self.samples = 0;
+            return false;
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    /// `frames` unslept frames `interval` apart under a panel at `hz`; what the last one decided.
+    fn run(p: &mut Pacing, t: &mut Instant, cap: u32, hz: f32, interval: f64, frames: u32) -> bool {
+        let mut paced = false;
+        for _ in 0..frames {
+            *t += Duration::from_secs_f64(interval);
+            paced = p.display_paces(cap, Duration::from_secs_f64(interval), *t, || hz);
+        }
+        paced
+    }
+
+    #[test]
+    fn a_panel_at_the_cap_pacing_the_frames_stands_the_sleep_down() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        assert!(run(&mut p, &mut t, 60, 60.0, 1.0 / 60.0, 300));
+        // A panel under the cap paces too (the frames only come slower).
+        assert!(run(&mut p, &mut t, 60, 30.0, 1.0 / 30.0, 300));
+    }
+
+    #[test]
+    fn a_panel_over_the_cap_or_unknown_keeps_the_sleep() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        assert!(!run(&mut p, &mut t, 60, 120.0, 1.0 / 120.0, 10));
+        let mut p = Pacing::default();
+        assert!(!run(&mut p, &mut t, 60, 0.0, 1.0 / 60.0, 10));
+    }
+
+    #[test]
+    fn frames_faster_than_the_reported_rate_are_not_trusted_for_a_while() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        // The panel says 60, frames come at 120: trusted until measured, then not.
+        assert!(run(
+            &mut p,
+            &mut t,
+            60,
+            60.0,
+            1.0 / 120.0,
+            Pacing::SAMPLES - 1
+        ));
+        assert!(!run(&mut p, &mut t, 60, 60.0, 1.0 / 120.0, 1));
+        // While distrusted, frames that do come paced change nothing...
+        assert!(!run(&mut p, &mut t, 60, 60.0, 1.0 / 60.0, 300));
+        // ...until the distrust runs out.
+        t += Pacing::DISTRUST;
+        assert!(run(&mut p, &mut t, 60, 60.0, 1.0 / 60.0, 1));
+    }
+
+    #[test]
+    fn a_new_cap_starts_over() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        run(&mut p, &mut t, 60, 60.0, 1.0 / 120.0, Pacing::SAMPLES);
+        assert!(p.distrust_until.is_some());
+        assert!(run(&mut p, &mut t, 30, 30.0, 1.0 / 30.0, 1));
+    }
 }
 
 /// The main action bar's gryphons (`MainMenuBarLeftEndCap`/`RightEndCap`) are 128 units of
