@@ -8,6 +8,7 @@
 //! mouse: they are Bevy UI, not FrameXML, and hover-then-click is exactly what they need.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bevy::ecs::system::{NonSendMarker, SystemParam};
 use bevy::input::touch::{TouchInput, TouchPhase};
@@ -21,6 +22,7 @@ use inilla_core::touch::{
     HubItem, Phase, TouchEngine, TouchFrame, TouchInput as KTouch, TouchLayout,
 };
 
+use super::host_pointer::HostPointer;
 use super::mouse::VirtualMouse;
 use super::screen::HudScreen;
 use super::synth::Synth;
@@ -65,6 +67,12 @@ pub(crate) struct HudActions {
     pub(crate) radial_pick: Option<usize>,
 }
 
+/// Vanillish: a hardware mouse or keyboard (DeX, Bluetooth) has been used since the last touch.
+/// The touch pass decides it once a frame ([`process`], the one place that sees both the touches
+/// and the host's devices), and [`hud_visible`] reads it for every caller (the drawing, the edge
+/// exclusions), where a controller in use is passed in as `pad_active`. Never set off Android.
+static HOST_INPUT_IN_USE: AtomicBool = AtomicBool::new(false);
+
 /// Is the touch HUD showing its elements this frame?
 pub(crate) fn hud_visible(
     state: &Inilla,
@@ -77,6 +85,7 @@ pub(crate) fn hud_visible(
         && *client == ClientState::InWorld
         && !overlay.blocks_game()
         && !(pad_active && state.settings.hide_touch_with_controller)
+        && !(HOST_INPUT_IN_USE.load(Ordering::Relaxed) && state.settings.hide_touch_with_mouse)
 }
 
 pub(crate) struct TouchPlugin;
@@ -85,7 +94,12 @@ impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchState>()
             .init_resource::<HudActions>()
-            .add_systems(PreUpdate, process.in_set(InputProducers))
+            .add_systems(
+                PreUpdate,
+                process
+                    .in_set(InputProducers)
+                    .after(super::host_pointer::drain),
+            )
             .add_systems(OnExit(ClientState::InWorld), reset);
         if super::touch_device() {
             // Every touch reaches the game once — as iNilla's mouse. Bevy UI's focus system (the
@@ -125,6 +139,8 @@ struct Env<'w, 's> {
     client: Res<'w, State<ClientState>>,
     overlay: Res<'w, Overlay>,
     pad: Res<'w, super::pad::PadHud>,
+    /// Vanillish: a hardware mouse, keyboard or pen (Android).
+    host: ResMut<'w, HostPointer>,
 }
 
 /// Whether a jump now would cost the player something: seated (a jump stands them up, ending a
@@ -170,6 +186,7 @@ fn process(
         client,
         overlay,
         pad,
+        mut host,
     } = env;
     if !super::touch_device() {
         touches.clear();
@@ -260,6 +277,11 @@ fn process(
             &ui_hit,
         );
     }
+    // Vanillish: a pen above the screen is the mouse without a button. After this frame's
+    // touches: a pen that touched down outranks its hover.
+    if let Some(at) = host.take_pen() {
+        engine.hover(at, layout, &screen, now);
+    }
     let frame = engine.frame(layout, now);
 
     synth.movement(&frame.movement);
@@ -310,4 +332,7 @@ fn process(
         _ => {}
     }
     state.frame = frame;
+    // Vanillish: the HUD yields to a hardware mouse or keyboard as to a controller, and comes back
+    // with the next touch.
+    HOST_INPUT_IN_USE.store(host.last_used() > state.last_touch, Ordering::Relaxed);
 }

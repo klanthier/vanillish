@@ -28,6 +28,10 @@ pub(crate) struct VirtualMouse {
     pub(crate) pos: Option<Vec2>,
     pub(crate) left: bool,
     pub(crate) right: bool,
+    /// Vanillish: a hardware mouse's other three (DeX, Bluetooth: `host_pointer`).
+    middle: bool,
+    back: bool,
+    forward: bool,
 }
 
 impl VirtualMouse {
@@ -42,12 +46,36 @@ impl VirtualMouse {
     /// Release anything held and forget the queue (focus lost, HUD off).
     pub(crate) fn reset(&mut self) {
         self.queue.clear();
-        if self.left {
-            self.queue.push_back(MouseOp::Up(KButton::Left));
+        for b in KButton::ALL {
+            if self.held(b) {
+                self.queue.push_back(MouseOp::Up(b));
+            }
         }
-        if self.right {
-            self.queue.push_back(MouseOp::Up(KButton::Right));
+    }
+
+    fn held(&self, b: KButton) -> bool {
+        match b {
+            KButton::Left => self.left,
+            KButton::Right => self.right,
+            KButton::Middle => self.middle,
+            KButton::Back => self.back,
+            KButton::Forward => self.forward,
         }
+    }
+
+    fn held_mut(&mut self, b: KButton) -> &mut bool {
+        match b {
+            KButton::Left => &mut self.left,
+            KButton::Right => &mut self.right,
+            KButton::Middle => &mut self.middle,
+            KButton::Back => &mut self.back,
+            KButton::Forward => &mut self.forward,
+        }
+    }
+
+    /// The first button held, if any.
+    fn any_held(&self) -> Option<KButton> {
+        KButton::ALL.into_iter().find(|&b| self.held(b))
     }
 }
 
@@ -55,6 +83,9 @@ fn button(b: KButton) -> MouseButton {
     match b {
         KButton::Left => MouseButton::Left,
         KButton::Right => MouseButton::Right,
+        KButton::Middle => MouseButton::Middle,
+        KButton::Back => MouseButton::Back,
+        KButton::Forward => MouseButton::Forward,
     }
 }
 
@@ -102,10 +133,7 @@ pub(crate) fn apply(
                     break;
                 }
                 let down = matches!(op, MouseOp::Down(_));
-                let held = match b {
-                    KButton::Left => &mut vm.left,
-                    KButton::Right => &mut vm.right,
-                };
+                let held = vm.held_mut(b);
                 if *held != down {
                     *held = down;
                     buttons.write(MouseButtonInput {
@@ -121,7 +149,7 @@ pub(crate) fn apply(
                 }
             }
             MouseOp::Motion(d) => {
-                if clicked_this_frame && !(vm.left || vm.right) {
+                if clicked_this_frame && vm.any_held().is_none() {
                     break;
                 }
                 motion.write(MouseMotion {
@@ -137,16 +165,12 @@ pub(crate) fn apply(
                 });
             }
             MouseOp::Leave => {
-                if vm.left || vm.right || clicked_this_frame {
+                let held = vm.any_held();
+                if held.is_some() || clicked_this_frame {
                     // Never leave with a button held: let the release land first.
-                    if vm.left || vm.right {
+                    if let Some(pending_up) = held {
                         vm.queue.pop_front();
                         vm.queue.push_front(MouseOp::Leave);
-                        let pending_up = if vm.left {
-                            KButton::Left
-                        } else {
-                            KButton::Right
-                        };
                         vm.queue.push_front(MouseOp::Up(pending_up));
                     }
                     break;

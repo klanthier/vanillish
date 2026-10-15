@@ -18,7 +18,9 @@
 //!
 //! Input from the HUD, the controller and the console reaches the game through two seams only:
 //! [`synth`] (binding commands by name, into `BindingsState`) and [`mouse`] (an ordinary mouse,
-//! as Bevy input messages). Neither can do anything a keyboard and mouse could not.
+//! as Bevy input messages). Neither can do anything a keyboard and mouse could not. Vanillish:
+//! Android's hardware mouse comes through [`mouse`] too ([`host_pointer`]), since winit has none
+//! there.
 
 /// Vanillish: the Android host's Bevy side (soft keyboard, Back, the native window, lifecycle).
 mod android;
@@ -26,6 +28,8 @@ pub(crate) mod boot;
 mod console;
 mod data;
 mod hints;
+/// Vanillish: a hardware mouse (DeX, Bluetooth) and a hovering pen, into the virtual mouse.
+mod host_pointer;
 mod hud;
 mod icons;
 mod mouse;
@@ -117,6 +121,7 @@ impl Plugin for InillaPlugin {
             console::ConsolePlugin,
             android::AndroidPlugin,
             screen::ScreenPlugin,
+            host_pointer::HostPointerPlugin,
         ));
 
         // The seams. The mouse lands before Bevy's input systems so every reader sees it as a

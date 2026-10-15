@@ -532,4 +532,29 @@ public final class Bridge {
             }
         });
     }
+
+    /**
+     * Pointer capture for a hardware mouse (benilla's mouse-look grabs the cursor): its raw motion
+     * comes to Rust and the pointer hides. Asked for again whenever the window regains focus,
+     * until it is turned off ({@link PointerBridge#applyCapture}).
+     */
+    public static void setPointerCapture(boolean on) {
+        PointerBridge.wantCapture = on;
+        onUi(PointerBridge::applyCapture);
+    }
+
+    /**
+     * The mouse pointer's image: ARGB_8888 colours row by row from the top, with the hotspot in
+     * its pixels (the 1.12 cursors). Null: the system's arrow.
+     */
+    public static void setPointerIcon(int[] argb, int w, int h, int hotX, int hotY) {
+        PointerBridge.setIcon(argb, w, h, hotX, hotY);
+        onUi(PointerBridge::applyIcon);
+    }
+
+    /** Show or hide the mouse pointer (hidden: the TYPE_NULL icon). */
+    public static void setPointerVisible(boolean visible) {
+        PointerBridge.setVisible(visible);
+        onUi(PointerBridge::applyIcon);
+    }
 }

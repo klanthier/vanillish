@@ -134,6 +134,9 @@ pub struct InillaSettings {
     /// notification shows it), so a fold to the lock screen or a quick look at another app does
     /// not drop the session.
     pub stay_connected: bool,
+    /// Vanillish: hide the touch HUD while a hardware mouse or keyboard is being used (Samsung
+    /// DeX, Bluetooth); the next touch brings it back.
+    pub hide_touch_with_mouse: bool,
 }
 
 impl Default for InillaSettings {
@@ -158,6 +161,7 @@ impl Default for InillaSettings {
             tabletop_split: true,
             inner_any_orientation: false,
             stay_connected: true,
+            hide_touch_with_mouse: true,
         }
     }
 }
@@ -208,5 +212,7 @@ mod tests {
         let partial: InillaSettings = toml::from_str("render_scale = 0.5").unwrap();
         assert_eq!(partial.render_scale, 0.5);
         assert!(partial.keep_screen_on);
+        // Vanillish: a settings file from before the host mouse steps the HUD aside too.
+        assert!(partial.hide_touch_with_mouse);
     }
 }
