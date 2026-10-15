@@ -79,6 +79,7 @@ impl SyntheticKeys {
 
     /// Vanillish: an Enter or an Escape waits to go down — the line being typed is about to be sent
     /// or dropped, so the word the Android keyboard is still composing must reach the box first.
+    #[cfg(target_os = "android")]
     pub(crate) fn ends_line(&self) -> bool {
         self.queued
             .iter()

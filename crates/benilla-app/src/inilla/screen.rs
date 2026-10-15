@@ -371,10 +371,13 @@ mod tests {
     /// top left; a rect past the window is cut to it.
     #[test]
     fn the_world_viewport_is_the_window_above_the_hinge_in_pixels() {
-        let mut w = Window::default();
         // A Galaxy Z Fold8 Ultra's inner screen: 2504 × 2256 px at density 2.625.
-        w.resolution = bevy::window::WindowResolution::new(2504, 2256);
-        w.resolution.set_scale_factor(2.625);
+        let mut resolution = bevy::window::WindowResolution::new(2504, 2256);
+        resolution.set_scale_factor(2.625);
+        let w = Window {
+            resolution,
+            ..default()
+        };
         let hinge = w.height() / 2.0;
         let r = world_viewport(&w, hinge);
         assert_eq!(r.min, UVec2::ZERO);
