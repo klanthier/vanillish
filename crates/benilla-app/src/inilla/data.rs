@@ -98,6 +98,10 @@ pub(crate) struct DataState {
     /// Vanillish: a picked folder whose copy has not finished, `(tree, label)` — asked of the
     /// platform at start and after each folder import, not every frame.
     pub(crate) pending_folder: Option<(String, String)>,
+    /// Vanillish: the archives as the app was built (`status.present` then), and whether a job
+    /// has put one in place since — what [`Self::needs_restart`] compares against.
+    boot_present: Vec<(String, u64)>,
+    replaced: bool,
     job: Option<Job>,
 }
 
@@ -111,9 +115,13 @@ impl DataState {
         })
     }
 
-    /// Data is complete now but benilla did not have it at boot: a relaunch is needed.
+    /// Data is complete now but benilla does not have it as it is: a relaunch is needed. It did
+    /// not have it at boot, or (Vanillish) an archive was added, removed or replaced since:
+    /// benilla holds every archive's tables from boot and reopens the files by path, so reads
+    /// from a replaced one would take the old offsets into the new file.
     pub(crate) fn needs_restart(&self) -> bool {
-        self.status.complete() && !self.ready_at_boot
+        self.status.complete()
+            && (!self.ready_at_boot || self.replaced || self.status.present != self.boot_present)
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -130,6 +138,12 @@ impl DataState {
             + 'static,
     ) {
         if self.job.is_some() {
+            return;
+        }
+        // Vanillish: without shared storage the folders are a private stand-in, which the next
+        // launch does not use: nothing is written there (`paths::storage_unavailable`).
+        if label != "manifest" && inilla_platform::paths::storage_unavailable() {
+            self.message = Some((false, words::STORAGE_UNAVAILABLE.into()));
             return;
         }
         let progress = Arc::new(Mutex::new(Progress::default()));
@@ -302,7 +316,20 @@ impl DataState {
                     truncated: listing.truncated,
                 });
             };
-            let need = ki::bytes_to_copy(&c.files, &dir);
+            // Not a folder something still writes into (a copy, a torrent client filling in a
+            // file it sized first): the header check cannot tell such a file from a whole one.
+            // The grant stays, so Resume tries again.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            if !ki::listing_settled(&c.files, now_ms, SETTLE) {
+                return Err(format!(
+                    "{label} changed in the last few seconds — a copy or download may still be \
+                     running. Let it finish, then try again."
+                ));
+            }
+            let open = PickedOpen { tree: tree.clone() };
+            let need = ki::bytes_to_copy(&c.files, &dir, &ki::Open::origin(&open));
             if let Some(free) = free_space(&dir) {
                 if free < need + SPARE {
                     return Err(format!(
@@ -318,7 +345,6 @@ impl DataState {
                     *g = p.clone();
                 }
             };
-            let open = PickedOpen { tree: tree.clone() };
             let done = ki::copy_in(&open, &c.files, &dir, report, &keep)?;
             picker::forget(&tree);
             Ok(Outcome::Copied {
@@ -354,6 +380,10 @@ impl ki::Open for PickedOpen {
     fn open(&self, id: &str, offset: u64) -> Result<(Box<dyn Read + Send>, u64), String> {
         let file = picker::open(&self.tree, id)?;
         Ok(ki::from_offset(file, offset))
+    }
+
+    fn origin(&self) -> String {
+        self.tree.clone()
     }
 }
 
@@ -447,6 +477,7 @@ impl Plugin for DataPlugin {
         let ready = status.complete() && std::env::var_os("WOW_DATA").is_none_or(|v| !v.is_empty());
         app.insert_resource(DataState {
             dir,
+            boot_present: status.present.clone(),
             status,
             ready_at_boot: ready,
             manifest: None,
@@ -456,6 +487,7 @@ impl Plugin for DataPlugin {
             base: None,
             message: None,
             pending_folder: picker::pending(),
+            replaced: false,
             job: None,
         })
         .add_systems(Update, (poll_job, poll_picker));
@@ -481,6 +513,18 @@ fn poll_picker(mut state: ResMut<DataState>) {
     }
 }
 
+/// Vanillish: a finished job put archives in place: imported or copied some. A download, or a job
+/// that stopped part-way (earlier archives may be in by then), shows in the archives' list itself
+/// ([`DataState::needs_restart`] compares it with the boot's); a copy also replaces an archive of
+/// the same size when its source is newer, which the list cannot show.
+fn puts_archives_in_place(result: &Result<Outcome, String>) -> bool {
+    match result {
+        Ok(Outcome::Imported(n)) => *n > 0,
+        Ok(Outcome::Copied { done, .. }) => done.copied > 0,
+        _ => false,
+    }
+}
+
 fn poll_job(mut state: ResMut<DataState>) {
     let done = state
         .job
@@ -500,6 +544,9 @@ fn poll_job(mut state: ResMut<DataState>) {
     state.refresh();
     if job.label == "folder import" {
         state.pending_folder = picker::pending();
+    }
+    if puts_archives_in_place(&result) {
+        state.replaced = true;
     }
     state.message = Some(match result {
         Ok(Outcome::Manifest(offer)) => {
@@ -616,5 +663,71 @@ fn sync_text(r: &SyncReport) -> String {
         "This server offers no addons.".to_string()
     } else {
         parts.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(ready_at_boot: bool, present: Vec<(String, u64)>) -> DataState {
+        DataState {
+            dir: None,
+            boot_present: present.clone(),
+            status: DataStatus {
+                present,
+                ..Default::default()
+            },
+            ready_at_boot,
+            manifest: None,
+            addons: None,
+            locales: None,
+            locale: None,
+            base: None,
+            message: None,
+            pending_folder: None,
+            replaced: false,
+            job: None,
+        }
+    }
+
+    /// Vanillish: benilla holds the boot's archive tables, so data that was complete at boot
+    /// needs a relaunch once an archive is added, removed or replaced.
+    #[test]
+    fn an_archive_changed_since_boot_needs_a_relaunch() {
+        let whole: Vec<(String, u64)> = kd::REQUIRED.iter().map(|n| (n.to_string(), 10)).collect();
+        let mut s = state(true, whole.clone());
+        assert!(!s.needs_restart());
+        // Replaced at another size, or one more.
+        s.status.present[0].1 = 11;
+        assert!(s.needs_restart());
+        s.status.present = whole.clone();
+        s.status.present.push(("patch-3.MPQ".into(), 5));
+        assert!(s.needs_restart());
+        // Replaced at the same size (a copy of a newer source): the job says so.
+        s.status.present = whole.clone();
+        assert!(!s.needs_restart());
+        let copied = |n| {
+            Ok(Outcome::Copied {
+                label: "WoW".into(),
+                done: ki::Copied {
+                    copied: n,
+                    ..Default::default()
+                },
+                original_bytes: 0,
+                missing: Vec::new(),
+            })
+        };
+        assert!(!puts_archives_in_place(&copied(0)));
+        assert!(puts_archives_in_place(&copied(1)));
+        assert!(puts_archives_in_place(&Ok(Outcome::Imported(2))));
+        assert!(!puts_archives_in_place(&Err("paused".into())));
+        s.replaced = true;
+        assert!(s.needs_restart());
+        // Not complete at boot: complete now needs one, as before; incomplete never.
+        let mut s = state(false, whole.clone());
+        assert!(s.needs_restart());
+        s.status.present.clear();
+        assert!(!s.needs_restart());
     }
 }

@@ -31,14 +31,21 @@ impl LastInput {
     pub(crate) fn stamp_present(&mut self, now: Duration) {
         self.0 = now;
     }
+
+    /// Vanillish: the stamp, for the camp the write thread runs while no update does
+    /// (`inilla::android::lifecycle`, `net::io::off_screen_step`).
+    pub(crate) fn at(&self) -> Duration {
+        self.0
+    }
 }
 
 /// 5 minutes: `0x482ecd lea ecx,[eax-0x493e0]`, `0x493e0` = 300 000 ms.
 const AUTO_AFK_AFTER: Duration = Duration::from_millis(300_000);
 
 /// 30 minutes from the last input, not 5 + 30: `0x482ede add eax,0xffe488c0` subtracts from the
-/// raw elapsed, since the 5-minute subtraction wrote `ecx`.
-const AUTO_LOGOUT_AFTER: Duration = Duration::from_millis(1_800_000);
+/// raw elapsed, since the 5-minute subtraction wrote `ecx`. Vanillish: `pub(crate)`, the write
+/// thread's off-screen camp uses it.
+pub(crate) const AUTO_LOGOUT_AFTER: Duration = Duration::from_millis(1_800_000);
 
 /// Stamp the clock on raw input, as the reference's seven writers of `[0xcf0bc8]` do: key down,
 /// first press only (`0x765f34`), key up (`0x765fec`), button down (`0x7662fb`) and up

@@ -300,8 +300,10 @@ pub fn game_mode() -> GameMode {
     }
 }
 
-/// The system Back presses (key or gesture) since the last call — Android's stand-in for the
-/// Escape key iOS has none of. Always 0 where there is no such thing.
+/// The system Back presses the Activity's back callback caught since the last call — Android's
+/// stand-in for the Escape key iOS has none of. A safety net: with predictive back off (the
+/// manifest), the key and the gesture reach the game as winit's key, and GameActivity takes it
+/// before Android would fall back to the callback. Always 0 where there is no such thing.
 pub fn take_back_presses() -> u32 {
     #[cfg(target_os = "android")]
     {

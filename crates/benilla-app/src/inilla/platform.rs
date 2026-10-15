@@ -79,6 +79,7 @@ impl SyntheticKeys {
 
     /// Vanillish: an Enter or an Escape waits to go down — the line being typed is about to be sent
     /// or dropped, so the word the Android keyboard is still composing must reach the box first.
+    #[cfg(target_os = "android")]
     pub(crate) fn ends_line(&self) -> bool {
         self.queued
             .iter()
@@ -693,17 +694,129 @@ fn clear_the_island(
     } else {
         format!("{left:.1}:{right:.1}:{top:.1}:{bottom:.1}:{scale:.2}")
     };
-    crate::ui_script::run_or_warn(
-        &script,
-        &format!(
-            "if (INILLA_INSET or \"0\") ~= \"{key}\" and UIParent then \
-               UIParent:ClearAllPoints() \
-               UIParent:SetPoint(\"TOPLEFT\", nil, \"TOPLEFT\", {left:.1}, {t:.1}) \
-               UIParent:SetPoint(\"BOTTOMRIGHT\", nil, \"BOTTOMRIGHT\", {r:.1}, {bottom:.1}) \
-               INILLA_INSET = \"{key}\" \
-             end",
-            t = -top,
-            r = -right,
-        ),
-    );
+    crate::ui_script::run_or_warn(&script, &island_chunk(&key, left, top, right, bottom));
+}
+
+/// The Lua that seats `UIParent` inside the insets (`UIParent`'s units; `key` names them, `"0"`
+/// none), once per change.
+///
+/// Vanillish: with an inset, the stock open-bag stack measures `UIParent` rather than the screen.
+/// `updateContainerFrameAnchors` starts a new column of bags once the stack passes
+/// `GetScreenHeight()`, which answers the screen root's height, not `UIParent`'s; on a tabletop
+/// `UIParent` is half of it, and a stack as tall as the whole screen ran off its top. Only that
+/// function is wrapped — the rest of the interface (the fullscreen quads, the world map) needs the
+/// root's size — and only while an inset is applied; re-wrapped after a reload, and run again
+/// after a re-anchor so open bags wrap again. `GetTop`/`GetBottom` answer in `UIParent`'s units;
+/// `GetHeight` would not (it answers the root units its rect spans).
+fn island_chunk(key: &str, left: f32, top: f32, right: f32, bottom: f32) -> String {
+    format!(
+        "if updateContainerFrameAnchors and updateContainerFrameAnchors ~= INILLA_BAG_ANCHORS then \
+           local stock = updateContainerFrameAnchors \
+           INILLA_BAG_ANCHORS = function() \
+             if (INILLA_INSET or \"0\") == \"0\" or not UIParent or not UIParent:GetTop() then \
+               return stock() \
+             end \
+             local screen = GetScreenHeight \
+             GetScreenHeight = function() return UIParent:GetTop() - UIParent:GetBottom() end \
+             local ok, err = pcall(stock) \
+             GetScreenHeight = screen \
+             if not ok then error(err, 0) end \
+           end \
+           updateContainerFrameAnchors = INILLA_BAG_ANCHORS \
+         end \
+         if (INILLA_INSET or \"0\") ~= \"{key}\" and UIParent then \
+           UIParent:ClearAllPoints() \
+           UIParent:SetPoint(\"TOPLEFT\", nil, \"TOPLEFT\", {left:.1}, {t:.1}) \
+           UIParent:SetPoint(\"BOTTOMRIGHT\", nil, \"BOTTOMRIGHT\", {r:.1}, {bottom:.1}) \
+           INILLA_INSET = \"{key}\" \
+           if updateContainerFrameAnchors then updateContainerFrameAnchors() end \
+         end",
+        t = -top,
+        r = -right,
+    )
+}
+
+/// Vanillish: the tabletop's inset and the stock open-bag stack.
+#[cfg(test)]
+mod island_tests {
+    use super::island_chunk;
+    use benilla_ui::script::UiScript;
+
+    /// The stock column wrap's shape (1.12 `updateContainerFrameAnchors`): a new column once the
+    /// stack passes `GetScreenHeight() - CONTAINER_OFFSET_Y`, each bag on the one below.
+    const BAGS: &str = r#"
+        CreateFrame("Frame", "UIParent") UIParent:SetScale(0.64)
+        UIParent:SetPoint("TOPLEFT", nil, "TOPLEFT", 0, 0)
+        UIParent:SetPoint("BOTTOMRIGHT", nil, "BOTTOMRIGHT", 0, 0)
+        BAGS = {}
+        for i = 1, 5 do
+          local f = CreateFrame("Frame", "ContainerFrame" .. i, UIParent)
+          f:SetWidth(192) f:SetHeight(225) BAGS[i] = f
+        end
+        function updateContainerFrameAnchors()
+          local free = GetScreenHeight() - 70
+          local column = 0
+          for i, frame in ipairs(BAGS) do
+            frame:ClearAllPoints()
+            if i == 1 then
+              frame:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", 0, 70)
+            elseif free < frame:GetHeight() then
+              column = column + 1
+              free = GetScreenHeight() - 70
+              frame:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -column * 192, 70)
+            else
+              frame:SetPoint("BOTTOMRIGHT", BAGS[i - 1], "TOPRIGHT", 0, 0)
+            end
+            free = free - frame:GetHeight() - 3
+          end
+        end
+    "#;
+
+    /// The highest bag's top over `UIParent`'s, in `UIParent`'s units.
+    const OVERSHOOT: &str = r#"
+        local top = 0
+        for _, f in ipairs(BAGS) do top = math.max(top, f:GetTop()) end
+        return top - UIParent:GetTop()
+    "#;
+
+    #[test]
+    fn on_a_tabletop_open_bags_wrap_within_uiparent() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(1365.0, 768.0);
+        s.run(BAGS).unwrap();
+        // Uninset, the stock stack fits the whole screen (1200 units at 0.64) in one column.
+        s.run("updateContainerFrameAnchors()").unwrap();
+        assert!(s.eval::<f32>(OVERSHOOT).unwrap() <= 0.01);
+        // The tabletop: UIParent is the half above the hinge, 600 of its units tall.
+        s.run(&island_chunk("t", 0.0, 0.0, 0.0, 600.0)).unwrap();
+        assert_eq!(
+            s.eval::<f32>("return UIParent:GetTop() - UIParent:GetBottom()")
+                .unwrap()
+                .round(),
+            600.0
+        );
+        let over = s.eval::<f32>(OVERSHOOT).unwrap();
+        assert!(
+            over <= 0.01,
+            "the open bags rose {over} past UIParent's top"
+        );
+        assert!(
+            s.eval::<bool>("return BAGS[3]:GetRight() < BAGS[1]:GetRight()")
+                .unwrap(),
+            "a second column"
+        );
+        // Opening a bag later (the stock calls the global) wraps the same; the rest of the
+        // interface still reads the root's size.
+        s.run("updateContainerFrameAnchors()").unwrap();
+        assert!(s.eval::<f32>(OVERSHOOT).unwrap() <= 0.01);
+        assert_eq!(
+            s.eval::<f32>("return GetScreenHeight()").unwrap().round(),
+            1200.0
+        );
+        // Run again (every half second), it wraps nothing twice.
+        s.run(&island_chunk("t", 0.0, 0.0, 0.0, 600.0)).unwrap();
+        assert!(s
+            .eval::<bool>("return updateContainerFrameAnchors == INILLA_BAG_ANCHORS")
+            .unwrap());
+    }
 }

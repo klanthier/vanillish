@@ -42,6 +42,10 @@ pub(super) fn update_pick_occlusion(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
+    // Vanillish: off the drawn world (a tabletop's deck) nothing is traced.
+    if !benilla_world::interact::cursor_over_view(camera, cursor) {
+        return;
+    }
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };
@@ -259,6 +263,11 @@ pub(super) fn update_hover(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
+    // Vanillish: off the drawn world (a tabletop's deck) no unit is under the cursor.
+    if !benilla_world::interact::cursor_over_view(camera, cursor) {
+        *last_pick = None;
+        return;
+    }
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };
@@ -607,7 +616,8 @@ pub(super) fn update_hovered_object(
     let Some(cursor) = window.cursor_position().or(probe_aim) else {
         return;
     };
-    if pickable.is_empty() {
+    // Vanillish: nor an object off the drawn world (a tabletop's deck).
+    if pickable.is_empty() || !benilla_world::interact::cursor_over_view(camera, cursor) {
         *last_pick = None;
         return;
     }

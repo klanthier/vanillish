@@ -882,6 +882,24 @@ mod tests {
             .contains(&MouseOp::MoveTo([100.0, 100.0])));
     }
 
+    /// The deck below the hinge has no world under it: a pen hovering there moves no cursor (the
+    /// stock `WorldFrame` would pick through it what is not drawn), and one coming down from the
+    /// world takes the cursor away.
+    #[test]
+    fn a_pen_over_the_deck_points_at_nothing() {
+        let l = tabletop_layout();
+        let s = tabletop();
+        let mut e = TouchEngine::default();
+        let up = [INNER[0] / 2.0, 200.0];
+        e.hover(Some(up), &l, &s, 0.0);
+        assert_eq!(e.frame(&l, 0.0).mouse, vec![MouseOp::MoveTo(up)]);
+        let p = [INNER[0] / 2.0, s.deck.unwrap().center()[1]];
+        e.hover(Some(p), &l, &s, 0.1);
+        assert_eq!(e.frame(&l, 0.1).mouse, vec![MouseOp::Leave]);
+        e.hover(Some([p[0], p[1] + 10.0]), &l, &s, 0.2);
+        assert!(e.frame(&l, 0.2).mouse.is_empty());
+    }
+
     #[test]
     fn the_interface_fits_above_the_hinge() {
         let st = InillaSettings::default();

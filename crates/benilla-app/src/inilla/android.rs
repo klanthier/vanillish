@@ -10,8 +10,9 @@
 //!   first, the rest is the game's Escape.
 //! - **the native window's size** (`host::follow_native_window`): winit loses a resize that lands
 //!   while the Activity is paused, and Bevy keeps a stale size across a resume.
-//! - **the lifecycle** ([`lifecycle`], every platform): what must survive is saved when the
-//!   surface goes, held keys are let go, the sound is muted.
+//! - **the lifecycle** ([`lifecycle`]): what must survive is saved when the surface goes (on every
+//!   platform); on Android held keys are let go and the sound is muted too — iOS leaves the screen
+//!   for Control Center or an alert as well, where its audio plays on.
 //! - **the frame rate** ([`vote_frame_rate`], [`follow_game_mode`]): the display is asked for the
 //!   preset's rate; Game Dashboard's Performance and Battery modes pick the preset.
 //! - **staying connected** ([`session_service`]): a foreground service keeps the process, and the
@@ -53,7 +54,12 @@ impl Plugin for AndroidPlugin {
             .init_resource::<FrameRateVote>()
             .add_systems(
                 PreUpdate,
-                (lifecycle, super::synth::release_all.run_if(leaving_screen)),
+                (
+                    lifecycle,
+                    // Android's alone: iOS leaves the screen for Control Center or an alert too.
+                    super::synth::release_all
+                        .run_if((|| cfg!(target_os = "android")).and(leaving_screen)),
+                ),
             )
             .add_systems(Update, (vote_frame_rate, follow_game_mode))
             .add_systems(Last, (back_to_escape, session_service));
@@ -84,30 +90,58 @@ fn leaving_screen(mut events: MessageReader<AppLifecycle>) -> bool {
 /// silences the main track and leaves the mixer and the stream as they are, rather than a new
 /// pause in the output layer.
 ///
+/// Only the saves run everywhere: the mute and the key release are Android's. iOS sends
+/// `Suspended` when the app merely resigns active (Control Center, an alert, an incoming call, the
+/// app switcher), where its audio plays on and iNilla never silenced it nor let go of a latched key;
+/// iOS suspends a backgrounded process itself.
+///
 /// Coming back: the sound as it was, and the frame-rate vote again for the new surface.
+///
+/// On Android the write thread is also told when the player's last input was
+/// (`net::io::set_off_screen`): a staying-connected session lives on with no update, so the idle
+/// handler's thirty-minute camp is the write thread's to send until the app is back.
 fn lifecycle(
     mut events: MessageReader<AppLifecycle>,
     state: Res<Inilla>,
     mut sound: Option<ResMut<crate::sound::SoundConfig>>,
     mut vote: ResMut<FrameRateVote>,
     mut muted_before: Local<Option<bool>>,
+    time: Res<Time<bevy::time::Real>>,
+    last_input: Option<Res<crate::ui_chat::idle::LastInput>>,
 ) {
     for event in events.read() {
         match event {
             AppLifecycle::WillSuspend | AppLifecycle::Suspended => {
+                if cfg!(target_os = "android") {
+                    // The last input on the wall clock, which runs through deep sleep (the
+                    // monotonic one of `Time` does not).
+                    let idle = last_input.as_ref().map_or(std::time::Duration::ZERO, |l| {
+                        time.elapsed().saturating_sub(l.at())
+                    });
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let at = now.saturating_sub(idle).as_millis() as u64;
+                    crate::net::io::set_off_screen(Some(at));
+                }
                 store::save_settings(&state.settings);
                 store::save_launcher(&state.launcher);
                 store::save_layout(&state.layout);
                 store::save_pad(&state.pad);
-                if let Some(sound) = sound.as_mut() {
-                    if muted_before.is_none() {
-                        *muted_before = Some(sound.muted);
-                        sound.muted = true;
+                if cfg!(target_os = "android") {
+                    if let Some(sound) = sound.as_mut() {
+                        if muted_before.is_none() {
+                            *muted_before = Some(sound.muted);
+                            sound.muted = true;
+                        }
                     }
+                    info!("inilla: off the screen; settings saved, sound muted");
+                } else {
+                    info!("inilla: off the screen; settings saved");
                 }
-                info!("inilla: off the screen; settings saved, sound muted");
             }
             AppLifecycle::WillResume | AppLifecycle::Running => {
+                crate::net::io::set_off_screen(None);
                 if let (Some(sound), Some(muted)) = (sound.as_mut(), muted_before.take()) {
                     sound.muted = muted;
                     info!("inilla: back on the screen");
@@ -194,7 +228,11 @@ fn back_to_escape(mut back: ResMut<BackPresses>, mut keys: ResMut<SyntheticKeys>
 /// backgrounded app, and the server drops a character whose client stops answering. No frame runs
 /// meanwhile (Bevy stops updating while the surface is away), but the network thread keeps the
 /// connection, and what arrives waits for the return. Off when the player leaves the world, turns
-/// the setting off or quits.
+/// the setting off or quits — and, as no update runs to say so, the network thread stops it itself
+/// when the session ends off the screen. That is at most thirty minutes after the last input: the
+/// idle handler's camp, which the write thread sends in its place (`net::io::off_screen_step`),
+/// and the connection shut a few minutes later if the server refused it. So what waits for the
+/// return is bounded too.
 fn session_service(
     state: Res<Inilla>,
     client: Res<State<ClientState>>,
@@ -401,9 +439,13 @@ mod buffer {
 /// winit's key messages, sorted before anything reads them (Android) — plain Bevy apart from the
 /// Activity's Back count (a no-op off Android), so it is tested on the host.
 ///
-/// - **Back** (the key, Android 12–15 without predictive back) is counted into [`BackPresses`] and
-///   removed: to the game it is an unknown key. The callback's presses (the gesture, Android 16)
-///   come from the Activity and are added here too.
+/// - **Back** (a keyboard's key, and the gesture, which Android hands the window as the key) is
+///   counted into [`BackPresses`] and removed: to the game it is an unknown key. The manifest opts
+///   the Activity out of predictive back, so Android 16 and later send it here as 12–15 do, rather
+///   than to a back callback ahead of every key handler — where a pad's Back (`GamepadBridge`, its
+///   Options) and a mouse's (`PointerBridge`, dropped) would be the game's Escape as well. The
+///   Activity's back callback (`Bridge.onBack`, added here too) is only a safety net: GameActivity
+///   takes the key, so Android never falls back to it.
 /// - **Enter** from a hardware keyboard has `"\n"` for its text and its logical key; it becomes
 ///   the named key (iOS's Return gets the same rewrite in `platform`).
 /// - A **character key's release** is noted (`WinitKeys::typed`) for the IME bridge: while the

@@ -21,7 +21,11 @@ import android.util.Log;
  * a fold to the lock screen ends the session. The game runs it while the player is in the world
  * and the setting ({@code stay_connected}) is on (Rust: {@code device::set_session_service}, via
  * {@link Bridge#sessionService}). Nothing runs in the service itself: the world stops updating
- * while the game is off the screen, but the game's network thread keeps the connection.
+ * while the game is off the screen, but the game's network thread keeps the connection, and what
+ * arrives waits for the return. Not for ever: thirty minutes after the player's last input the
+ * network thread asks the server for the logout the game's idle timer would have asked for, shuts
+ * the connection if the character is still in the world a few minutes later, and stops this
+ * service itself whenever the session ends while the game is away.
  *
  * <p>The type is {@code specialUse} (the manifest says why); the notification is the one Android
  * requires, on a quiet channel, and tapping it returns to the game. If the player declined

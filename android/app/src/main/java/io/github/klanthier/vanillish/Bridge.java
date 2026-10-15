@@ -22,6 +22,7 @@ import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.provider.Settings;
 import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
 import android.util.Log;
 import android.view.Display;
@@ -29,9 +30,12 @@ import android.view.Surface;
 import android.view.Window;
 import android.view.WindowManager;
 
+import java.security.Key;
 import java.security.KeyStore;
+import java.security.UnrecoverableKeyException;
 import java.util.Arrays;
 
+import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -337,14 +341,25 @@ public final class Bridge {
     private static final String KEY_ALIAS = "vanillish.secrets.v1";
     private static final byte FORMAT = 1;
 
-    private static SecretKey key(boolean create) throws Exception {
+    /**
+     * The key, or null when the Keystore has none under the alias. {@code getKey}, not
+     * {@code getEntry}: keystore2's {@code getEntry} answers null for any failure (a busy or
+     * restarting keystore too), which reads as "no key"; {@code getKey} answers null only for
+     * KEY_NOT_FOUND and throws (UnrecoverableKeyException) for the rest.
+     */
+    private static SecretKey keyOrNull() throws Exception {
         KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
         ks.load(null);
-        KeyStore.Entry e = ks.getEntry(KEY_ALIAS, null);
-        if (e instanceof KeyStore.SecretKeyEntry) {
-            return ((KeyStore.SecretKeyEntry) e).getSecretKey();
-        }
-        if (!create) return null;
+        Key k = ks.getKey(KEY_ALIAS, null);
+        if (k == null) return null;
+        if (k instanceof SecretKey) return (SecretKey) k;
+        throw new UnrecoverableKeyException("not a secret key: " + k.getAlgorithm());
+    }
+
+    /** The key, made on first use; a failed lookup throws rather than make one over the alias. */
+    private static SecretKey key() throws Exception {
+        SecretKey k = keyOrNull();
+        if (k != null) return k;
         KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         kg.init(new KeyGenParameterSpec.Builder(KEY_ALIAS,
                 KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
@@ -355,36 +370,61 @@ public final class Bridge {
         return kg.generateKey();
     }
 
-    /** {@code 0x01 | iv[12] | ciphertext+tag}, or null if the Keystore refused. */
-    public static synchronized byte[] seal(byte[] plain) {
+    /** A short random wait before the one retry, as Tink does for a busy Keystore. */
+    private static void backoff() {
         try {
-            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
-            c.init(Cipher.ENCRYPT_MODE, key(true));
-            byte[] iv = c.getIV();
-            byte[] body = c.doFinal(plain);
-            byte[] out = new byte[1 + iv.length + body.length];
-            out[0] = FORMAT;
-            System.arraycopy(iv, 0, out, 1, iv.length);
-            System.arraycopy(body, 0, out, 1 + iv.length, body.length);
-            return out;
-        } catch (Exception e) {
-            Log.w(TAG, "seal: " + e);
-            return null;
+            Thread.sleep(20 + (long) (Math.random() * 80));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
-    /** The plain bytes, or null (no key any more, a damaged file). */
+    /** {@code 0x01 | iv[12] | ciphertext+tag}, or null if the Keystore refused (twice). */
+    public static synchronized byte[] seal(byte[] plain) {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+                c.init(Cipher.ENCRYPT_MODE, key());
+                byte[] iv = c.getIV();
+                byte[] body = c.doFinal(plain);
+                byte[] out = new byte[1 + iv.length + body.length];
+                out[0] = FORMAT;
+                System.arraycopy(iv, 0, out, 1, iv.length);
+                System.arraycopy(body, 0, out, 1 + iv.length, body.length);
+                return out;
+            } catch (Exception e) {
+                Log.w(TAG, "seal: " + e);
+                if (attempt > 0) return null;
+                backoff();
+            }
+        }
+    }
+
+    /**
+     * The plain bytes; null when they are gone for good (a damaged file, no key any more, a tag
+     * that does not match), which makes Rust forget the file. Anything else — a busy or restarting
+     * Keystore (keystore2's transient errors surface as IllegalBlockSizeException,
+     * UnrecoverableKeyException, ProviderException…) — is retried once, then thrown: Rust then
+     * keeps the file for the next try instead of forgetting every saved password.
+     */
     public static synchronized byte[] unseal(byte[] sealed) {
-        try {
-            if (sealed == null || sealed.length < 1 + 12 + 16 || sealed[0] != FORMAT) return null;
-            SecretKey k = key(false);
-            if (k == null) return null;
-            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
-            c.init(Cipher.DECRYPT_MODE, k, new GCMParameterSpec(128, Arrays.copyOfRange(sealed, 1, 13)));
-            return c.doFinal(sealed, 13, sealed.length - 13);
-        } catch (Exception e) {
-            Log.w(TAG, "unseal: " + e);
-            return null;
+        if (sealed == null || sealed.length < 1 + 12 + 16 || sealed[0] != FORMAT) return null;
+        for (int attempt = 0; ; attempt++) {
+            try {
+                SecretKey k = keyOrNull();
+                if (k == null) return null;
+                Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+                c.init(Cipher.DECRYPT_MODE, k, new GCMParameterSpec(128, Arrays.copyOfRange(sealed, 1, 13)));
+                return c.doFinal(sealed, 13, sealed.length - 13);
+            } catch (BadPaddingException | KeyPermanentlyInvalidatedException e) {
+                // AEADBadTagException is a BadPaddingException: the bytes are not this key's.
+                Log.w(TAG, "unseal: " + e);
+                return null;
+            } catch (Exception e) {
+                Log.w(TAG, "unseal: " + e);
+                if (attempt > 0) throw new RuntimeException("unseal failed this time", e);
+                backoff();
+            }
         }
     }
 

@@ -138,9 +138,20 @@ fn window_physical_size(window: &Window) -> UVec2 {
 /// foldable half folded on a table draws the world above the hinge and its touch controls below.
 /// The size-carrier takes the rect's size (the projection its aspect, from the target), and it
 /// starts at the window's top left, so a window cursor is a world-viewport cursor as it is:
-/// picking and the world-anchored overlays need no offset. Set by iNilla's screen tracking.
+/// picking and the overlays drawn in window px (combat text) need no offset. The overlays anchored
+/// to `WorldFrame` (nameplates, chat bubbles) flip y against the window's height, not the
+/// viewport's ([`world_frame_floor`]): `WorldFrame` still spans the whole window. Set by iNilla's
+/// screen tracking.
 #[derive(Resource, Clone, Copy, Default, PartialEq, Debug)]
 pub(crate) struct WorldViewport(pub(crate) Option<URect>);
+
+/// Vanillish: the y (logical px from the window's top) of `WorldFrame`'s bottom edge, which a
+/// `WorldFrame`-anchored overlay's seat is measured up from: the window's bottom (the frame spans
+/// the window), not the world viewport's, which on a tabletop ends at the hinge above it. The
+/// viewport's height without a window.
+pub(crate) fn world_frame_floor(window: Option<&Window>, viewport: Vec2) -> f32 {
+    window.map_or(viewport.y, Window::height)
+}
 
 /// Vanillish: the world's size in physical px — the window's, or [`WorldViewport`]'s rect.
 fn world_physical_size(window: &Window, viewport: Option<&WorldViewport>) -> UVec2 {
@@ -322,6 +333,25 @@ mod tests {
             RenderAssetUsages::RENDER_WORLD,
             "the CPU copy of a texture nothing reads is dropped once the render world has it"
         );
+    }
+
+    /// Vanillish: a tabletop's world viewport is the 430 px above the hinge of an 859 px window;
+    /// a plate seated 100 px down hangs (859 - 100) / seam root units above `WorldFrame`'s bottom,
+    /// the window's, not (430 - 100) / seam, which would put it on the deck below the hinge.
+    #[test]
+    fn world_frame_overlays_flip_against_the_window() {
+        let mut resolution = bevy::window::WindowResolution::new(954, 859);
+        resolution.set_scale_factor(1.0);
+        let window = Window {
+            resolution,
+            ..default()
+        };
+        let viewport = Vec2::new(954.0, 430.0);
+        let floor = world_frame_floor(Some(&window), viewport);
+        assert_eq!(floor, 859.0);
+        let seam = crate::ui_script::seam_scale(window.height());
+        assert_eq!((floor - 100.0) / seam, 759.0 / seam);
+        assert_eq!(world_frame_floor(None, viewport), 430.0);
     }
 
     #[test]

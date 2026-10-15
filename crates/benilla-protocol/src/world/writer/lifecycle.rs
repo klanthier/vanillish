@@ -25,6 +25,13 @@ impl WorldWriter {
         self.send(opcode::CMSG_PLAYER_LOGOUT, &[])
     }
 
+    /// Vanillish: shut the socket down both ways, so the read half's next poll fails as on a
+    /// dropped link — the end of a session the app can no longer end by a logout (off the screen
+    /// on Android, the request refused in combat).
+    pub fn shutdown(&self) -> Result<()> {
+        Ok(self.stream.shutdown(std::net::Shutdown::Both)?)
+    }
+
     /// `CMSG_LOGOUT_CANCEL`, empty: the server stops its 20 s logout timer, unroots the character
     /// and answers `SMSG_LOGOUT_CANCEL_ACK`.
     pub fn logout_cancel(&mut self) -> Result<()> {

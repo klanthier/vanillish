@@ -2,8 +2,8 @@
 # green without making an APK (vanillish-apk.yml does that, on demand and on tags):
 #
 # - every Java `native` has its Rust export (android/tools/test_jni_natives.py);
-# - rustfmt over our code; clippy on the iNilla crates (host) and on the Android entry and
-#   inilla-platform's Android half (for aarch64-linux-android);
+# - rustfmt over our code; clippy on the iNilla crates and the app (host) and on the Android entry
+#   and inilla-platform's Android half (for aarch64-linux-android);
 # - the engine-free crates' tests (touch/controller mapping, fold geometry, profiles, data);
 # - the desktop build of the app type-checks;
 # - the Android build type-checks with cargo-ndk and the pinned NDK — the analogue of
@@ -86,6 +86,12 @@ jobs:
 
       - name: Clippy (iNilla crates, host)
         run: cargo clippy -p inilla-core -p inilla-platform --all-targets -- -D warnings
+
+      - name: Clippy (the app, host)
+        # Default features, as upstream's `--workspace` gate resolves them, so our code in the app
+        # (and its tests) never turns that gate red. Not `--no-default-features`: its three unused
+        # imports are upstream's.
+        run: cargo clippy -p benilla-app --all-targets -- -D warnings
 
       - name: Desktop build type-checks
         run: cargo check -p benilla-app --no-default-features

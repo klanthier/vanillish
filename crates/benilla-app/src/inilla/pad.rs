@@ -24,9 +24,10 @@ use benilla_world::view::WorldCamera;
 use inilla_core::pad::{
     GlyphStyle, PadBinding, PadButton, PadFrame, PadMapper, PadState, Special, RADIAL_ITEMS,
 };
-use inilla_core::touch::{MouseButton as KButton, MouseOp};
+use inilla_core::touch::{MouseButton as KButton, MouseOp, Rect};
 
 use super::mouse::VirtualMouse;
+use super::screen::HudScreen;
 use super::synth::Synth;
 use super::touch::HudActions;
 use super::ui::Overlay;
@@ -142,6 +143,8 @@ fn poll(
     time: Res<Time<Real>>,
     client: Res<State<ClientState>>,
     overlay: Res<Overlay>,
+    screen: Res<HudScreen>,
+    script: Option<NonSend<UiScript>>,
 ) {
     let now = time.elapsed_secs_f64();
     let dt = time.delta_secs().min(0.1);
@@ -228,12 +231,20 @@ fn poll(
         return;
     };
     let size = Vec2::new(window.width(), window.height());
-    let center = size / 2.0;
+    // Vanillish: where the world is drawn — the window, or on a tabletop the half above the hinge.
+    // The deck below has no world under it: the stock `WorldFrame` still spans it, and a pick
+    // from there would reach what is not drawn.
+    let area = screen
+        .screen
+        .world
+        .unwrap_or_else(|| Rect::new([0.0, 0.0], [size.x, size.y]));
+    let (lo, hi) = (Vec2::from(area.min), Vec2::from(area.max));
+    let center = (lo + hi) / 2.0;
 
     // ── cursor mode ──
     if frame.cursor_mode {
         let c = (hud.cursor.unwrap_or(center) + Vec2::new(frame.cursor[0], frame.cursor[1]))
-            .clamp(Vec2::ZERO, size - Vec2::ONE);
+            .clamp(lo, (hi - Vec2::ONE).max(lo));
         if hud.cursor != Some(c) {
             vm.push(MouseOp::MoveTo([c.x, c.y]));
         }
@@ -253,7 +264,23 @@ fn poll(
         // Positive yaw turns left; a mouse turns left moving left (negative x).
         let px = Vec2::new(-look[0] / yaw_rate, -look[1] / pitch_rate);
         if !ctl.look.holding {
-            vm.push(MouseOp::MoveTo([center.x, center.y]));
+            // Vanillish: on a tabletop the window's centre is the hinge, the world's bottom edge
+            // and the main bar's: the look presses in the world, off the stock windows, as a
+            // look from the deck does.
+            let at = match screen.screen.world {
+                Some(world) => {
+                    let seam = crate::ui_script::seam_scale(size.y);
+                    let ui_hit = |p: [f32; 2]| {
+                        script.as_deref().is_some_and(|s| {
+                            s.hit_test(p[0] / seam, (size.y - p[1]) / seam)
+                                .is_some_and(|id| !s.is_world_frame(id))
+                        })
+                    };
+                    inilla_core::touch::park(world, &ui_hit)
+                }
+                None => [center.x, center.y],
+            };
+            vm.push(MouseOp::MoveTo(at));
             vm.push(MouseOp::Down(KButton::Right));
             ctl.look.holding = true;
             ctl.look.travel = 0.0;

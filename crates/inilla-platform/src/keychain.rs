@@ -78,6 +78,41 @@ pub fn delete(key: &str) {
     }
 }
 
+/// Vanillish: what one read of Android's sealed password file comes to
+/// (`crate::android::keychain`). Pure, so the decision that may forget every saved password is
+/// tested on the host.
+#[cfg(not(target_os = "ios"))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum Unsealed {
+    /// The saved passwords.
+    Map(std::collections::BTreeMap<String, String>),
+    /// Gone for good: the Keystore has no key any more (a reinstall, a restored backup), the tag
+    /// does not match, or the authenticated bytes are not the map. Nothing in the file can ever
+    /// be read again, so it is set aside and the map starts over.
+    Gone,
+    /// Failed this time only: the Keystore was busy or restarting (Java threw), or the JNI call
+    /// itself failed. That says nothing about the key or the file, so both are kept: forgetting
+    /// here would lose every password a retry a moment later would have read.
+    Failed,
+}
+
+/// Judge `Bridge.unseal`'s answer: `Ok(Some)` the plain bytes, `Ok(None)` gone for good, `Err`
+/// failed this time.
+#[cfg(not(target_os = "ios"))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn judge(unsealed: Result<Option<Vec<u8>>, ()>) -> Unsealed {
+    match unsealed {
+        Err(()) => Unsealed::Failed,
+        Ok(None) => Unsealed::Gone,
+        // The bytes passed GCM's tag: a map that does not parse now never will.
+        Ok(Some(plain)) => String::from_utf8(plain)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .map_or(Unsealed::Gone, Unsealed::Map),
+    }
+}
+
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod file {
     use std::collections::BTreeMap;
@@ -132,5 +167,25 @@ mod tests {
         delete("account:a");
         assert_eq!(get("account:a"), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_a_permanent_unseal_failure_forgets_the_passwords() {
+        let plain = b"\"account:a\" = \"hunter2\"\n".to_vec();
+        let Unsealed::Map(map) = judge(Ok(Some(plain))) else {
+            panic!("a good unseal is the map");
+        };
+        assert_eq!(map.get("account:a").map(String::as_str), Some("hunter2"));
+        assert_eq!(
+            judge(Ok(Some(Vec::new()))),
+            Unsealed::Map(Default::default())
+        );
+        // No key any more, a bad tag: gone for good.
+        assert_eq!(judge(Ok(None)), Unsealed::Gone);
+        // Authenticated bytes that are not the map never will be.
+        assert_eq!(judge(Ok(Some(vec![0xff, 0xfe]))), Unsealed::Gone);
+        assert_eq!(judge(Ok(Some(b"not = [toml".to_vec()))), Unsealed::Gone);
+        // A busy Keystore or a JNI failure keeps everything for the next try.
+        assert_eq!(judge(Err(())), Unsealed::Failed);
     }
 }

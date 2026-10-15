@@ -1461,18 +1461,12 @@ fn apply_self_fade_to_descendants(
 }
 
 /// True if the OS pointer is over the world camera's viewport (the whole window when it has none).
+/// Vanillish: over what the camera draws, whatever its target — on a foldable's tabletop the world
+/// is drawn above the hinge only, into a target the size of that half, which has no `viewport`.
 fn cursor_in_viewport(window: &Window, camera: &Camera) -> bool {
-    let Some(cursor) = window.physical_cursor_position() else {
-        return false;
-    };
-    match &camera.viewport {
-        Some(vp) => {
-            let min = vp.physical_position.as_vec2();
-            let max = min + vp.physical_size.as_vec2();
-            cursor.x >= min.x && cursor.y >= min.y && cursor.x < max.x && cursor.y < max.y
-        }
-        None => true,
-    }
+    window
+        .cursor_position()
+        .is_some_and(|cursor| benilla_world::interact::cursor_over_view(camera, cursor))
 }
 
 /// Free-fly (pre-connect or detached): WASD in the camera basis, Space/C up and down, Ctrl 5×.

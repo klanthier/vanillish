@@ -57,6 +57,10 @@ pub(crate) const RESTART_NOW: &str = if ANDROID {
     "Close iNilla now"
 };
 
+/// Vanillish: shared storage did not answer at launch (`paths::storage_unavailable`; Android only).
+pub(crate) const STORAGE_UNAVAILABLE: &str =
+    "Shared storage is not available right now. Close Vanillish and open it again.";
+
 pub(crate) const NEEDS_DATA: &str = concat!(
     app!(),
     " needs the game data from your own World of Warcraft 1.12.1 (build 5875) client."

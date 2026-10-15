@@ -41,9 +41,15 @@
              a theme change — none may recreate the Activity: a Bevy app cannot be built twice in
              one process. singleTask: a second launch never makes a second Activity.
              adjustNothing: the soft keyboard floats over the game rather than resizing it (the
-             automatic UI scale would follow the height). -->
+             automatic UI scale would follow the height).
+             enableOnBackInvokedCallback="false": no predictive back (on by default from Android
+             16 at targetSdk 36). It would hand every KEYCODE_BACK, whatever its source, to the
+             back callback ahead of the Activity: a pad's Back (its Options button in the game)
+             and a mouse's back button (its BUTTON5) would both be the game's Escape. Without it
+             the Back key and the gesture come to the Activity as a key, as on Android 12-15. -->
         <activity
             android:name=".VanillishActivity"
+            android:enableOnBackInvokedCallback="false"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"

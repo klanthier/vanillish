@@ -64,6 +64,62 @@ pub(crate) fn inbound_census() -> (u64, Option<u64>) {
     )
 }
 
+/// Vanillish: the player's last input before the app went off the screen, in unix ms (a clock
+/// that runs through deep sleep); `0` while it is on the screen. Android keeps a staying-connected
+/// session's process alive with no update running, so the idle handler's thirty-minute camp
+/// cannot; the write thread runs it instead ([`off_screen_step`]).
+static OFF_SCREEN_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Vanillish: the app left the screen, its last input at `last_input_ms` (unix ms); or came back
+/// (`None`).
+pub(crate) fn set_off_screen(last_input_ms: Option<u64>) {
+    let stamp = last_input_ms.map_or(0, |ms| ms.max(1));
+    OFF_SCREEN_SINCE_MS.store(stamp, Ordering::Relaxed);
+}
+
+/// Vanillish: how long a world session off the screen stays once its camp went out (refused in
+/// combat, or the server never answered) before the write thread shuts its socket.
+const OFF_SCREEN_CLOSE_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// Vanillish: the off-screen camp of the world session the write thread holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OffScreenCamp {
+    /// Nothing sent.
+    #[default]
+    Idle,
+    /// `CMSG_LOGOUT_REQUEST` went out at this unix ms.
+    Asked(u64),
+    /// The socket was shut.
+    Closed,
+}
+
+/// Vanillish: what to do at a keepalive about a world session off the screen since `since_ms`
+/// (`0`: on the screen) at `now_ms`: the idle handler's camp ([`crate::ui_chat::idle`]) thirty
+/// minutes after the last input, as the reference would have sent it; and if the character is
+/// still in the world [`OFF_SCREEN_CLOSE_AFTER`] later, the socket shut. Otherwise the process
+/// and its queue of events would live on for as long as the player is away. Answers the step due
+/// now, if any: [`OffScreenCamp::Asked`] sends the request, [`OffScreenCamp::Closed`] shuts the
+/// socket.
+fn off_screen_step(since_ms: u64, now_ms: u64, camp: &mut OffScreenCamp) -> Option<OffScreenCamp> {
+    if since_ms == 0 {
+        *camp = OffScreenCamp::Idle;
+        return None;
+    }
+    let logout_after = crate::ui_chat::idle::AUTO_LOGOUT_AFTER.as_millis() as u64;
+    let close_after = OFF_SCREEN_CLOSE_AFTER.as_millis() as u64;
+    let next = match *camp {
+        OffScreenCamp::Idle if now_ms.saturating_sub(since_ms) >= logout_after => {
+            OffScreenCamp::Asked(now_ms)
+        }
+        OffScreenCamp::Asked(at) if now_ms.saturating_sub(at) >= close_after => {
+            OffScreenCamp::Closed
+        }
+        _ => return None,
+    };
+    *camp = next;
+    Some(next)
+}
+
 /// One login attempt and the abandon generation at submit time; the thread discards the attempt
 /// at its next stage boundary once a Cancel has moved the counter. A counter, since a flag cleared
 /// by the next submit would un-cancel the attempt in flight.
@@ -325,6 +381,10 @@ pub(super) fn spawn_net(connect: bool) -> NetHandles {
                             // A stream failure; a displacement kick arrives as a bare EOF. No
                             // sleep: what follows is the app's policy.
                             bevy::log::error!("net: {e:#}");
+                            // Vanillish: no session is left for the stay-connected service to
+                            // keep, and off the screen no update runs to stop it.
+                            #[cfg(target_os = "android")]
+                            inilla_platform::device::set_session_service(false);
                             if events_tx
                                 .send(SessionEvent::Disconnected {
                                     reason: format!("disconnected: {e:#}"),
@@ -990,6 +1050,10 @@ fn world(
                 StreamEnd::Exit => return Ok(WorldEnd::Cycle(Cycle::Exit)),
                 StreamEnd::Back(reason) => reason,
             };
+            // Vanillish: the world session is over (the off-screen camp's logout among others):
+            // the stay-connected service stops here, as no update may run to stop it.
+            #[cfg(target_os = "android")]
+            inilla_platform::device::set_session_service(false);
             // The world is torn down (`0x401ee0`'s shutdown) and the link kept: the app's teardown
             // edge, then the session joined again at the character park.
             if events_tx
@@ -1229,10 +1293,15 @@ pub(super) fn writer_loop(
     // Armed at connect and re-armed by each send, never free-running: the reference pings when
     // `now - lastSent - 30000 >= 0` (`0x537ff0`), with `lastSent` stamped at connect (`0x537bcf`).
     let mut ping_tick = crossbeam_channel::never();
+    // Vanillish: the held session's off-screen camp; a swap (a new session, or none) starts over.
+    let mut camp = OffScreenCamp::Idle;
     loop {
         crossbeam_channel::select! {
             recv(writer_rx) -> w => match w {
-                Ok(swap) => apply_swap(swap, &mut writer, &mut warned, &mut ping_tick, ping_clock),
+                Ok(swap) => {
+                    camp = OffScreenCamp::Idle;
+                    apply_swap(swap, &mut writer, &mut warned, &mut ping_tick, ping_clock)
+                }
                 // The read thread ended (app exit). A disconnected receiver is always ready and
                 // would spin the select, so stop selecting it.
                 Err(_) => writer_rx = crossbeam_channel::never(),
@@ -1261,6 +1330,26 @@ pub(super) fn writer_loop(
                             warned += 1;
                         }
                     }
+                    // Vanillish: off the screen, the idle camp no update is there to run.
+                    let since = OFF_SCREEN_SINCE_MS.load(Ordering::Relaxed);
+                    match off_screen_step(since, unix_ms(), &mut camp) {
+                        Some(OffScreenCamp::Asked(_)) => {
+                            bevy::log::info!(
+                                "net: off the screen 30 minutes after the last input — logging out"
+                            );
+                            if let Err(e) = w.logout_request() {
+                                bevy::log::warn!("net: logout send failed: {e:#}");
+                            }
+                        }
+                        Some(OffScreenCamp::Closed) => {
+                            bevy::log::warn!(
+                                "net: still in the world off the screen after the logout request \
+                                 — closing the connection"
+                            );
+                            let _ = w.shutdown();
+                        }
+                        _ => {}
+                    }
                 }
             },
             recv(cmd_rx) -> cmd => {
@@ -1269,6 +1358,7 @@ pub(super) fn writer_loop(
                 // the app sends on that announcement finds it here even when this wake-up took
                 // the command first, whether no writer is held or a lost link's dead one is.
                 while let Ok(swap) = writer_rx.try_recv() {
+                    camp = OffScreenCamp::Idle; // Vanillish: as above.
                     apply_swap(swap, &mut writer, &mut warned, &mut ping_tick, ping_clock);
                 }
                 let Some(w) = writer.as_mut() else {
@@ -1993,5 +2083,41 @@ mod rtt_tests {
             "the dead socket's echo is dropped"
         );
         assert_eq!(clock.avg_latency_ms(), None);
+    }
+}
+
+/// Vanillish: the write thread's off-screen camp.
+#[cfg(test)]
+mod off_screen_tests {
+    use super::{off_screen_step, OffScreenCamp};
+
+    const MIN: u64 = 60_000;
+
+    #[test]
+    fn off_the_screen_the_camp_goes_out_at_thirty_minutes_then_the_socket_is_shut() {
+        let mut camp = OffScreenCamp::Idle;
+        let since = 1_000_000;
+        // On the screen nothing happens, however long ago the last input was.
+        assert_eq!(off_screen_step(0, since + 60 * MIN, &mut camp), None);
+        // Thirty minutes from the last input, not from leaving the screen.
+        assert_eq!(off_screen_step(since, since + 29 * MIN, &mut camp), None);
+        let at = since + 30 * MIN;
+        assert_eq!(
+            off_screen_step(since, at, &mut camp),
+            Some(OffScreenCamp::Asked(at))
+        );
+        // Once: the next keepalives wait for the answer.
+        assert_eq!(off_screen_step(since, at + MIN, &mut camp), None);
+        // Still in the world five minutes on (refused in combat): shut, once.
+        assert_eq!(
+            off_screen_step(since, at + 5 * MIN, &mut camp),
+            Some(OffScreenCamp::Closed)
+        );
+        assert_eq!(off_screen_step(since, at + 6 * MIN, &mut camp), None);
+        // Back on the screen: the next time off it starts over.
+        assert_eq!(off_screen_step(0, at + 7 * MIN, &mut camp), None);
+        assert_eq!(camp, OffScreenCamp::Idle);
+        // A clock that went backwards is not an elapsed half hour.
+        assert_eq!(off_screen_step(since, since - MIN, &mut camp), None);
     }
 }
