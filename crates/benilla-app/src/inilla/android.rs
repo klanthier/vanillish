@@ -23,7 +23,7 @@
 use bevy::prelude::*;
 use bevy::window::AppLifecycle;
 
-use inilla_core::settings::Quality;
+use inilla_core::settings::GameMode as SystemMode;
 use inilla_platform::device::{self, GameMode};
 
 use super::platform::{BackPresses, SyntheticKeys};
@@ -32,8 +32,8 @@ use crate::char_select::ClientState;
 
 /// The word the soft keyboard is still composing, which is not the game's yet: Gboard and Samsung
 /// Keyboard keep the word being typed open (to correct and predict it) until a space, a
-/// punctuation mark or a picked suggestion commits it. The HUD's chat bar can show it after the
-/// line, so the player sees what they type. Always empty off Android.
+/// punctuation mark or a picked suggestion commits it. The HUD's chat bar shows it after the line
+/// (`hud::chat_bar`), so the player sees what they type. Always empty off Android.
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImePreedit(pub(crate) String);
 
@@ -141,17 +141,15 @@ fn vote_frame_rate(state: Res<Inilla>, mut vote: ResMut<FrameRateVote>) {
 const GAME_MODE_FIRST_READ_SECS: f64 = 2.0;
 
 /// Game Dashboard's mode picks the preset: Performance is High, Battery is the battery saver. Only
-/// when the mode changes — a launch in either counts, Standard being where Android starts — never
-/// over a Custom preset, and not again until the mode changes once more, so a pick the player
-/// makes afterwards stands. Read once a second (the Activity refreshes it on every resume, as
-/// Android asks).
-fn follow_game_mode(
-    mut state: ResMut<Inilla>,
-    time: Res<Time<Real>>,
-    mut next: Local<f64>,
-    mut seen: Local<Option<GameMode>>,
-) {
-    if !super::touch_device() {
+/// when the mode changes — since it was last seen, which the settings keep, so a launch in the
+/// mode it was left in is no change — never over a Custom preset, and not again until the mode
+/// changes once more, so a pick the player makes afterwards stands
+/// (`InillaSettings::follow_game_mode`). Read once a second (the Activity refreshes it on every
+/// resume, as Android asks).
+fn follow_game_mode(mut state: ResMut<Inilla>, time: Res<Time<Real>>, mut next: Local<f64>) {
+    // iOS has no system game mode: nothing to follow, and its settings file stays as iNilla
+    // writes it (no `last_game_mode` remembered as Standard).
+    if !super::touch_device() || cfg!(target_os = "ios") {
         return;
     }
     let now = time.elapsed_secs_f64();
@@ -159,26 +157,24 @@ fn follow_game_mode(
         return;
     }
     *next = now + 1.0;
-    let mode = device::game_mode();
-    let before = seen.replace(mode).unwrap_or_default();
-    if mode == before {
-        return;
-    }
-    let preset = match mode {
-        GameMode::Performance => Quality::High,
-        GameMode::Battery => Quality::Saver,
-        GameMode::Standard => return,
+    let mode = match device::game_mode() {
+        GameMode::Standard => SystemMode::Standard,
+        GameMode::Performance => SystemMode::Performance,
+        GameMode::Battery => SystemMode::Battery,
     };
-    let current = state.settings.quality;
-    if current == Quality::Custom || current == preset {
+    // Only through a mutable borrow when the mode moved: the settings' change detection (and the
+    // debounced save behind it) is not woken once a second for nothing.
+    if state.settings.last_game_mode == Some(mode) {
         return;
     }
-    info!(
-        "inilla: Game Dashboard's {mode:?} mode: preset {} -> {}",
-        current.label(),
-        preset.label()
-    );
-    state.settings.quality = preset;
+    let current = state.settings.quality;
+    if let Some(preset) = state.settings.follow_game_mode(mode) {
+        info!(
+            "inilla: Game Dashboard's {mode:?} mode: preset {} -> {}",
+            current.label(),
+            preset.label()
+        );
+    }
 }
 
 /// What is left of the Back presses once the screens took theirs (in `Update`): the game's Escape,

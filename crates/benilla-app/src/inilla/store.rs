@@ -105,6 +105,19 @@ pub(crate) fn save_layout(v: &TouchLayout) {
     save(v.class.file_name(), v);
 }
 
+/// Vanillish: a class's layout file gone, so the next look at that screen reads its shipped
+/// layout ("Reset all"). Nothing to do when there is none.
+pub(crate) fn remove_layout(class: ScreenClass) {
+    let Some(path) = dir().map(|d| d.join(class.file_name())) else {
+        return;
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => bevy::log::warn!("inilla: could not remove {}: {e}", path.display()),
+    }
+}
+
 pub(crate) fn load_pad() -> PadProfile {
     load("controller.toml")
 }

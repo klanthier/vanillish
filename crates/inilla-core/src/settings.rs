@@ -134,6 +134,33 @@ pub struct InillaSettings {
     /// notification shows it), so a fold to the lock screen or a quick look at another app does
     /// not drop the session.
     pub stay_connected: bool,
+    /// Vanillish: the system's game mode last seen, `None` before the first look. Not a switch:
+    /// what lets the preset follow a *change* of the mode ([`InillaSettings::follow_game_mode`])
+    /// across launches — the mode outlives the process, which starts with no memory of it.
+    pub last_game_mode: Option<GameMode>,
+}
+
+/// Vanillish: the system's game mode, where it has one (Android's Game Dashboard) — the player
+/// asked the system for performance or battery life. `inilla_platform::device::game_mode` reads
+/// it; this is the settings' copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GameMode {
+    /// What the system starts in, and what a device without the modes reports.
+    #[default]
+    Standard,
+    Performance,
+    Battery,
+}
+
+impl GameMode {
+    /// The preset the mode asks for: Performance is High, Battery the battery saver.
+    pub fn preset(self) -> Option<Quality> {
+        match self {
+            GameMode::Standard => None,
+            GameMode::Performance => Some(Quality::High),
+            GameMode::Battery => Some(Quality::Saver),
+        }
+    }
 }
 
 impl Default for InillaSettings {
@@ -158,6 +185,7 @@ impl Default for InillaSettings {
             tabletop_split: true,
             inner_any_orientation: false,
             stay_connected: true,
+            last_game_mode: None,
         }
     }
 }
@@ -178,6 +206,24 @@ impl InillaSettings {
         // One UI unit is `height / (768 / s)` points; solve 36 units = 30 points for s.
         let want = 30.0 / 36.0 * 768.0 / height;
         want.clamp(0.64, 1.25)
+    }
+
+    /// Vanillish: the system's game mode, as just read, picks the preset — only when the mode has
+    /// changed since it was last seen (a first look counts as a change from Standard, where the
+    /// system starts), never over a Custom preset, and not again until the mode changes once more,
+    /// so a preset the player picks afterwards stands, this launch and the next ones. The mode is
+    /// remembered either way. Returns the preset moved to.
+    pub fn follow_game_mode(&mut self, mode: GameMode) -> Option<Quality> {
+        let before = self.last_game_mode.replace(mode).unwrap_or_default();
+        if mode == before {
+            return None;
+        }
+        let preset = mode.preset()?;
+        if self.quality == Quality::Custom || self.quality == preset {
+            return None;
+        }
+        self.quality = preset;
+        Some(preset)
     }
 }
 
@@ -208,5 +254,65 @@ mod tests {
         let partial: InillaSettings = toml::from_str("render_scale = 0.5").unwrap();
         assert_eq!(partial.render_scale, 0.5);
         assert!(partial.keep_screen_on);
+        assert_eq!(partial.last_game_mode, None);
+    }
+
+    #[test]
+    fn the_game_mode_is_remembered_across_a_save() {
+        let s = InillaSettings {
+            last_game_mode: Some(GameMode::Battery),
+            ..Default::default()
+        };
+        let back: InillaSettings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.last_game_mode, Some(GameMode::Battery));
+    }
+
+    /// The first look at a Performance launch moves the preset; the next launches in the same
+    /// mode leave the player's later pick alone.
+    #[test]
+    fn the_preset_follows_a_change_of_the_game_mode_only() {
+        let mut s = InillaSettings::default();
+        assert_eq!(
+            s.follow_game_mode(GameMode::Performance),
+            Some(Quality::High)
+        );
+        assert_eq!(s.quality, Quality::High);
+        assert_eq!(s.last_game_mode, Some(GameMode::Performance));
+
+        // The player picks Balanced; a relaunch (the settings saved and read back) in the same
+        // mode keeps it.
+        s.quality = Quality::Balanced;
+        let mut s: InillaSettings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s.follow_game_mode(GameMode::Performance), None);
+        assert_eq!(s.quality, Quality::Balanced);
+
+        // A change of mode moves it again; back to Standard leaves it.
+        assert_eq!(s.follow_game_mode(GameMode::Battery), Some(Quality::Saver));
+        assert_eq!(s.follow_game_mode(GameMode::Standard), None);
+        assert_eq!(s.quality, Quality::Saver);
+        assert_eq!(s.last_game_mode, Some(GameMode::Standard));
+    }
+
+    #[test]
+    fn the_game_mode_never_overrides_a_custom_preset_or_a_standard_launch() {
+        let mut s = InillaSettings {
+            quality: Quality::Custom,
+            ..Default::default()
+        };
+        assert_eq!(s.follow_game_mode(GameMode::Performance), None);
+        assert_eq!(s.quality, Quality::Custom);
+        assert_eq!(
+            s.last_game_mode,
+            Some(GameMode::Performance),
+            "seen all the same"
+        );
+
+        let mut s = InillaSettings::default();
+        assert_eq!(s.follow_game_mode(GameMode::Standard), None);
+        assert_eq!(s.quality, Quality::Balanced);
+        // Already on the mode's preset: nothing to move.
+        s.quality = Quality::Saver;
+        assert_eq!(s.follow_game_mode(GameMode::Battery), None);
+        assert_eq!(s.last_game_mode, Some(GameMode::Battery));
     }
 }

@@ -151,8 +151,8 @@ fn track_screen(
             hud.class = class;
         }
     } else if inilla.layout.class != hud.class {
-        // Another screen's layout in the slot: "Reset all" (Settings, About) puts the phone's
-        // shipped one there. This screen's shipped one is what was meant.
+        // Another screen's layout in the slot (a guard: every reset puts the screen's own there,
+        // `reset_layouts` included). This screen's shipped one is what was meant.
         let enabled = inilla.layout.enabled;
         inilla.layout = hud.class.defaults();
         inilla.layout.enabled = enabled;
@@ -206,6 +206,20 @@ fn swap_layout(inilla: &mut Inilla, to: ScreenClass, save: bool) {
         .unwrap_or_else(|| store::load_layout_for(to));
     let outgoing = std::mem::replace(&mut inilla.layout, incoming);
     inilla.other_layouts.insert(outgoing.class, outgoing);
+}
+
+/// "Reset all" (Settings, About): every screen's layout back to its own shipped one — the one in
+/// use, and the other screens' wherever they are kept (here, or in their files) — so a fold after
+/// the reset brings no old layout back. The one in use stays this screen's, saved at once; the
+/// others' files go, and each screen reads its shipped layout the next time it comes up.
+pub(crate) fn reset_layouts(inilla: &mut Inilla) {
+    let class = inilla.layout.class;
+    inilla.layout = class.defaults();
+    inilla.other_layouts.clear();
+    for other in ScreenClass::ALL.into_iter().filter(|c| *c != class) {
+        store::remove_layout(other);
+    }
+    store::save_layout(&inilla.layout);
 }
 
 /// The orientation the game asks for: landscape, either way up — except that on the inner screen
@@ -305,6 +319,28 @@ mod tests {
         assert_eq!(k.layout, phone, "the cover's layout as it was left");
         let kept = &k.other_layouts[&ScreenClass::Tablet];
         assert_eq!(kept.opacity, 0.9, "the inner screen's edit is kept");
+    }
+
+    /// "Reset all" on the inner screen: its own shipped layout stays in use, and a fold to the
+    /// cover screen brings the phone's shipped one, not the edited one that was kept.
+    #[test]
+    fn reset_all_puts_every_screens_shipped_layout_back() {
+        let mut tablet = ScreenClass::Tablet.defaults();
+        tablet.opacity = 0.4;
+        let mut phone = ScreenClass::Phone.defaults();
+        phone.hud_scale = 1.3;
+        let mut k = inilla(tablet);
+        k.other_layouts.insert(ScreenClass::Phone, phone);
+
+        reset_layouts(&mut k);
+        assert_eq!(k.layout, ScreenClass::Tablet.defaults());
+        assert!(k.other_layouts.is_empty());
+
+        // A unit test reaches no state folder: the phone's file reads as missing, as the reset
+        // leaves it on a device.
+        swap_layout(&mut k, ScreenClass::Phone, false);
+        assert_eq!(k.layout, ScreenClass::Phone.defaults());
+        assert_eq!(k.layout.class, ScreenClass::Phone);
     }
 
     /// On a tabletop the world is drawn in the window's physical pixels above the hinge, from the
