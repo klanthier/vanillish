@@ -22,7 +22,7 @@ use inilla_core::touch::{
 };
 
 use super::mouse::VirtualMouse;
-use super::platform::SafeArea;
+use super::screen::HudScreen;
 use super::synth::Synth;
 use super::ui::Overlay;
 use super::{Inilla, InputProducers};
@@ -44,6 +44,15 @@ pub(crate) struct TouchState {
     bare: TouchLayout,
     /// The engine has been told which commands are held (the registry's `Held` kinds).
     held_known: bool,
+}
+
+impl TouchState {
+    /// Every finger let go of without acting (a held stick or button released): the screen they
+    /// landed on is gone. Vanillish: a fold or an unfold swaps the layout under them.
+    pub(crate) fn drop_fingers(&mut self) {
+        self.engine.reset();
+        self.egui_owned.clear();
+    }
 }
 
 /// Actions a HUD element or controller asked for that are not game bindings.
@@ -102,8 +111,7 @@ fn forget_touches(mut touches: ResMut<bevy::input::touch::Touches>) {
 
 /// Leaving the world drops every finger and releases whatever the virtual mouse held.
 fn reset(mut state: ResMut<TouchState>, mut vm: ResMut<VirtualMouse>) {
-    state.engine.reset();
-    state.egui_owned.clear();
+    state.drop_fingers();
     vm.reset();
 }
 
@@ -112,7 +120,7 @@ fn reset(mut state: ResMut<TouchState>, mut vm: ResMut<VirtualMouse>) {
 struct Env<'w, 's> {
     windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     script: Option<NonSend<'w, UiScript>>,
-    safe: Res<'w, SafeArea>,
+    hud: Res<'w, HudScreen>,
     time: Res<'w, Time<Real>>,
     client: Res<'w, State<ClientState>>,
     overlay: Res<'w, Overlay>,
@@ -157,7 +165,7 @@ fn process(
     let Env {
         windows,
         script,
-        safe,
+        hud,
         time,
         client,
         overlay,
@@ -171,7 +179,8 @@ fn process(
         return;
     };
     let now = time.elapsed_secs_f64();
-    let screen = safe.screen(window.width(), window.height());
+    // Vanillish: the screen class's — on a tabletop, the deck below the hinge and the world above.
+    let screen = hud.screen;
     let in_world = *client.get() == ClientState::InWorld;
     // The HUD yields to a controller in use, and comes back with the next touch.
     let pad_active = pad.active(now) && pad.last_active > state.last_touch;

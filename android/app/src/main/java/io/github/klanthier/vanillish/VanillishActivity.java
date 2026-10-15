@@ -71,7 +71,14 @@ public class VanillishActivity extends GameActivity {
         pads = new GamepadBridge(this);
         foldTracker = new FoldTracker(this);
         // [data] the folder picker registers here (FolderImport).
-        // [fold] gesture-exclusion set-up goes here.
+        // [fold] The edge-swipe exclusion rects are px in the decor view's coordinates: set them
+        // again whenever it changes size (a fold or an unfold: another panel, another density).
+        getWindow().getDecorView().addOnLayoutChangeListener(
+                (v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+                    if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+                        Bridge.applyGestureExclusion();
+                    }
+                });
 
         // Back (the key, the gesture, predictive back on Android 16) is Escape in the game: it
         // closes the open window, or opens the game menu — as on every other client.

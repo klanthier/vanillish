@@ -5,6 +5,7 @@
 use bevy_egui::egui;
 
 use benilla_world::build_id::BuildId;
+use inilla_core::fold::ScreenClass;
 use inilla_core::pad::{Layer, PadBinding, PadButton, PadProfile, Special};
 use inilla_core::settings::Quality;
 use inilla_core::touch::default_layout;
@@ -13,7 +14,7 @@ use super::{hint, row, Overlay, Panel, SettingsTab};
 use crate::inilla::data::DataState;
 use crate::inilla::hud::GOLD;
 use crate::inilla::pad::PadHud;
-use crate::inilla::Inilla;
+use crate::inilla::{store, Inilla};
 
 pub(super) fn show(
     ui: &mut egui::Ui,
@@ -132,10 +133,35 @@ fn touch(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
         }
         if ui.button("Reset layout").clicked() {
             let enabled = l.enabled;
-            *l = default_layout();
+            // Vanillish: this screen's shipped layout.
+            *l = l.class.defaults();
             l.enabled = enabled;
         }
     });
+    // Vanillish: a foldable's screens each have their own layout (iOS keeps iNilla's one).
+    if !cfg!(target_os = "ios") {
+        ui.separator();
+        let class = l.class;
+        row(ui, "This screen", |ui| {
+            ui.label(egui::RichText::new(class.label()).color(GOLD));
+        });
+        hint(ui, "Each screen has its own layout: the cover screen, the inner screen, and the inner screen half folded on a table. The right one comes up as you fold and unfold, and edits change this screen's only.");
+        if class != ScreenClass::Phone && ui.button("Copy the phone layout here").clicked() {
+            let mut phone = k
+                .other_layouts
+                .get(&ScreenClass::Phone)
+                .cloned()
+                .unwrap_or_else(|| store::load_layout_for(ScreenClass::Phone));
+            phone.class = class;
+            phone.enabled = l.enabled;
+            *l = phone;
+        }
+        ui.checkbox(
+            &mut k.settings.tabletop_split,
+            "Tabletop: the game above the hinge, the controls below it",
+        );
+        hint(ui, "Half fold the inner screen and stand it on a table: the world and the game's windows move above the hinge, and the touch controls get the half below it to themselves. Off: the inner screen stays one screen.");
+    }
     ui.separator();
     ui.label(egui::RichText::new("Feel").strong());
     let f = &mut l.feel;

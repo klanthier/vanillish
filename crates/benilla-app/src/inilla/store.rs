@@ -7,6 +7,8 @@
 //! | `settings.toml` | [`InillaSettings`] — quality, UI scale, audio session, debug switches |
 //! | `servers.toml` | [`Launcher`] — server profiles and accounts (never passwords) |
 //! | `touch.toml` | [`TouchLayout`] — the HUD as the player arranged it |
+//! | `touch-tablet.toml` | Vanillish: the HUD on a foldable's inner screen ([`ScreenClass`]) |
+//! | `touch-tabletop.toml` | Vanillish: the HUD below the hinge, the inner screen half folded |
 //! | `controller.toml` | [`PadProfile`] — the controller mapping |
 //!
 //! A file that does not parse is kept aside as `<name>.broken` and the defaults are used, so a
@@ -17,6 +19,7 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use inilla_core::fold::ScreenClass;
 use inilla_core::pad::PadProfile;
 use inilla_core::profiles::Launcher;
 use inilla_core::settings::InillaSettings;
@@ -27,11 +30,16 @@ pub(crate) fn dir() -> Option<PathBuf> {
 }
 
 fn load<T: DeserializeOwned + Default>(name: &str) -> T {
+    load_or(name, T::default)
+}
+
+/// `name`, or `fallback()` when it is missing or broken.
+fn load_or<T: DeserializeOwned>(name: &str, fallback: impl FnOnce() -> T) -> T {
     let Some(path) = dir().map(|d| d.join(name)) else {
-        return T::default();
+        return fallback();
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return T::default();
+        return fallback();
     };
     match toml::from_str(&text) {
         Ok(v) => v,
@@ -41,7 +49,7 @@ fn load<T: DeserializeOwned + Default>(name: &str) -> T {
                 path.display()
             );
             let _ = std::fs::rename(&path, path.with_extension("toml.broken"));
-            T::default()
+            fallback()
         }
     }
 }
@@ -78,14 +86,23 @@ pub(crate) fn save_launcher(v: &Launcher) {
     save("servers.toml", v);
 }
 
+/// The phone's layout (`touch.toml`): the one in use at launch, until the screen says otherwise.
 pub(crate) fn load_layout() -> TouchLayout {
-    let mut l: TouchLayout = load("touch.toml");
+    load_layout_for(ScreenClass::Phone)
+}
+
+/// Vanillish: the layout of a class of screen, from its own file — or that class's shipped
+/// layout when there is none yet, never the phone's.
+pub(crate) fn load_layout_for(class: ScreenClass) -> TouchLayout {
+    let mut l: TouchLayout = load_or(class.file_name(), || class.defaults());
+    l.class = class;
     l.upgrade();
     l
 }
 
+/// The layout into its own class's file (the phone's is `touch.toml`, as in iNilla).
 pub(crate) fn save_layout(v: &TouchLayout) {
-    save("touch.toml", v);
+    save(v.class.file_name(), v);
 }
 
 pub(crate) fn load_pad() -> PadProfile {

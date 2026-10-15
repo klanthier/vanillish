@@ -11,11 +11,10 @@
 use bevy_egui::egui;
 
 use inilla_core::pad::{PadBinding, Special};
-use inilla_core::touch::{default_layout, ElementKind};
+use inilla_core::touch::{ElementKind, Screen};
 
 use super::Overlay;
 use crate::inilla::hud::GOLD;
-use crate::inilla::platform::SafeArea;
 use crate::inilla::Inilla;
 
 #[derive(Clone, Debug, Default)]
@@ -34,14 +33,16 @@ fn big(text: impl Into<egui::WidgetText>) -> egui::Button<'static> {
     egui::Button::new(text).min_size(egui::vec2(44.0, 36.0))
 }
 
+/// The editor over `screen`, the one the HUD lays out on (Vanillish: the screen class's — on a
+/// tabletop the elements are placed on the deck below the hinge).
 pub(super) fn show(
     ctx: &egui::Context,
     overlay: &mut Overlay,
     inilla: &mut Inilla,
-    safe: &SafeArea,
+    screen: &Screen,
 ) {
-    let screen_rect = ctx.content_rect();
-    let screen = safe.screen(screen_rect.width(), screen_rect.height());
+    let screen = *screen;
+    let safe = screen.safe;
     let view = overlay
         .editor
         .view
@@ -54,7 +55,10 @@ pub(super) fn show(
         .fixed_pos(egui::Pos2::ZERO)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            let (canvas, _) = ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
+            let (canvas, _) = ui.allocate_exact_size(
+                egui::vec2(screen.size[0], screen.size[1]),
+                egui::Sense::click(),
+            );
             let painter = ui.painter_at(canvas);
             painter.rect_filled(canvas, 0.0, egui::Color32::from_black_alpha(90));
             // The safe area, so the player sees where the notch and home bar are.
@@ -68,6 +72,33 @@ pub(super) fn show(
                 egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(40)),
                 egui::StrokeKind::Inside,
             );
+            // Vanillish: on a tabletop, the hinge and the deck under it, where the elements go.
+            if let (Some(d), Some(w)) = (screen.deck, screen.world) {
+                painter.line_segment(
+                    [
+                        egui::pos2(0.0, w.max[1]),
+                        egui::pos2(screen.size[0], w.max[1]),
+                    ],
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(90)),
+                );
+                let deck = egui::Rect::from_min_max(
+                    egui::pos2(d.min[0], d.min[1]),
+                    egui::pos2(d.max[0], d.max[1]),
+                );
+                painter.rect_stroke(
+                    deck,
+                    10.0,
+                    egui::Stroke::new(1.5_f32, GOLD.gamma_multiply(0.6)),
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    deck.left_top() + egui::vec2(10.0, 6.0),
+                    egui::Align2::LEFT_TOP,
+                    "below the hinge",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_white_alpha(150),
+                );
+            }
             let n = inilla.layout.elements.len();
             for i in 0..n {
                 let el = inilla.layout.elements[i].clone();
@@ -142,14 +173,14 @@ pub(super) fn show(
             }
 
             // The bar, last, so its buttons are on top of everything above.
-            let width = (screen.size[0] - safe.0[1] - safe.0[3] - 24.0).min(720.0);
+            let width = (screen.size[0] - safe[1] - safe[3] - 24.0).min(720.0);
             let x = (screen.size[0] - width) / 2.0;
             let max_height = screen.size[1] * 0.45;
             let y = if overlay.editor.bar_at_bottom {
-                screen.size[1] - safe.0[2] - max_height - 8.0
+                screen.size[1] - safe[2] - max_height - 8.0
             } else {
                 // Below the top row of HUD buttons (the menu, view and iNilla buttons).
-                safe.0[0] + 72.0
+                safe[0] + 72.0
             };
             let area = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, max_height));
             ui.scope_builder(
@@ -204,7 +235,8 @@ fn bar(ui: &mut egui::Ui, overlay: &mut Overlay, inilla: &mut Inilla, view: &str
                     if ui.add(big(reset)).clicked() {
                         if overlay.editor.confirm_reset {
                             let enabled = inilla.layout.enabled;
-                            inilla.layout = default_layout();
+                            // Vanillish: this screen's shipped layout (the inner screen's, …).
+                            inilla.layout = inilla.layout.class.defaults();
                             inilla.layout.enabled = enabled;
                             overlay.editor.selected = None;
                             overlay.editor.confirm_reset = false;
@@ -297,7 +329,8 @@ fn bar(ui: &mut egui::Ui, overlay: &mut Overlay, inilla: &mut Inilla, view: &str
                 }
                 let id = el.id.clone();
                 if ui.add(big("Reset this")).clicked() {
-                    if let Some(d) = default_layout().elements.into_iter().find(|d| d.id == id) {
+                    let defaults = inilla.layout.class.defaults();
+                    if let Some(d) = defaults.elements.into_iter().find(|d| d.id == id) {
                         inilla.layout.elements[i] = d;
                     }
                 }
