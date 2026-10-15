@@ -84,6 +84,11 @@ button, in red when it is short, and a copy that would not fit does not start ("
 
 ## Way 3 — download it from your server
 
+No server yet? [`server/`](../server/README.md) sets one up in one command, on a Mac with Apple
+silicon (or Linux, or Windows with WSL): it copies the archives from your WoW folder into Docker
+once, and prints the address to type in Vanillish. Its realm, its game files and its sign-up then
+come from that one address.
+
 As on iOS ([DATA.md](DATA.md#way-2--download-it-from-your-server)): on the setup screen enter
 `http://<that machine>:8099/` (filled in from the server you added; a token only if the host set
 one), **Check server**, then **Download** — resumable, every archive checked against its SHA-256,
