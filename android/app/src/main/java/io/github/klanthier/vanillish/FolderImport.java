@@ -29,6 +29,8 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 /**
  * The game data from a folder the player picks (the Storage Access Framework), and files handed
@@ -100,6 +102,14 @@ final class FolderImport {
         return true;
     }
 
+    /**
+     * The answer's follow-up, in order, off the UI thread: the folder's name is a query into its
+     * provider, which may be a network share or a drive spinning up (seconds, and the UI thread
+     * would stall into an ANR meanwhile).
+     */
+    private static final Executor io =
+            Executors.newSingleThreadExecutor(r -> new Thread(r, "vanillish-folder"));
+
     /** The picker's answer, on the UI thread: null when the player backed out. */
     static void onResult(Uri tree) {
         if (tree == null) {
@@ -119,18 +129,22 @@ final class FolderImport {
             // would need the grant again.
             Log.w(TAG, "folder grant not persisted: " + e);
         }
-        String label = displayName(r, tree);
-        // A folder picked earlier and never finished: this one replaces it.
-        String old = pendingTree(c);
-        if (old != null && !old.equals(tree.toString())) forget(old);
-        try {
-            String json = new JSONObject().put("tree", tree.toString()).put("label", label)
-                    .toString();
-            prefs(c).edit().putString(PENDING, json).apply();
-        } catch (JSONException e) {
-            Log.w(TAG, "folder: " + e);
-        }
-        nativeFolderPicked(tree.toString(), label);
+        // The pending record is written before Rust hears of the folder, so the import (which
+        // forgets it once done) always finds it.
+        io.execute(() -> {
+            String label = displayName(r, tree);
+            // A folder picked earlier and never finished: this one replaces it.
+            String old = pendingTree(c);
+            if (old != null && !old.equals(tree.toString())) forget(old);
+            try {
+                String json = new JSONObject().put("tree", tree.toString()).put("label", label)
+                        .toString();
+                prefs(c).edit().putString(PENDING, json).apply();
+            } catch (JSONException e) {
+                Log.w(TAG, "folder: " + e);
+            }
+            nativeFolderPicked(tree.toString(), label);
+        });
     }
 
     private static SharedPreferences prefs(Context c) {
