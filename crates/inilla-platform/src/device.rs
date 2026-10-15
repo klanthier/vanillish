@@ -2,8 +2,9 @@
 //! exclusion, identity. Every call is a cheap no-op off iOS.
 //!
 //! Vanillish: each call also has an Android arm (`crate::android::device`), and Android adds the
-//! fold ([`fold`]), the display's frame rate ([`set_frame_rate`]), the orientation policy and
-//! [`relaunch`] — no-ops on iOS and the desktop.
+//! fold ([`fold`]), the display's frame rate ([`set_frame_rate`]), the orientation policy, the
+//! edges the system's swipes hold off ([`set_gesture_exclusion`]) and [`relaunch`] — no-ops on iOS
+//! and the desktop, where `$INILLA_FOLD` rehearses a hinge ([`fold_in_window`]).
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -366,6 +367,21 @@ impl Fold {
     pub fn book(&self) -> bool {
         self.state == FoldState::HalfOpen && !self.horizontal
     }
+
+    /// The hinge as the HUD's screen model takes it ([`inilla_core::fold::Fold`]): the same
+    /// logical-pixel bounds, as a rect.
+    pub fn to_core(&self) -> inilla_core::fold::Fold {
+        use inilla_core::fold::{Fold as CoreFold, FoldState as CoreState};
+        let [l, t, r, b] = self.bounds;
+        CoreFold {
+            state: match self.state {
+                FoldState::Flat => CoreState::Flat,
+                FoldState::HalfOpen => CoreState::HalfOpened,
+            },
+            horizontal: self.horizontal,
+            bounds: inilla_core::touch::Rect::new([l, t], [r, b]),
+        }
+    }
 }
 
 /// `Bridge.fold()`'s array: `{present, halfOpen, horizontal, left, top, right, bottom, separating,
@@ -388,9 +404,9 @@ pub fn fold_from_floats(v: &[f32]) -> Option<Fold> {
     })
 }
 
-/// The hinge across the game's window, if the device folds and the window spans it. Desktop runs
-/// rehearse one with `$INILLA_FOLD=tabletop` / `book` (a hinge across the middle of the window,
-/// sized when the window size is known: see the app's `inilla::fold`).
+/// The hinge across the game's window, if the device folds and the window spans it (Android's,
+/// cached by the Java side as it changes). `None` elsewhere: a desktop run rehearses one through
+/// [`fold_in_window`], which knows the window's size.
 pub fn fold() -> Option<Fold> {
     #[cfg(target_os = "android")]
     {
@@ -400,6 +416,78 @@ pub fn fold() -> Option<Fold> {
     {
         None
     }
+}
+
+/// The hinge across a window `window` logical pixels big: on Android the OS's ([`fold`]); on a
+/// desktop the rehearsal `$INILLA_FOLD` names, a hinge through the middle of the window — sized
+/// from it, which is why the caller passes it:
+///
+/// | `$INILLA_FOLD` | rehearses |
+/// |---|---|
+/// | `half` (or `tabletop`) | half open, the hinge across: tabletop (Samsung's Flex mode) |
+/// | `flat` | fully open, the hinge across: the inner screen lying flat |
+/// | `book` | half open, the hinge down the middle: held like a book |
+///
+/// `INILLA_TOUCH=1 INILLA_FOLD=half` in a near-square window (the inner screen is about 954 × 859)
+/// plays the tabletop split on a desktop. Never on iOS.
+pub fn fold_in_window(window: [f32; 2]) -> Option<Fold> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = window;
+        fold()
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = window;
+        None
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        static SPEC: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        SPEC.get_or_init(|| std::env::var("INILLA_FOLD").ok())
+            .as_deref()
+            .and_then(|spec| rehearsed_fold(spec, window))
+    }
+}
+
+/// The hinge `$INILLA_FOLD=spec` rehearses in a window `window` logical pixels big (see
+/// [`fold_in_window`]): a line of no thickness through the middle, as a flexible screen's crease
+/// reports itself. `None` for a spec it does not know, or an empty window.
+pub fn rehearsed_fold(spec: &str, window: [f32; 2]) -> Option<Fold> {
+    let [w, h] = window;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let (state, horizontal) = match spec.trim().to_ascii_lowercase().as_str() {
+        "half" | "tabletop" => (FoldState::HalfOpen, true),
+        "flat" => (FoldState::Flat, true),
+        "book" => (FoldState::HalfOpen, false),
+        _ => return None,
+    };
+    let bounds = if horizontal {
+        [0.0, h / 2.0, w, h / 2.0]
+    } else {
+        [w / 2.0, 0.0, w / 2.0, h]
+    };
+    Some(Fold {
+        state,
+        horizontal,
+        bounds,
+        separating: state == FoldState::HalfOpen,
+        occluding: false,
+    })
+}
+
+/// Where a swipe in from a screen edge stays the game's instead of starting the system's gesture
+/// (Android's back swipe from either side): `rects` in logical pixels (dp), each
+/// `[left, top, right, bottom]` in the window; empty clears them. Android honours at most 200 dp
+/// of height per side edge, and never holds off the bottom edge's home gesture. A no-op elsewhere
+/// (iOS defers every edge's gesture already: the app's `window_options`).
+pub fn set_gesture_exclusion(rects: &[[f32; 4]]) {
+    #[cfg(target_os = "android")]
+    crate::android::device::set_gesture_exclusion(rects);
+    #[cfg(not(target_os = "android"))]
+    let _ = rects;
 }
 
 #[cfg(target_os = "ios")]
@@ -613,5 +701,48 @@ mod ios {
         let done: Option<&block2::Block<dyn Fn(Bool)>> = None;
         let _: () =
             unsafe { msg_send![&*app, openURL: &*u, options: &*options, completionHandler: done] };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inilla_core::fold::{classify, ScreenClass};
+
+    /// A Galaxy Z Fold8 Ultra's inner screen in landscape, in dp.
+    const INNER: [f32; 2] = [953.9, 859.4];
+
+    #[test]
+    fn the_bridges_fold_reaches_the_hud_as_the_same_hinge() {
+        let v = [1.0, 1.0, 1.0, 0.0, 429.7, 953.9, 429.7, 1.0, 0.0];
+        let f = fold_from_floats(&v).expect("a hinge");
+        assert!(f.tabletop() && !f.book());
+        let core = f.to_core();
+        assert_eq!(core.bounds.min, [0.0, 429.7]);
+        assert_eq!(core.bounds.max, [953.9, 429.7]);
+        assert_eq!(classify(INNER, Some(&core)), ScreenClass::Tabletop);
+        assert_eq!(fold_from_floats(&[0.0; 9]), None, "no hinge in the window");
+        assert_eq!(fold_from_floats(&[1.0; 4]), None, "a short array");
+    }
+
+    #[test]
+    fn the_desktop_rehearses_each_posture_across_the_middle_of_its_window() {
+        let half = rehearsed_fold("half", INNER).unwrap();
+        assert!(half.tabletop());
+        assert_eq!(half.bounds, [0.0, INNER[1] / 2.0, INNER[0], INNER[1] / 2.0]);
+        assert_eq!(
+            classify(INNER, Some(&half.to_core())),
+            ScreenClass::Tabletop
+        );
+        assert_eq!(rehearsed_fold("tabletop", INNER), Some(half));
+        let flat = rehearsed_fold("flat", INNER).unwrap();
+        assert_eq!(flat.state, FoldState::Flat);
+        assert_eq!(classify(INNER, Some(&flat.to_core())), ScreenClass::Tablet);
+        let book = rehearsed_fold(" Book ", INNER).unwrap();
+        assert!(book.book());
+        assert_eq!(book.bounds[0], INNER[0] / 2.0);
+        assert_eq!(classify(INNER, Some(&book.to_core())), ScreenClass::Tablet);
+        assert_eq!(rehearsed_fold("open", INNER), None);
+        assert_eq!(rehearsed_fold("half", [0.0, 0.0]), None);
     }
 }

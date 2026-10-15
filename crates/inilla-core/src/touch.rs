@@ -92,6 +92,12 @@ pub struct Screen {
     /// The free strip beside the camera housing (the Dynamic Island or the notch) in landscape,
     /// where the system buttons sit; `None` on a screen without one.
     pub strip: Option<Rect>,
+    /// Vanillish: a foldable half-folded with a horizontal hinge (tabletop): the part below the
+    /// hinge, where the HUD lays out — every element anchors to it. `None`: the safe area.
+    pub deck: Option<Rect>,
+    /// Vanillish: where the world is drawn, when not on the whole screen (tabletop: above the
+    /// hinge). A drag that lands outside it looks around without clicking anything.
+    pub world: Option<Rect>,
 }
 
 /// The narrowest camera-side inset that still holds a button.
@@ -103,6 +109,8 @@ impl Screen {
             size: [w, h],
             safe: [0.0; 4],
             strip: None,
+            deck: None,
+            world: None,
         }
     }
 
@@ -119,6 +127,26 @@ impl Screen {
             }
         });
         self
+    }
+
+    /// Vanillish: split at a horizontal hinge (`hinge`, in points; a fold that occludes nothing
+    /// is a zero-height rect): the world above it, the deck below, `gap` points clear of the
+    /// crease.
+    pub fn split_at_hinge(mut self, hinge: Rect, gap: f32) -> Self {
+        let safe = self.safe_rect();
+        self.world = Some(Rect::new([0.0, 0.0], [self.size[0], hinge.min[1]]));
+        self.deck = Some(Rect::new(
+            [safe.min[0], hinge.max[1] + gap],
+            [safe.max[0], safe.max[1]],
+        ));
+        // The island strip belongs to the top half; the system buttons move to the deck.
+        self.strip = None;
+        self
+    }
+
+    /// The rect elements anchor to: the deck on a split screen (Vanillish), else the safe area.
+    pub fn layout_rect(&self) -> Rect {
+        self.deck.unwrap_or_else(|| self.safe_rect())
     }
 
     pub fn safe_rect(&self) -> Rect {
@@ -240,7 +268,7 @@ impl Element {
             let side = (self.size[0] * scale).min(strip.size()[0] - 4.0);
             return Rect::from_center(strip_slot(strip, slot), [side, side]);
         }
-        let safe = screen.safe_rect();
+        let safe = screen.layout_rect();
         let f = self.anchor.frac();
         let anchor = [
             safe.min[0] + f[0] * (safe.max[0] - safe.min[0]),
@@ -256,7 +284,7 @@ impl Element {
     /// Move the element so its centre lands at `center` (the editor's drag), keeping its anchor.
     pub fn set_center(&mut self, center: Vec2, screen: &Screen, scale: f32) {
         self.strip = None;
-        let safe = screen.safe_rect();
+        let safe = screen.layout_rect();
         let f = self.anchor.frac();
         let anchor = [
             safe.min[0] + f[0] * (safe.max[0] - safe.min[0]),
@@ -323,6 +351,11 @@ pub struct TouchFeel {
     /// The stick's sideways axis turns the character and the camera (the keyboard's A/D) instead
     /// of strafing (Q/E).
     pub stick_steers: bool,
+    /// Vanillish: the hub's two arcs (views, windows), in points at HUD scale 1.
+    pub hub_radii: [f32; 2],
+    /// Vanillish: the hub's "More" opens the radial where the thumb is, not mid-screen (a big
+    /// screen).
+    pub radial_at_thumb: bool,
 }
 
 impl Default for TouchFeel {
@@ -340,6 +373,8 @@ impl Default for TouchFeel {
             tooltip_ms: 500,
             hub_ms: 300,
             stick_steers: false,
+            hub_radii: [110.0, 185.0],
+            radial_at_thumb: false,
         }
     }
 }
@@ -350,6 +385,9 @@ impl Default for TouchFeel {
 pub struct TouchLayout {
     /// Bumped when the shipped defaults change shape; an older file gets the new elements merged in.
     pub version: u32,
+    /// Vanillish: the screen this layout is made for (each class has its own file); a file
+    /// without one is the phone's.
+    pub class: crate::fold::ScreenClass,
     pub enabled: bool,
     pub hud_scale: f32,
     pub opacity: f32,
@@ -534,6 +572,7 @@ pub fn default_layout() -> TouchLayout {
     }
     TouchLayout {
         version: LAYOUT_VERSION,
+        class: crate::fold::ScreenClass::Phone,
         enabled: true,
         hud_scale: 1.0,
         opacity: 0.55,
@@ -556,8 +595,10 @@ impl TouchLayout {
         if self.version >= LAYOUT_VERSION {
             return;
         }
-        let defaults = default_layout();
-        if self.version < 2 {
+        // Merge from this screen's own defaults: an inner-screen layout gains inner-screen
+        // elements, never the phone's.
+        let defaults = self.class.defaults();
+        if self.version < 2 && self.class == crate::fold::ScreenClass::Phone {
             // Version 2: holding jump opens the hub, and the system buttons the player left where
             // they were move beside the Dynamic Island.
             if let Some(jump) = self.elements.iter_mut().find(|e| e.id == "jump") {
@@ -729,7 +770,12 @@ impl TouchHub {
     /// horizontal toward the vertical that face the middle of the screen, so it opens away from
     /// the edges the element sits by.
     pub fn open(center: Vec2, screen: &Screen, views: &[String], scale: f32) -> Self {
-        let mid = screen.safe_rect().center();
+        Self::open_sized(center, screen, views, [110.0 * scale, 185.0 * scale])
+    }
+
+    /// Vanillish: [`Self::open`] with the arcs' radii given (a big screen's hub reaches further).
+    pub fn open_sized(center: Vec2, screen: &Screen, views: &[String], radii: [f32; 2]) -> Self {
+        let mid = screen.layout_rect().center();
         let across = if center[0] > mid[0] { PI } else { 0.0 };
         let up_down = if center[1] > mid[1] {
             -FRAC_PI_2
@@ -747,7 +793,7 @@ impl TouchHub {
         windows.push(HubItem::More);
         Self {
             center,
-            radii: [110.0 * scale, 185.0 * scale],
+            radii,
             start: across - pad,
             sweep: sweep + 2.0 * pad,
             rings: [views.iter().cloned().map(HubItem::View).collect(), windows],
@@ -859,6 +905,10 @@ enum Role {
         since: f64,
         looking: bool,
         long_fired: bool,
+        /// Vanillish: landed outside the drawn world (the tabletop deck): a look pad. A drag
+        /// looks, with the cursor parked in the world (`Some`: where); a tap or a hold clicks
+        /// nothing.
+        pad: Option<Vec2>,
     },
     /// The second finger of a UI scroll or a world pinch; its partner drives the gesture.
     Partner,
@@ -899,6 +949,10 @@ pub struct TouchEngine {
     /// Jump waits for the release: the player sits or casts, and a jump would stand them up or
     /// break the cast.
     defer_jump: bool,
+    /// A stylus hovering over a HUD element: which, and since when (its tooltip, unpressed).
+    hover: Option<(usize, f64)>,
+    /// The hover is the mouse: the cursor follows a hovering stylus.
+    hover_cursor: bool,
 }
 
 impl TouchEngine {
@@ -931,6 +985,11 @@ impl TouchEngine {
         ui_hit: &dyn Fn(Vec2) -> bool,
     ) {
         self.screen = Some(*screen);
+        if t.phase == Phase::Started {
+            // The pen touched down: the finger engine owns the mouse from here.
+            self.hover = None;
+            self.hover_cursor = false;
+        }
         match t.phase {
             Phase::Started => self.start(t.id, t.pos, layout, screen, now, ui_hit),
             Phase::Moved => self.moved(t.id, t.pos, layout),
@@ -1086,6 +1145,10 @@ impl TouchEngine {
             return;
         }
 
+        let pad = screen
+            .world
+            .filter(|w| !w.contains(pos))
+            .map(|w| park(w, ui_hit));
         self.fingers.insert(
             id,
             Finger {
@@ -1095,6 +1158,7 @@ impl TouchEngine {
                     since: now,
                     looking: false,
                     long_fired: false,
+                    pad,
                 },
                 pos,
             },
@@ -1164,13 +1228,16 @@ impl TouchEngine {
                 last,
                 looking,
                 long_fired,
+                pad,
                 ..
             } => {
                 if self.pinch.is_some() {
                     *last = pos;
                 } else if !*looking && !*long_fired && len(sub(pos, *start)) > feel.slop {
                     *looking = true;
-                    let start = *start;
+                    let d = sub(pos, *start);
+                    // The look's button goes down over the world: on the pad, its middle.
+                    let start = pad.unwrap_or(*start);
                     let button = if feel.drag_turns_character {
                         MouseButton::Right
                     } else {
@@ -1181,7 +1248,6 @@ impl TouchEngine {
                     self.out.mouse.push(MouseOp::MoveTo(start));
                     self.out.mouse.push(MouseOp::Down(button));
                     self.cursor_shown = true;
-                    let d = sub(pos, start);
                     self.out.mouse.push(MouseOp::Motion(look_delta(d, feel)));
                 } else if *looking {
                     let d = sub(pos, prev);
@@ -1230,7 +1296,9 @@ impl TouchEngine {
         {
             self.out.released.push(b.clone());
         }
-        let mut hub = TouchHub::open(center, &screen, &layout.views, layout.hud_scale);
+        let [inner, outer] = layout.feel.hub_radii;
+        let s = layout.hud_scale;
+        let mut hub = TouchHub::open_sized(center, &screen, &layout.views, [inner * s, outer * s]);
         hub.selected = hub.pick(f.pos);
         f.role = Role::Hub;
         self.hub = Some(hub);
@@ -1351,11 +1419,12 @@ impl TouchEngine {
                 start,
                 looking,
                 long_fired,
+                pad,
                 ..
             } => {
                 if looking {
                     self.end_look();
-                } else if !long_fired && !canceled && self.pinch.is_none() {
+                } else if pad.is_none() && !long_fired && !canceled && self.pinch.is_none() {
                     let double = self.last_tap.is_some_and(|(p, t)| {
                         (now - t) * 1000.0 <= f64::from(layout.feel.double_tap_ms)
                             && len(sub(p, start)) < 40.0
@@ -1386,7 +1455,15 @@ impl TouchEngine {
                     match hub.pick(pos).and_then(|s| hub.item(s)).cloned() {
                         _ if canceled => {}
                         // "More": the whole radial, up until a tap picks from it.
-                        Some(HubItem::More) => self.radial = self.screen.as_ref().map(radial_for),
+                        Some(HubItem::More) => {
+                            self.radial = self.screen.as_ref().map(|s| {
+                                if layout.feel.radial_at_thumb {
+                                    radial_near(hub.center, s)
+                                } else {
+                                    radial_for(s)
+                                }
+                            })
+                        }
                         Some(item) => self.out.hub_pick = Some(item),
                         None => {}
                     }
@@ -1408,6 +1485,42 @@ impl TouchEngine {
         }
     }
 
+    /// Vanillish: a stylus hovering above the screen (`Some`), or gone (`None`): the mouse
+    /// without a button, as a desktop player's — the stock interface's tooltips, the world's
+    /// mouseover — and a HUD element's tooltip without pressing it. Ignored while a finger is
+    /// down: the finger is the mouse then.
+    pub fn hover(&mut self, at: Option<Vec2>, layout: &TouchLayout, screen: &Screen, now: f64) {
+        if !self.fingers.is_empty() {
+            self.hover = None;
+            return;
+        }
+        let Some(p) = at else {
+            self.hover = None;
+            if self.hover_cursor {
+                self.hover_cursor = false;
+                self.cursor_shown = false;
+                self.out.mouse.push(MouseOp::Leave);
+            }
+            return;
+        };
+        if let Some(i) = layout.hit(p, screen) {
+            if self.hover.map(|(h, _)| h) != Some(i) {
+                self.hover = Some((i, now));
+            }
+            // Over the HUD the game's cursor goes away, as it does under a finger.
+            if self.hover_cursor {
+                self.hover_cursor = false;
+                self.cursor_shown = false;
+                self.out.mouse.push(MouseOp::Leave);
+            }
+            return;
+        }
+        self.hover = None;
+        self.hover_cursor = true;
+        self.cursor_shown = true;
+        self.out.mouse.push(MouseOp::MoveTo(p));
+    }
+
     /// Close the touch radial without a pick (another input took over).
     pub fn close_radial(&mut self) {
         self.radial = None;
@@ -1423,6 +1536,8 @@ impl TouchEngine {
         }
         self.radial = None;
         self.hub = None;
+        self.hover = None;
+        self.hover_cursor = false;
     }
 
     /// Close the frame: timers (long press, tooltips, the hub), the stick, the held set. Call
@@ -1501,9 +1616,15 @@ impl TouchEngine {
                     since,
                     looking,
                     long_fired,
+                    pad,
                     ..
                 } => {
-                    if !*looking && !*long_fired && now - *since >= long && self.pinch.is_none() {
+                    if pad.is_none()
+                        && !*looking
+                        && !*long_fired
+                        && now - *since >= long
+                        && self.pinch.is_none()
+                    {
                         *long_fired = true;
                         click(&mut out.mouse, *start, MouseButton::Right);
                     }
@@ -1539,6 +1660,15 @@ impl TouchEngine {
                 Role::Partner | Role::Radial | Role::Hub => {}
             }
         }
+        if let Some((i, since)) = self.hover {
+            let explains = layout
+                .elements
+                .get(i)
+                .is_some_and(|e| e.hold == Hold::Tooltip);
+            if explains && now - since >= tip && out.tooltip.is_none() {
+                out.tooltip = Some(i);
+            }
+        }
         out.stick = stick;
         out.radial = self.radial;
         out.hub = self.hub.clone();
@@ -1547,13 +1677,50 @@ impl TouchEngine {
     }
 }
 
-/// The touch radial, centred on the safe area.
+/// The touch radial, centred where the HUD lays out (the safe area, or the deck), and no bigger
+/// than a phone's (Vanillish): on a tablet the wedges stay within a thumb's travel of each other.
 fn radial_for(screen: &Screen) -> TouchRadial {
+    let h = screen.deck.map_or(screen.size[1], |d| d.size()[1]);
     TouchRadial {
-        center: screen.safe_rect().center(),
-        radius: (screen.size[1] * 0.36).max(110.0),
+        center: screen.layout_rect().center(),
+        radius: (h * 0.36).clamp(110.0, 170.0),
         selected: None,
     }
+}
+
+/// Vanillish: where a look from outside the world puts the cursor before its button goes down: a
+/// point of the world no window covers (a right-button down on a window would click it), the
+/// middle first.
+fn park(world: Rect, ui_hit: &dyn Fn(Vec2) -> bool) -> Vec2 {
+    let at = |fx: f32, fy: f32| {
+        [
+            world.min[0] + fx * (world.max[0] - world.min[0]),
+            world.min[1] + fy * (world.max[1] - world.min[1]),
+        ]
+    };
+    let spots = [
+        at(0.5, 0.5),
+        at(0.5, 0.3),
+        at(0.7, 0.5),
+        at(0.3, 0.5),
+        at(0.5, 0.7),
+        at(0.85, 0.3),
+    ];
+    spots.into_iter().find(|p| !ui_hit(*p)).unwrap_or(spots[0])
+}
+
+/// Vanillish: the touch radial as close to `at` (the thumb) as it fits whole.
+fn radial_near(at: Vec2, screen: &Screen) -> TouchRadial {
+    let mut r = radial_for(screen);
+    let area = screen.layout_rect();
+    let margin = r.radius * 1.35;
+    for (axis, v) in at.iter().enumerate() {
+        let (lo, hi) = (area.min[axis] + margin, area.max[axis] - margin);
+        if lo <= hi {
+            r.center[axis] = v.clamp(lo, hi);
+        }
+    }
+    r
 }
 
 fn click(ops: &mut Vec<MouseOp>, at: Vec2, button: MouseButton) {
