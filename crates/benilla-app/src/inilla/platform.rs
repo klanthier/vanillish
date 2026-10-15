@@ -405,7 +405,10 @@ fn frame_cap(state: Res<Inilla>, mut last: Local<Option<Instant>>, mut pacing: L
         let budget = Duration::from_secs_f64(1.0 / f64::from(cap));
         if let Some(prev) = *last {
             let spent = now.duration_since(prev);
-            let paced = cfg!(target_os = "android") && pacing.display_paces(cap, spent, now);
+            let paced = cfg!(target_os = "android")
+                && pacing.display_paces(cap, spent, now, || {
+                    device::refresh_rate().map_or(0.0, |(current, _)| current)
+                });
             if spent < budget && !paced {
                 std::thread::sleep(budget - spent);
             }
@@ -436,7 +439,14 @@ impl Pacing {
     /// How long a disproved report is ignored.
     const DISTRUST: Duration = Duration::from_secs(10);
 
-    fn display_paces(&mut self, cap: u32, spent: Duration, now: Instant) -> bool {
+    /// `display_hz` reads the panel's current rate (`0` = unknown).
+    fn display_paces(
+        &mut self,
+        cap: u32,
+        spent: Duration,
+        now: Instant,
+        display_hz: impl FnOnce() -> f32,
+    ) -> bool {
         if self.cap != cap {
             *self = Pacing { cap, ..default() };
         }
@@ -444,7 +454,7 @@ impl Pacing {
             .read_at
             .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
         {
-            self.display_hz = device::refresh_rate().map_or(0.0, |(current, _)| current);
+            self.display_hz = display_hz();
             self.read_at = Some(now);
         }
         let at_cap = self.display_hz > 0.0 && self.display_hz <= cap as f32 * 1.05;
@@ -470,6 +480,65 @@ impl Pacing {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    /// `frames` unslept frames `interval` apart under a panel at `hz`; what the last one decided.
+    fn run(p: &mut Pacing, t: &mut Instant, cap: u32, hz: f32, interval: f64, frames: u32) -> bool {
+        let mut paced = false;
+        for _ in 0..frames {
+            *t += Duration::from_secs_f64(interval);
+            paced = p.display_paces(cap, Duration::from_secs_f64(interval), *t, || hz);
+        }
+        paced
+    }
+
+    #[test]
+    fn a_panel_at_the_cap_pacing_the_frames_stands_the_sleep_down() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        assert!(run(&mut p, &mut t, 60, 60.0, 1.0 / 60.0, 300));
+        // A panel under the cap paces too (the frames only come slower).
+        assert!(run(&mut p, &mut t, 60, 30.0, 1.0 / 30.0, 300));
+    }
+
+    #[test]
+    fn a_panel_over_the_cap_or_unknown_keeps_the_sleep() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        assert!(!run(&mut p, &mut t, 60, 120.0, 1.0 / 120.0, 10));
+        let mut p = Pacing::default();
+        assert!(!run(&mut p, &mut t, 60, 0.0, 1.0 / 60.0, 10));
+    }
+
+    #[test]
+    fn frames_faster_than_the_reported_rate_are_not_trusted_for_a_while() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        // The panel says 60, frames come at 120: trusted until measured, then not.
+        assert!(run(
+            &mut p,
+            &mut t,
+            60,
+            60.0,
+            1.0 / 120.0,
+            Pacing::SAMPLES - 1
+        ));
+        assert!(!run(&mut p, &mut t, 60, 60.0, 1.0 / 120.0, 1));
+        // While distrusted, frames that do come paced change nothing...
+        assert!(!run(&mut p, &mut t, 60, 60.0, 1.0 / 60.0, 300));
+        // ...until the distrust runs out.
+        t += Pacing::DISTRUST;
+        assert!(run(&mut p, &mut t, 60, 60.0, 1.0 / 60.0, 1));
+    }
+
+    #[test]
+    fn a_new_cap_starts_over() {
+        let (mut p, mut t) = (Pacing::default(), Instant::now());
+        run(&mut p, &mut t, 60, 60.0, 1.0 / 120.0, Pacing::SAMPLES);
+        assert!(p.distrust_until.is_some());
+        assert!(run(&mut p, &mut t, 30, 30.0, 1.0 / 30.0, 1));
     }
 }
 

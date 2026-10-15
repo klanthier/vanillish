@@ -6,7 +6,7 @@
 //!   types what the keyboard commits into the game as the key messages iOS's keyboard produces, so
 //!   benilla's text law and egui take it unchanged; the word still being composed is kept apart
 //!   ([`ImePreedit`]) for the HUD to show.
-//! - **Back** (`host::keys`, [`back_to_escape`]): the key or the gesture — the screens take theirs
+//! - **Back** (`winit_keys`, [`back_to_escape`]): the key or the gesture — the screens take theirs
 //!   first, the rest is the game's Escape.
 //! - **the native window's size** (`host::follow_native_window`): winit loses a resize that lands
 //!   while the Activity is paused, and Bevy keeps a stale size across a resume.
@@ -17,7 +17,8 @@
 //! - **staying connected** ([`session_service`]): a foreground service keeps the process, and the
 //!   game's connection, alive while the player is in the world and the app is in the background.
 //!
-//! Everything but `host` runs on every platform and is a no-op where its OS call is.
+//! Everything but `host` and `winit_keys` (Android only) runs on every platform and is a no-op where
+//! its OS call is.
 
 use bevy::prelude::*;
 use bevy::window::AppLifecycle;
@@ -401,6 +402,237 @@ mod buffer {
     }
 }
 
+/// winit's key messages, sorted before anything reads them (Android) — plain Bevy apart from the
+/// Activity's Back count (a no-op off Android), so it is tested on the host.
+///
+/// - **Back** (the key, Android 12–15 without predictive back) is counted into [`BackPresses`] and
+///   removed: to the game it is an unknown key. The callback's presses (the gesture, Android 16)
+///   come from the Activity and are added here too.
+/// - **Enter** from a hardware keyboard has `"\n"` for its text and its logical key; it becomes
+///   the named key (iOS's Return gets the same rewrite in `platform`).
+/// - A **character key's release** is noted (`WinitKeys::typed`) for the IME bridge: while the
+///   soft keyboard is up, GameTextInput takes a hardware key's press into its buffer, marked
+///   composing, and only the release reaches winit.
+#[cfg(any(target_os = "android", test))]
+mod winit_keys {
+    use bevy::ecs::message::MessageCursor;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::ButtonState;
+    use bevy::prelude::*;
+
+    use inilla_platform::device;
+
+    use crate::inilla::platform::BackPresses;
+
+    /// What winit delivered between two frames.
+    #[derive(Resource, Default)]
+    pub(super) struct WinitKeys {
+        /// Moved past the whole queue at the end of every frame ([`keys_seen`]), so [`keys`] reads
+        /// only what winit wrote in between — never the app's own keys (the IME bridge's
+        /// characters, the synthetic Enter), which it would otherwise take for a hardware key's
+        /// release, and write again with a rewrite.
+        cursor: MessageCursor<KeyboardInput>,
+        /// A character key came up this frame (see the module).
+        pub(super) typed: bool,
+    }
+
+    pub(super) fn keys(
+        mut messages: ResMut<Messages<KeyboardInput>>,
+        mut seen: ResMut<WinitKeys>,
+        mut back: ResMut<BackPresses>,
+    ) {
+        let presses = device::take_back_presses();
+        if presses > 0 {
+            back.0 += presses;
+        }
+        // A cursor rather than this update's half of the buffer: a message update in `First` (on
+        // any frame after a fixed step) has already moved winit's messages to the older half.
+        let seen = &mut *seen;
+        let fresh: Vec<KeyboardInput> = seen.cursor.read(&messages).cloned().collect();
+        seen.typed = fresh.iter().any(|k| {
+            k.state == ButtonState::Released && matches!(k.logical_key, Key::Character(_))
+        });
+        if !fresh.iter().any(|k| is_back(k) || is_newline(k)) {
+            return;
+        }
+        // Messages cannot be removed one by one: drop the buffers (everything but `fresh` was
+        // written last frame, and every reader has had it; nothing has read `fresh` yet) and write
+        // these back, rewritten.
+        messages.drain().for_each(drop);
+        for mut k in fresh {
+            if is_back(&k) {
+                if k.state == ButtonState::Pressed && !k.repeat {
+                    back.0 += 1;
+                }
+                continue;
+            }
+            if is_newline(&k) {
+                if !matches!(k.key_code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                    k.key_code = KeyCode::Enter;
+                }
+                k.logical_key = Key::Enter;
+                k.text = None;
+            }
+            messages.write(k);
+        }
+        seen.cursor.clear(&messages);
+    }
+
+    /// `Last`: everything in the queue now was written by the app this frame.
+    pub(super) fn keys_seen(mut seen: ResMut<WinitKeys>, messages: Res<Messages<KeyboardInput>>) {
+        seen.cursor.clear(&messages);
+    }
+
+    fn is_back(k: &KeyboardInput) -> bool {
+        matches!(k.logical_key, Key::BrowserBack)
+    }
+
+    fn is_newline(k: &KeyboardInput) -> bool {
+        matches!(k.text.as_deref(), Some("\n") | Some("\r"))
+            || matches!(&k.logical_key, Key::Character(c) if c.as_str() == "\n" || c.as_str() == "\r")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use bevy::input::keyboard::NativeKeyCode;
+
+        use super::*;
+
+        fn key(
+            code: KeyCode,
+            logical: Key,
+            state: ButtonState,
+            text: Option<&str>,
+        ) -> KeyboardInput {
+            KeyboardInput {
+                key_code: code,
+                logical_key: logical,
+                state,
+                text: text.map(Into::into),
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            }
+        }
+
+        fn typed(c: &str, state: ButtonState) -> KeyboardInput {
+            let text = (state == ButtonState::Pressed).then_some(c);
+            key(
+                KeyCode::Unidentified(NativeKeyCode::Unidentified),
+                Key::Character(c.into()),
+                state,
+                text,
+            )
+        }
+
+        /// What the app's own producer (the IME bridge) writes after `keys` this frame.
+        #[derive(Resource, Default)]
+        struct Own(Vec<KeyboardInput>);
+
+        /// Every key message the game read.
+        #[derive(Resource, Default)]
+        struct Read(Vec<KeyboardInput>);
+
+        fn own(mut own: ResMut<Own>, mut out: MessageWriter<KeyboardInput>) {
+            for k in own.0.drain(..) {
+                out.write(k);
+            }
+        }
+
+        fn read(mut keys: MessageReader<KeyboardInput>, mut read: ResMut<Read>) {
+            read.0.extend(keys.read().cloned());
+        }
+
+        fn app() -> App {
+            let mut app = App::new();
+            app.add_message::<KeyboardInput>()
+                .init_resource::<BackPresses>()
+                .init_resource::<WinitKeys>()
+                .init_resource::<Own>()
+                .init_resource::<Read>()
+                .add_systems(PreUpdate, (keys, own).chain())
+                .add_systems(Update, read)
+                .add_systems(Last, keys_seen);
+            app
+        }
+
+        /// winit delivers between frames, before `First`.
+        fn winit(app: &mut App, k: KeyboardInput) {
+            app.world_mut().write_message(k);
+        }
+
+        #[test]
+        fn the_apps_own_keys_are_not_winits() {
+            let mut app = app();
+            app.update();
+            app.world_mut().resource_mut::<Own>().0 = vec![
+                typed("a", ButtonState::Pressed),
+                typed("a", ButtonState::Released),
+            ];
+            app.update();
+            // Back arrives: the rewrite must not send the bridge's "a" a second time, and its
+            // release is not a hardware key's.
+            winit(
+                &mut app,
+                key(
+                    KeyCode::Unidentified(NativeKeyCode::Android(4)),
+                    Key::BrowserBack,
+                    ButtonState::Pressed,
+                    None,
+                ),
+            );
+            app.update();
+            assert!(!app.world().resource::<WinitKeys>().typed);
+            assert_eq!(app.world().resource::<BackPresses>().0, 1);
+            let read = &app.world().resource::<Read>().0;
+            assert_eq!(read.len(), 2, "{read:?}");
+            assert!(read
+                .iter()
+                .all(|k| k.logical_key == Key::Character("a".into())));
+        }
+
+        #[test]
+        fn hardware_enter_is_the_named_key() {
+            let mut app = app();
+            app.update();
+            winit(
+                &mut app,
+                key(
+                    KeyCode::Enter,
+                    Key::Character("\n".into()),
+                    ButtonState::Pressed,
+                    Some("\n"),
+                ),
+            );
+            app.update();
+            let read = &app.world().resource::<Read>().0;
+            assert_eq!(read.len(), 1);
+            assert_eq!(
+                (read[0].key_code, &read[0].logical_key, &read[0].text),
+                (KeyCode::Enter, &Key::Enter, &None)
+            );
+        }
+
+        #[test]
+        fn a_hardware_character_release_is_noted_for_one_frame() {
+            let mut app = app();
+            app.update();
+            winit(
+                &mut app,
+                key(
+                    KeyCode::KeyA,
+                    Key::Character("a".into()),
+                    ButtonState::Released,
+                    None,
+                ),
+            );
+            app.update();
+            assert!(app.world().resource::<WinitKeys>().typed);
+            app.update();
+            assert!(!app.world().resource::<WinitKeys>().typed);
+        }
+    }
+}
+
 /// The parts that need Android's `AndroidApp` (from `bevy::android::ANDROID_APP`).
 #[cfg(target_os = "android")]
 mod host {
@@ -411,18 +643,16 @@ mod host {
     };
     use bevy::android::android_activity::AndroidApp;
     use bevy::android::ANDROID_APP;
-    use bevy::ecs::message::MessageCursor;
     use bevy::ecs::system::NonSendMarker;
     use bevy::input::keyboard::{Key, KeyboardInput, NativeKeyCode};
     use bevy::input::ButtonState;
     use bevy::prelude::*;
     use bevy::window::{AppLifecycle, PrimaryWindow};
 
-    use inilla_platform::device;
-
     use super::buffer::{self, Typed};
+    use super::winit_keys::{self, WinitKeys};
     use super::ImePreedit;
-    use crate::inilla::platform::{BackPresses, ImePurpose, SyntheticKeys};
+    use crate::inilla::platform::{ImePurpose, SyntheticKeys};
 
     /// A buffer this long with nothing composing starts over (GameTextInput copies it into a
     /// fixed 64 KiB, and every frame's read decodes all of it).
@@ -430,19 +660,21 @@ mod host {
 
     pub(super) fn build(app: &mut App) {
         app.init_resource::<Ime>()
+            .init_resource::<WinitKeys>()
             .add_systems(PreUpdate, follow_native_window)
             .add_systems(
                 PreUpdate,
                 (
                     // First of all readers: it rewrites what winit wrote.
-                    keys.before(crate::inilla::InputProducers),
+                    winit_keys::keys.before(crate::inilla::InputProducers),
                     // After the controller's taps, ahead of the synthetic keys' presses.
                     ime.after(crate::inilla::InputProducers)
                         .before(crate::inilla::platform::synthetic_keys),
                 )
                     .chain()
                     .before(bevy::input::InputSystems),
-            );
+            )
+            .add_systems(Last, winit_keys::keys_seen);
     }
 
     /// Keep `Window.resolution` at the native window's size. winit sends a resize only while the
@@ -480,73 +712,6 @@ mod host {
         }
     }
 
-    /// winit's keys, before anything reads them:
-    ///
-    /// - **Back** (the key, Android 12–15 without predictive back) is counted into [`BackPresses`]
-    ///   and removed: to the game it is an unknown key. The callback's presses (the gesture,
-    ///   Android 16) come from the Activity and are added here too.
-    /// - **Enter** from a hardware keyboard has `"\n"` for its text and its logical key; it becomes
-    ///   the named key (iOS's Return gets the same rewrite in `platform`).
-    /// - A **character key's release** is noted for [`ime`]: while the soft keyboard is up,
-    ///   GameTextInput takes a hardware key's press into its buffer, marked composing, and only the
-    ///   release reaches winit.
-    pub(super) fn keys(
-        mut messages: ResMut<Messages<KeyboardInput>>,
-        mut seen: Local<Option<MessageCursor<KeyboardInput>>>,
-        mut back: ResMut<BackPresses>,
-        mut ime: ResMut<Ime>,
-    ) {
-        let presses = device::take_back_presses();
-        if presses > 0 {
-            back.0 += presses;
-        }
-        // A cursor rather than this update's half of the buffer: a message update in `First` (on
-        // any frame after a fixed step) has already moved winit's messages to the older half.
-        let cursor = seen.get_or_insert_with(|| messages.get_cursor_current());
-        let fresh: Vec<KeyboardInput> = cursor.read(&messages).cloned().collect();
-        if fresh.is_empty() {
-            return;
-        }
-        if fresh
-            .iter()
-            .any(|k| k.state == ButtonState::Released && matches!(k.logical_key, Key::Character(_)))
-        {
-            ime.key_typed = true;
-        }
-        if !fresh.iter().any(|k| is_back(k) || is_newline(k)) {
-            return;
-        }
-        // Messages cannot be removed one by one: drop the buffers (every reader has seen the older
-        // half; nothing has read these yet) and write these back, rewritten.
-        messages.drain().for_each(drop);
-        for mut k in fresh {
-            if is_back(&k) {
-                if k.state == ButtonState::Pressed && !k.repeat {
-                    back.0 += 1;
-                }
-                continue;
-            }
-            if is_newline(&k) {
-                if !matches!(k.key_code, KeyCode::Enter | KeyCode::NumpadEnter) {
-                    k.key_code = KeyCode::Enter;
-                }
-                k.logical_key = Key::Enter;
-                k.text = None;
-            }
-            messages.write(k);
-        }
-        cursor.clear(&messages);
-    }
-
-    fn is_back(k: &KeyboardInput) -> bool {
-        matches!(k.logical_key, Key::BrowserBack)
-    }
-
-    fn is_newline(k: &KeyboardInput) -> bool {
-        matches!(k.text.as_deref(), Some("\n") | Some("\r"))
-            || matches!(&k.logical_key, Key::Character(c) if c.as_str() == "\n" || c.as_str() == "\r")
-    }
-
     /// The soft keyboard between frames.
     #[derive(Resource, Default)]
     pub(super) struct Ime {
@@ -560,8 +725,6 @@ mod host {
         clearing: bool,
         /// Keys waiting to be typed into the game; an Enter or a Tab ends a frame's share.
         queue: VecDeque<Typed>,
-        /// A character key came up through winit this frame (see [`keys`]).
-        key_typed: bool,
     }
 
     /// The soft keyboard's bridge. winit raises and lowers the keyboard with `Window.ime_enabled`
@@ -570,7 +733,9 @@ mod host {
     ///
     /// - **raised**: the keyboard is set up for the field's kind ([`configure`]) and asked for
     ///   explicitly (winit's request is the implicit kind some keyboards ignore); whatever the
-    ///   buffer still holds is not typed;
+    ///   buffer still holds is not typed. The kind is what the screens left in [`ImePurpose`] last
+    ///   frame, so their per-frame reset must not land between their pass and `PreUpdate`: a kind
+    ///   that flips between frames restarts the keyboard each time;
     /// - **each frame**: the buffer is read and what it committed is typed into the game
     ///   ([`buffer::step`]) — characters as iOS's keyboard sends them (pressed with their text,
     ///   then released; no key code), deletions as Backspace, a line break as Enter through
@@ -588,7 +753,7 @@ mod host {
     ///
     /// Backspace in an empty buffer is not the keyboard's to apply, so it sends the key, which
     /// reaches winit as Backspace. A hardware keyboard's typing arrives through the buffer too
-    /// while the keyboard is up (see [`keys`]).
+    /// while the keyboard is up, committed by the key's release ([`WinitKeys::typed`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn ime(
         _main: NonSendMarker,
@@ -596,6 +761,7 @@ mod host {
         mut preedit: ResMut<ImePreedit>,
         purpose: Res<ImePurpose>,
         mut synthetic: ResMut<SyntheticKeys>,
+        winit: Res<WinitKeys>,
         mut out: MessageWriter<KeyboardInput>,
         mut lifecycle: MessageReader<AppLifecycle>,
         windows: Query<(Entity, &Window), With<PrimaryWindow>>,
@@ -626,7 +792,7 @@ mod host {
                     ime.clearing = false;
                 }
                 let region = state.compose_region.map(|r| (r.start, r.end));
-                let step = buffer::step(&ime.sent, &state.text, region, ends || ime.key_typed);
+                let step = buffer::step(&ime.sent, &state.text, region, ends || winit.typed);
                 ime.queue.extend(step.keys);
                 ime.sent = step.sent;
                 let long = step.preedit.is_empty() && ime.sent.chars().count() > LONGEST_LINE;
@@ -655,7 +821,6 @@ mod host {
         if preedit.0 != composing {
             preedit.0 = composing;
         }
-        ime.key_typed = false;
         type_queued(&mut ime.queue, &mut out, &mut synthetic, window);
     }
 
