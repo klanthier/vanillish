@@ -59,8 +59,8 @@ script, for next time.
 | creature pathfinding | optional, asked once: monsters walk around obstacles instead of through them. Generated in the background after the first start, about 1.5 to 3 hours on an M4; you can play meanwhile. |
 | start | the prebuilt images, then the first start, with its progress: the database (a minute), the server's maps from your game files (3 to 5 minutes), the world (1 to 2 minutes) |
 
-Closing the Terminal window during the first start does not stop it: the server finishes by
-itself. `setup-mac.sh --help` lists the options (`--data`, `--ip`, `--reimport`, `--mmaps`,
+Closing the Terminal window or pressing Ctrl-C during the first start does not stop it: the server
+finishes by itself. `setup-mac.sh --help` lists the options (`--data`, `--ip`, `--reimport`, `--mmaps`,
 `--yes`, `--dry-run`, `--uninstall`).
 
 ### Keep it reachable
@@ -109,13 +109,15 @@ cp .env.example .env     # set REALM_ADDRESS, and the three passwords (openssl r
 
   ```sh
   docker volume create vanillish-wowdata
-  tar -cf - -C "/path/to/World of Warcraft/Data" dbc.MPQ fonts.MPQ interface.MPQ misc.MPQ \
-      model.MPQ patch.MPQ patch-2.MPQ sound.MPQ speech.MPQ terrain.MPQ texture.MPQ wmo.MPQ |
+  COPYFILE_DISABLE=1 tar -cf - -C "/path/to/World of Warcraft/Data" dbc.MPQ fonts.MPQ \
+      interface.MPQ misc.MPQ model.MPQ patch.MPQ sound.MPQ speech.MPQ terrain.MPQ texture.MPQ wmo.MPQ |
     docker run --rm -i -v vanillish-wowdata:/d alpine:3 tar -xf - -C /d
   ```
 
-  In the volume the archives must carry these stock names, in this case (the extractors open them
-  by name, and Linux is case-sensitive); add `speech2.MPQ` if your client has one.
+  Add your client's `patch-2.MPQ` (and any other `patch-N.MPQ`) and `speech2.MPQ` to the list when
+  it has them. In the volume the archives must carry these stock names, in this case (the
+  extractors open them by name, and Linux is case-sensitive). `COPYFILE_DISABLE=1` keeps a Mac's
+  `._` metadata files out of the copy.
 - **Start**: `docker compose up -d`. Compose downloads the prebuilt images; it builds one here only
   when the registry does not have it (your own `VMANGOS_COMMIT`, or an unpublished fork), which
   takes about 10 minutes more.
@@ -164,7 +166,7 @@ app falls back to the game files only, or to its manual server form.
   Accounts are then made on the console (below). `open` takes sign-ups from anywhere, for a
   server on the internet, and only makes sense with a token.
 - **With a token** (`INILLA_DATA_TOKEN`), sign-ups need it too, as the game files do.
-- **Limits**: 5 new accounts in 10 minutes and 20 a day per address, 30 an hour in all. Behind
+- **Limits**: 5 sign-up attempts in 10 minutes and 20 a day per address, 30 an hour in all. Behind
   Docker Desktop and OrbStack every phone arrives from the same address, so there the per-address
   limits count all phones together.
 - **Game masters**: no account made in the app is one. Make yours one on the console (it applies
@@ -219,6 +221,7 @@ It takes no sign-ups (there is no database for it to write to); `WOW_DATA_DIR_DE
 | path | what |
 |---|---|
 | `setup-mac.sh`, `setup-linux.sh` | the one-command setup (the Linux one hands over to the first, which carries both) |
+| `ci/setup-test.sh` | the setup's own tests (`bash ci/setup-test.sh`, under any bash from macOS' 3.2 on) |
 | `compose.yaml` | the stack |
 | `.env.example` | every setting, documented |
 | `config/` | overrides for `mangosd.conf` and `realmd.conf` |

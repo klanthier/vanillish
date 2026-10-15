@@ -231,7 +231,10 @@ check_machine() {
     chip="$(mac sysctl -n machdep.cpu.brand_string || echo 'an unknown chip')"
     ver="$(mac sw_vers -productVersion || echo '?')"
     say "This Mac: $chip, macOS $ver"
-    MAC_ARM="$(mac sysctl -n hw.optional.arm64 2>/dev/null || echo 1)"
+    # 1 on Apple silicon, even from a Terminal under Rosetta; an Intel Mac has no such key. A
+    # rehearsal on another system takes Apple silicon.
+    MAC_ARM="$(mac sysctl -n hw.optional.arm64 2>/dev/null || true)"
+    if [ -z "$MAC_ARM" ] && [ "$ON_MAC" = 0 ]; then MAC_ARM=1; fi
     if [ "$MAC_ARM" != 1 ]; then
         warn "an Intel Mac: the server runs here too, but this setup is made for Apple silicon"
     elif [ "$(mac sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
@@ -347,7 +350,15 @@ check_docker() {
     fi
     docker compose version >/dev/null 2>&1 ||
         die "'docker compose' is missing (Colima: brew install docker-compose; Linux: the docker-compose-plugin package)"
-    if [ "$OS" = mac ]; then RUNTIME="$(mac_runtime)"; fi
+    if [ "$OS" = mac ]; then
+        # The engine names itself; the context and the apps installed are only a guess (both apps
+        # can be there, with the default context).
+        case "$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)" in
+            *OrbStack*) RUNTIME=orbstack ;;
+            *"Docker Desktop"*) RUNTIME=desktop ;;
+            *) RUNTIME="$(mac_runtime)" ;;
+        esac
+    fi
     DOCKER_ARCH="$(docker info --format '{{.Architecture}}' 2>/dev/null || echo '?')"
     mem="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
     cpus="$(docker info --format '{{.NCPU}}' 2>/dev/null || echo '?')"
@@ -512,10 +523,36 @@ host_tz() { # this machine's time zone (the realm's clock: day and night, resets
     printf '%s' "$z"
 }
 
+# The database of an earlier install is here, but not the .env it was made with (its folder was
+# deleted): MariaDB keeps the root password it was created with, so new passwords cannot open it,
+# and db-init would fail on every start. Deletes it when the player agrees (0), else stops.
+orphan_database() {
+    warn "this machine has the database of an earlier Vanillish server (the Docker volume ${PROJECT}_db),"
+    warn "but not the .env with its passwords: new passwords cannot open it."
+    if [ "$DRY" = 1 ]; then
+        note "(dry run: a real run asks whether to delete that old database)"
+        return 1
+    fi
+    if ask_yn "Delete that old database (its accounts and characters) and start afresh" n; then
+        # Its containers go first (they hold the volume); the start below makes them again.
+        docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | while read -r c; do
+            docker rm -f "$c" >/dev/null || true
+        done
+        docker volume rm "${PROJECT}_db" >/dev/null || die "could not delete the volume ${PROJECT}_db"
+        info "deleted the old database"
+        return 0
+    fi
+    die "nothing was changed. Put the earlier .env back in $(disp_dir), or delete the old database:
+      run this again and answer yes, or: docker volume rm ${PROJECT}_db (with its containers removed)"
+}
+
 write_env() {
     local key cur old db=0 p1 p2 p3
     say "Settings (.env)"
     if docker_ok && docker volume inspect "${PROJECT}_db" >/dev/null 2>&1; then db=1; fi
+    if [ ! -f "$ENV_FILE" ] || [ -z "$(env_get DB_ROOT_PASSWORD)" ]; then
+        if [ "$db" = 1 ] && orphan_database; then db=0; fi
+    fi
     if [ ! -f "$ENV_FILE" ]; then
         p1="$(secret)"
         p2="$(secret)"
@@ -549,12 +586,13 @@ EOF
                     info "added a new $key"
                     ;;
                 change-me*)
-                    # MariaDB keeps the root password it was first created with.
-                    if [ "$db" = 0 ]; then
+                    # MariaDB keeps the root password it was first created with; db-init gives the
+                    # other two users the .env's passwords on every start.
+                    if [ "$db" = 1 ] && [ "$key" = DB_ROOT_PASSWORD ]; then
+                        warn "$key is still the example from .env.example; the database was made with it, so it stays"
+                    else
                         env_set "$key" "$(secret)"
                         info "replaced the example $key with a new one"
-                    else
-                        warn "$key is still the example from .env.example; the database already uses it, so it stays"
                     fi
                     ;;
             esac
@@ -569,7 +607,14 @@ EOF
         info "kept the passwords in $(disp_dir)/.env"
     fi
     chmod 600 "$ENV_FILE"
+    # The data host's port, as compose reads it: the shell's first, then .env's.
+    PORT="${DATAHOST_PORT:-$(env_get DATAHOST_PORT)}"
+    case "$PORT" in '' | *[!0-9]*) PORT=8099 ;; esac
 }
+
+# typed HOST — what the player types in the app: HOST, with the data host's port when it is not the
+# app's default.
+typed() { if [ "$PORT" = 8099 ]; then printf '%s' "$1"; else printf '%s:%s' "$1" "$PORT"; fi; }
 
 # ---- 6. the game files -------------------------------------------------------------------------
 
@@ -770,21 +815,33 @@ has_required() {
 }
 tar_knows() { tar -c "$1" -f - -C "$TMP/empty" . >/dev/null 2>&1; }
 
-# Inside the throwaway container: the new archives land in .incoming, and only once all of them
-# are there do the old ones go and the new ones take their stock names. 0444: nothing writes them.
+# Inside the throwaway container: the new archives land in .incoming, and only once every one of
+# them is there at its full size do the old ones go and the new ones take their stock names (tar
+# skips a file it cannot read and still ends the archive cleanly, so a whole stream is not proof).
+# A copy that stops half-way leaves the old archives as they were, and nothing behind. 0444:
+# nothing writes them. RENAMES: "<name as sent> <stock name> <bytes>" per line.
 # shellcheck disable=SC2016 # the container's shell expands these
 IMPORT_SH='
+trap "rm -rf /d/.incoming" EXIT
+trap "exit 1" HUP INT TERM
 rm -rf /d/.incoming
 mkdir /d/.incoming
 tar -xf - -C /d/.incoming
+echo "$RENAMES" | while read -r found canon size; do
+    [ -n "$found" ] || continue
+    got="$(stat -c %s "/d/.incoming/$found" 2>/dev/null || echo 0)"
+    if [ "$got" != "$size" ]; then
+        echo "$found arrived with $got of its $size bytes; the archives already there are kept" >&2
+        exit 1
+    fi
+done
 for f in /d/*; do
     case "$(basename "$f" | tr A-Z a-z)" in *.mpq) rm -f "$f" ;; esac
 done
-echo "$RENAMES" | while read -r found canon; do
+echo "$RENAMES" | while read -r found canon size; do
     [ -n "$found" ] || continue
     mv "/d/.incoming/$found" "/d/$canon"
 done
-rm -rf /d/.incoming
 chown 0:0 /d/*.MPQ
 chmod 0444 /d/*.MPQ
 cd /d
@@ -797,7 +854,7 @@ for f in *.MPQ; do echo "$f $(stat -c %s "$f")"; done
 import_archives() {
     local data="$1" names renames want got flags="" t0 secs avail
     names="$(printf '%s' "$PLAN" | awk 'NF { print $1 }')"
-    renames="$(printf '%s' "$PLAN" | awk 'NF { print $1, $2 }')"
+    renames="$(printf '%s' "$PLAN" | awk 'NF { print $1, $2, $3 }')"
     want="$(plan_list)"
     # macOS's bsdtar would add AppleDouble ._ files and extended attributes (com.apple.quarantine).
     if tar_knows --no-mac-metadata; then flags="--no-mac-metadata "; fi
@@ -815,7 +872,7 @@ import_archives() {
     fi
     docker volume create --label io.github.klanthier.vanillish=wowdata "$VOLUME" >/dev/null
     # The new archives land beside the old ones, which go only once the copy is whole.
-    avail="$(docker run --rm -v "$VOLUME":/d "$HELPER" df -k /d 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+    avail="$(docker run --rm -v "$VOLUME":/d "$HELPER" df -Pk /d 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
     case "$avail" in '' | *[!0-9]*) avail=0 ;; esac
     if [ "$avail" -gt 0 ] && [ $((avail * 1024)) -lt "$TOTAL" ]; then
         die "Docker's disk has $(gb $((avail * 1024))) GB free, and the game files need $(gb "$TOTAL") GB.
@@ -861,6 +918,9 @@ game_data() {
         die "no folder chosen. Run this again, or name it: --data \"/path/to/World of Warcraft\""
     fi
     [ -d "$src" ] || die "$src is not a folder"
+    # A folder macOS keeps Terminal out of (Desktop, Documents, Downloads, an external drive) looks
+    # empty to the search below: say so instead.
+    ls "$src" >/dev/null || die_read "$src"
     data="$(find_data "${src%/}")" || die "no 1.12.1 Data folder (one with dbc.MPQ) in $src"
     if entry "$data" common.MPQ >/dev/null || entry "$data" expansion.MPQ >/dev/null; then
         die "$data belongs to a later World of Warcraft (2.x or newer); Vanillish needs 1.12.1 (build 5875)"
@@ -893,10 +953,12 @@ choose_mmaps() {
     fi
     env_set EXTRACT_MMAPS "$want"
 }
-has_mmaps() {
+# has_marker NAME — the extract service finished that step (.inilla-maps, -vmaps, -mmaps).
+has_marker() {
     docker volume inspect "${PROJECT}_serverdata" >/dev/null 2>&1 || return 1
-    docker run --rm -v "${PROJECT}_serverdata":/s:ro "$HELPER" test -f /s/.inilla-mmaps
+    docker run --rm -v "${PROJECT}_serverdata":/s:ro "$HELPER" test -f "/s/$1"
 }
+has_mmaps() { has_marker .inilla-mmaps; }
 
 # ---- 8. start, and follow it -------------------------------------------------------------------
 
@@ -923,14 +985,17 @@ last_line() { # the last line of compose's own output in $1
 
 phase_of() { # phase_of STATES LOG — sets PHASE and DETAIL: what the first start is doing now
     PHASE="" DETAIL=""
+    # mangosd before extract: on a first start it waits for extract, and beside the pathfinding
+    # generation (extract, for hours) its loading is the news.
     if [ "$(svc_field "$1" db-init 2)" = running ]; then
         PHASE="Setting up the database (about a minute, once)"
         DETAIL="$(last_log db-init)"
+    elif [ "$(svc_field "$1" mangosd 2)" = running ] && [ "$(svc_field "$1" mangosd 3)" != healthy ]; then
+        PHASE="Loading the world (1-2 minutes)"
     elif [ "$(svc_field "$1" extract 2)" = running ]; then
         PHASE="Extracting the server's maps from your game files (3-5 minutes, once)"
         DETAIL="$(last_log extract)"
-    elif [ "$(svc_field "$1" mangosd 2)" = running ] && [ "$(svc_field "$1" mangosd 3)" != healthy ]; then
-        PHASE="Loading the world (1-2 minutes)"
+        case "$DETAIL" in *mmaps*) PHASE="Generating creature pathfinding (hours, in the background)" ;; esac
     elif [ "$(svc_field "$1" datahost 2)" = running ] && [ "$(svc_field "$1" datahost 3)" != healthy ]; then
         PHASE="Indexing the game files for the phone"
     elif [ -n "$2" ]; then
@@ -966,40 +1031,50 @@ show_progress() {
     LASTPHASE="$PHASE" LASTLINE="$line"
 }
 
-# watch_start PID LOG [SECONDS [restart]] — progress until PID (a background `up`) exits, then its
-# status; with no PID, until the realm is up, something failed, or the time is over. Only a first
-# start tells the player the phone can begin (a restart is no news to them).
+# watch_start HOW [PID [LOG [SECONDS]]] — the start's progress, until:
+#   up PID      this run's background `up` (PID) exits; then its status
+#   other PID   another run's `up` (PID) exits
+#   extract     the extract service stops running (1 when the time is over)
+#   ready       the realm is up (1 when something failed or the time is over)
+#   restart     the same, after a restart of mangosd
+# Only a first start tells the player the phone can begin (a restart is no news to them).
 watch_start() {
-    local pid="$1" log="$2" max="${3:-2400}" st rc=0 told=0
-    if [ "${4:-}" = restart ]; then told=1; fi
+    local how="$1" pid="${2:-}" log="${3:-}" max="${4:-3600}" st rc=0 told=0
+    case "$how" in ready | restart) told=1 ;; esac
     LASTPHASE="" LASTLINE="" WATCH_T0=$SECONDS BEAT=$SECONDS
     COLS="$(tput cols 2>/dev/null || echo 100)"
     case "$COLS" in '' | *[!0-9]*) COLS=100 ;; esac
     COLS=$((COLS > 30 ? COLS - 16 : 30))
     while :; do
-        if [ -n "$pid" ]; then
-            kill -0 "$pid" 2>/dev/null || break
-        fi
+        case "$how" in up | other) kill -0 "$pid" 2>/dev/null || break ;; esac
         st="$(svc_states)"
-        if [ -z "$pid" ]; then
-            if all_up "$st"; then break; fi
-            if broken "$st" || [ $((SECONDS - WATCH_T0)) -ge "$max" ]; then
-                rc=1
-                break
-            fi
+        case "$how" in
+            extract) [ "$(svc_field "$st" extract 2)" = running ] || break ;;
+            ready | restart)
+                if all_up "$st"; then break; fi
+                if broken "$st"; then
+                    rc=1
+                    break
+                fi
+                ;;
+        esac
+        # This run's `up` has its own --wait-timeout (a local image build comes before it).
+        if [ "$how" != up ] && [ $((SECONDS - WATCH_T0)) -ge "$max" ]; then
+            rc=1
+            break
         fi
         phase_of "$st" "$log"
         show_progress
         if [ "$told" = 0 ] && [ "$(svc_field "$st" datahost 3)" = healthy ] && [ "$(svc_field "$st" mangosd 3)" != healthy ]; then
             end_line
-            info "${B}The phone can start already:${N} in Vanillish, type $IP to download the game files"
+            info "${B}The phone can start already:${N} in Vanillish, type $(typed "$IP") to download the game files"
             info "and make your account while the server finishes starting."
             told=1
         fi
         sleep 3
     done
     end_line
-    if [ -n "$pid" ]; then wait "$pid" || rc=$?; fi
+    if [ "$how" = up ]; then wait "$pid" || rc=$?; fi
     return "$rc"
 }
 
@@ -1027,37 +1102,70 @@ on_interrupt() {
     exit 130
 }
 
-# The `up` an earlier run left going (it outlives a closed window), if it still runs.
-UP_PIDFILE="${TMPDIR:-/tmp}/vanillish-up.pid"
+# The `up` an earlier run left going (it outlives a closed window and Ctrl-C), if it still runs:
+# its PID. Its command line is checked too, since a PID is reused after a restart. One file per
+# user and stack (Linux has one /tmp for every user).
+UP_PIDFILE="${TMPDIR:-/tmp}/vanillish-up-$(id -u)-$PROJECT.pid"
 earlier_up() {
     local pid
     pid="$(cat "$UP_PIDFILE" 2>/dev/null || true)"
     case "$pid" in '' | 0 | 1 | *[!0-9]*) return 1 ;; esac
-    case "$(ps -p "$pid" -o comm= 2>/dev/null || true)" in *docker*) return 0 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    case "$(ps -p "$pid" -o args= 2>/dev/null || true)" in
+        *compose*up*)
+            printf '%s' "$pid"
+            return 0
+            ;;
+    esac
     return 1
+}
+# extract_env NAME — that variable in the running extract container ("" when none runs).
+extract_env() {
+    local id
+    id="$(docker compose ps -q --status running extract 2>/dev/null | sed -n 1p || true)"
+    [ -n "$id" ] || return 0
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id" 2>/dev/null |
+        sed -n "s/^$1=//p" | sed -n 1p || true
 }
 
 start_stack() {
-    local st want_mm log rc=0
+    local st later_mm log pid rc=0
     say "Starting the server"
     if [ "$DRY" = 1 ]; then
         note "(dry run: would run: docker compose pull, then docker compose up -d --wait, and follow it)"
         return 0
     fi
     docker compose config -q || die "compose.yaml and .env do not fit together (above)"
-    st="$(svc_states)"
-    if [ "$(svc_field "$st" extract 2)" = running ] && [ "$(svc_field "$st" mangosd 3)" = healthy ]; then
-        info "creature pathfinding is still being generated; the realm is up meanwhile."
-        info "(an update waits until that is done: run this again then)"
-        return 0
+    # Two `up`s at once trip over each other: an earlier run's is followed to its end first, and
+    # this run's own start below then applies this run's .env (a new address) and finds the rest done.
+    if pid="$(earlier_up)"; then
+        info "an earlier start is still under way; following it to its end first"
+        watch_start other "$pid" "" 3600 || true
     fi
-    if earlier_up || [ "$(svc_field "$st" extract 2)" = running ]; then
-        info "an earlier start is still under way; following it"
-        watch_start "" "" 3600 || {
-            diagnose
-            die "the server did not come up. Its logs: cd $(disp_dir) && docker compose logs"
-        }
-        return 0
+    rm -f "$UP_PIDFILE"
+    st="$(svc_states)"
+    if [ "$(svc_field "$st" extract 2)" = running ]; then
+        if [ "$(extract_env EXTRACT_MMAPS)" = 1 ] && ! has_mmaps; then
+            # Hours of pathfinding, in the background: the realm runs beside it, and an `up` would
+            # wait for its end (mangosd waits for extract). Only what is not running is started,
+            # once the maps it needs are there (the pathfinding comes after them).
+            info "creature pathfinding is still being generated; the realm runs meanwhile."
+            info "(an update waits until that is done: run this again then)"
+            if all_up "$st"; then
+                :
+            elif has_marker .inilla-vmaps; then
+                docker compose up -d --no-deps db realmd mangosd datahost >/dev/null 2>&1 ||
+                    warn "could not start the realm beside it: docker compose ps"
+                watch_start ready "" "" 900 || warn "the realm is slow to come up: docker compose ps"
+            else
+                warn "the world server waits for the map extraction: run this again in a few minutes"
+            fi
+            return 0
+        fi
+        # The first start's map extraction, which nothing follows any more (an interrupted `up`):
+        # once it is done, the start below brings up the world server that waits for it.
+        info "the server's maps are still being extracted from an earlier start; waiting for that first"
+        watch_start extract "" "" 3600 || die "the map extraction does not end: docker compose logs extract"
     fi
     # iNilla's server, the stack this one grew from, wants the same ports.
     if [ -n "$(docker ps -q --filter label=com.docker.compose.project=inilla 2>/dev/null || true)" ]; then
@@ -1070,19 +1178,26 @@ start_stack() {
     else
         docker compose pull --quiet || warn "an image could not be downloaded: it is built here instead (10-20 minutes)"
     fi
-    # `up` runs on its own (nohup, and a background job ignores Ctrl-C), so closing this window
-    # or Ctrl-C only stops the following: compose still starts mangosd once its maps are there.
+    # `up` runs on its own, so closing this window or Ctrl-C only stops the following: compose
+    # still starts mangosd once its maps are there. nohup is for the closed window. Ctrl-C reaches
+    # the terminal's whole foreground process group, and a background job's ignored SIGINT does not
+    # hold (the docker CLI listens for it again), so the launch puts `up` in a group of its own:
+    # job control (set -m) on for that one command.
     log="$TMP/up.log"
-    want_mm="$(env_get EXTRACT_MMAPS)"
-    if [ "$want_mm" = 1 ] && ! has_mmaps; then
-        # The world first; the pathfinding follows in the background (start_mmaps).
+    # Pathfinding asked for and not made yet: the world first (this start without it), and the
+    # pathfinding follows in the background (start_mmaps).
+    later_mm="$(env_get EXTRACT_MMAPS)"
+    if [ "$later_mm" = 1 ] && has_mmaps; then later_mm=0; fi
+    set -m
+    if [ "$later_mm" = 1 ]; then
         EXTRACT_MMAPS=0 nohup docker compose up -d --wait --wait-timeout 3600 >"$log" 2>&1 </dev/null &
     else
         nohup docker compose up -d --wait --wait-timeout 3600 >"$log" 2>&1 </dev/null &
     fi
     UPPID=$!
+    set +m
     printf '%s\n' "$UPPID" >"$UP_PIDFILE"
-    watch_start "$UPPID" "$log" || rc=$?
+    watch_start up "$UPPID" "$log" || rc=$?
     UPPID=""
     rm -f "$UP_PIDFILE"
     if [ "$rc" != 0 ]; then
@@ -1099,8 +1214,8 @@ start_mmaps() {
         # mangosd turns mmaps on only when it starts with them on disk.
         if docker compose exec -T mangosd grep -qi '^mmap.enabled = 0' /run/vmangos/mangosd.conf 2>/dev/null; then
             info "creature pathfinding is ready: restarting the world server to use it (characters are saved)"
-            docker compose restart mangosd >/dev/null 2>&1
-            watch_start "" "" 600 restart || warn "the world server is slow to come back: docker compose logs mangosd"
+            docker compose restart mangosd >/dev/null 2>&1 || true
+            watch_start restart "" "" 600 || warn "the world server is slow to come back: docker compose logs mangosd"
         fi
         return 0
     fi
@@ -1117,17 +1232,44 @@ start_mmaps() {
 
 keep() { KEEP="$KEEP  - $*$NL"; }
 
+# firewall_blocks_all GLOBALSTATE BLOCKALL — what socketfilterfw --getglobalstate and --getblockall
+# printed says the firewall is on and set to "Block all incoming connections". The wording differs
+# between macOS versions ("Block all ENABLED!", "... block all state set to enabled."), so only the
+# words count, in any case; state 2 is that setting itself.
+firewall_blocks_all() {
+    local state all
+    state="$(lower "$1")"
+    all="$(lower "$2")"
+    case "$state" in
+        *"state = 2"*) return 0 ;;
+        *disabled* | *"state = 0"*) return 1 ;;
+    esac
+    case "$all" in
+        *disabled*) return 1 ;;
+        *enabled*) return 0 ;;
+    esac
+    return 1
+}
+
+# is_laptop BATT MODEL — what pmset -g batt and sysctl hw.model printed says this Mac has a battery.
+# Apple-silicon MacBooks since the M2 are "MacNN,N" models, so the battery decides.
+is_laptop() {
+    case "$1" in *InternalBattery*) return 0 ;; esac
+    case "$2" in *MacBook*) return 0 ;; esac
+    return 1
+}
+
 after_checks() {
     local fw=/usr/libexec/ApplicationFirewall/socketfilterfw store
     KEEP=""
     if [ "$DRY" = 0 ]; then
-        if curl -fsS --max-time 5 "http://$IP:8099/server.json" >"$TMP/server.json" 2>/dev/null &&
+        if curl -fsS --max-time 5 "http://$IP:$PORT/server.json" >"$TMP/server.json" 2>/dev/null &&
             grep -q '"format"' "$TMP/server.json"; then
             :
-        elif curl -fsS --max-time 5 "http://$IP:8099/" >/dev/null 2>&1; then
-            warn "the data host answers at http://$IP:8099/ but has no /server.json: the app's quick connect needs a newer image"
+        elif curl -fsS --max-time 5 "http://$IP:$PORT/" >/dev/null 2>&1; then
+            warn "the data host answers at http://$IP:$PORT/ but has no /server.json: the app's quick connect needs a newer image"
         else
-            warn "nothing answers at http://$IP:8099/ from this machine itself, so the phone cannot reach it either."
+            warn "nothing answers at http://$IP:$PORT/ from this machine itself, so the phone cannot reach it either."
             if [ "$OS" = linux ] && [ "$WSL" = 0 ]; then warn "  a firewall? (ufw: sudo ufw allow 3724,8085,8099/tcp)"; fi
             if [ "$WSL" = 1 ]; then warn "  Windows' firewall must let 'Docker Desktop Backend' accept connections on private networks"; fi
         fi
@@ -1140,13 +1282,10 @@ after_checks() {
         fi
         return 0
     fi
-    if [ -x "$fw" ]; then
-        case "$(mac "$fw" --getblockall 2>/dev/null || true)" in
-            *[Ee]nabled*)
-                warn "the macOS firewall blocks ALL incoming connections, so the phone cannot connect:"
-                warn "  System Settings > Network > Firewall > Options > turn off 'Block all incoming connections'"
-                ;;
-        esac
+    if [ -x "$fw" ] && firewall_blocks_all "$(mac "$fw" --getglobalstate 2>/dev/null || true)" \
+        "$(mac "$fw" --getblockall 2>/dev/null || true)"; then
+        warn "the macOS firewall blocks ALL incoming connections, so the phone cannot connect:"
+        warn "  System Settings > Network > Firewall > Options > turn off 'Block all incoming connections'"
     fi
     case "$RUNTIME" in
         desktop)
@@ -1163,10 +1302,10 @@ after_checks() {
         keep "This Mac must stay awake while you play: System Settings > Energy > 'Prevent automatic sleeping
     when the display is off' (a laptop: Battery > Options), or keep 'caffeinate -i' running in a Terminal."
     fi
-    case "$(mac sysctl -n hw.model 2>/dev/null || true)" in
-        *MacBook*) keep "A laptop: on another Wi-Fi (a café, a hotel) anyone there could download your game files from it.
-    Away from home: cd $(disp_dir) && docker compose stop" ;;
-    esac
+    if is_laptop "$(mac pmset -g batt 2>/dev/null || true)" "$(mac sysctl -n hw.model 2>/dev/null || true)"; then
+        keep "A laptop: on another Wi-Fi (a café, a hotel) anyone there could download your game files from it.
+    Away from home: cd $(disp_dir) && docker compose stop"
+    fi
 }
 
 # ---- 10. the summary ---------------------------------------------------------------------------
@@ -1193,9 +1332,9 @@ summary() {
     local dd setup also=""
     dd="$(disp_dir)"
     if [ "$OS" = mac ]; then setup="$dd/setup-mac.sh"; else setup="$dd/setup-linux.sh"; fi
-    if [ -n "$LOCALNAME" ]; then also="      (or $LOCALNAME.local)"; fi
+    if [ -n "$LOCALNAME" ]; then also="      (or $(typed "$LOCALNAME.local"))"; fi
     if [ "$DRY" = 1 ]; then say "Dry run done: nothing was changed. A real run ends with:"; fi
-    set -- "" "Your Vanillish server is running." "" "On your phone, open Vanillish and type:" "" "      $IP"
+    set -- "" "Your Vanillish server is running." "" "On your phone, open Vanillish and type:" "" "      $(typed "$IP")"
     if [ -n "$also" ]; then set -- "$@" "$also"; fi
     box "$@" "" \
         "The phone downloads the game files from here once" \
@@ -1262,7 +1401,7 @@ main() {
     mkdir "$TMP/empty"
     trap 'rm -rf "$TMP"' EXIT
     trap on_interrupt INT
-    DOCKER_OK=0 RUNTIME="" LOCALNAME="" KEEP="" STAGE="" UPPID=""
+    DOCKER_OK=0 RUNTIME="" LOCALNAME="" KEEP="" STAGE="" UPPID="" PORT=8099
     if [ "$UNINSTALL" = 1 ]; then
         uninstall
         return 0
@@ -1302,4 +1441,6 @@ main() {
     summary
 }
 
+# ci/setup-test.sh sources this file for its functions, and nothing runs.
+if [ "${VANILLISH_SETUP_LIB:-0}" = 1 ]; then return 0; fi
 main "$@"; exit $?

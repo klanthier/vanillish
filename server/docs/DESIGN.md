@@ -45,11 +45,15 @@ it can ask questions, and nothing is downloaded and left quarantined by Gatekeep
   and a running copy of the script is never overwritten in place (bash reads a script as it runs).
 - **The questions come first** (the WoW folder, the pathfinding), then the long work, so the
   player can walk away.
-- **`docker compose up` runs on its own** (`nohup`, and a background job ignores Ctrl-C). Compose
-  orders the services on the client side: had it run in the foreground, closing the window during
-  the map extraction would leave mangosd never started. The script follows it from the containers'
-  states and their last log lines, and says as soon as the data host is up that the phone can
-  start downloading.
+- **`docker compose up` runs on its own**: under `nohup`, in a process group of its own, so neither
+  a closed window nor Ctrl-C reaches it. (A background job's ignored SIGINT is not enough: the
+  docker CLI listens for SIGINT again, and the terminal sends Ctrl-C to its whole foreground
+  group.) Compose orders the services on the client side: had `up` been stopped during the map
+  extraction, mangosd would never start. The script follows it from the containers' states and
+  their last log lines, and says as soon as the data host is up that the phone can start
+  downloading. A start that an earlier run left going is followed to its end before the run's own,
+  and a map extraction nothing follows any more (an interrupted `up`) is waited for, after which the
+  run's own `up` starts the world server.
 - **The address.** The default route's interface first (Wi-Fi or Ethernet, whichever macOS
   prefers), then any `en*` with a private IPv4; a VPN's `utun*` route is skipped, and `en0` is
   never assumed (on a Mac mini it is Ethernet). It also prints `<LocalHostName>.local`, which
@@ -120,12 +124,13 @@ setup compares every archive's size in the volume with the source.
 
 ```
 db (MariaDB, healthy) ──► db-init (one-shot) ──► realmd
-                                          └────► mangosd ◄── extract (one-shot)
-datahost (independent: server.json and the files at once; sign-ups once the database answers)
+                                          ├────► mangosd ◄── extract (one-shot)
+                                          └────► datahost (no game data needed)
 ```
 
-`db-init` and `extract` run on every `up` and exit 0. `realmd` and `mangosd` wait for them with
-`service_completed_successfully`. Both one-shots check for their own results first, so after the
+`db-init` and `extract` run on every `up` and exit 0. `realmd`, `mangosd` and `datahost` wait for
+them with `service_completed_successfully`; the data host only for `db-init` (its sign-up user), so
+`server.json`, the sign-up and the game files' download are there while the maps are extracted. Both one-shots check for their own results first, so after the
 first run they take a second. A failure stops the start with the reason in the job's log.
 
 When the player asked for pathfinding (`EXTRACT_MMAPS=1`) and there is none yet, the setup's first

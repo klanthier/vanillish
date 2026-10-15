@@ -35,8 +35,8 @@ The app makes accounts itself (**Create account**) while `INILLA_SIGNUP` allows 
 | `open` | anyone who reaches port 8099; set `INILLA_DATA_TOKEN` too |
 
 After a change in `.env`, run the setup again or `docker compose up -d`. With `INILLA_DATA_TOKEN`
-set, a sign-up needs the token as well. The limits are 5 new accounts in 10 minutes and 20 a day
-per address, and 30 an hour in all; past them the app says when to try again. On Docker Desktop
+set, a sign-up needs the token as well. The limits are 5 sign-up attempts in 10 minutes and 20 a
+day per address, and 30 an hour in all; past them the app says when to try again. On Docker Desktop
 and OrbStack every phone reaches the server from the same gateway address, so `lan` cannot tell
 your Wi-Fi from the internet there: never forward port 8099 to the internet without a token.
 
