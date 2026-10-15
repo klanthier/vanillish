@@ -5,15 +5,20 @@
 #   2. the vmangos release dump, imported into any database that is still empty
 #   3. the core's migrations that the database has not seen yet
 #   4. the realm row realmd hands to clients (name, address, port, type), from .env
+#   5. the sign-up user the data host creates accounts as (the app's "Create account")
 set -euo pipefail
-INILLA_ROLE=db-init
+INILLA_ROLE="db-init"
+# shellcheck source=inilla-lib.sh
 . /usr/local/bin/inilla-lib.sh
 
 : "${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is not set}"
-: "${REALM_NAME:=iNilla}"
+: "${REALM_NAME:=Vanillish}"
 : "${REALM_ADDRESS:?REALM_ADDRESS is not set — the LAN address of this machine, e.g. 192.168.1.20}"
 : "${REALM_PORT:=8085}"
 check_db_password
+check_secret SIGNUP_DB_PASSWORD
+# The data host's INILLA_SIGNUP_DB_USER (compose.yaml).
+SIGNUP_DB_USER=vanillish_signup
 
 SQL_DIR=/opt/vmangos/sql
 root_sql() {
@@ -71,6 +76,7 @@ for row in "${DBS[@]}"; do
 
     applied=0
     declare -A known=()
+    # shellcheck disable=SC2010 # migration files are digits, `_` and a suffix
     for file in $(ls "$SQL_DIR/migrations" | grep -E "^[0-9]+_${suffix}\.sql$" | sort); do
         id="${file%%_*}"
         known["$id"]=1
@@ -120,9 +126,65 @@ ON DUPLICATE KEY UPDATE
 SQL
 log "realm '$REALM_NAME' → $REALM_ADDRESS:$REALM_PORT (${REALM_TYPE:-pve})"
 
+# ---- 5. the sign-up user ------------------------------------------------------------------------
+# The data host's POST /accounts runs as this user. It inserts a name with the salt and verifier the
+# app computed (the password never leaves the phone), reads a name's salt back to tell a replay from
+# a taken name, and gives the new account a zero character count on each realm. Nothing more: no
+# UPDATE or DELETE, no other column (v stays unreadable), no account_access (so never a GM), no other
+# table or database. The column grants double as a schema check: a core that renames one fails here.
+#
+# The privileges are read back from information_schema, one line per privilege, and the user is
+# reset only when they are not exactly these (a first run, an older stack's, a hand-made grant), so
+# an ordinary run never takes them away from a data host that is signing someone up.
+signup_grantee="'$SIGNUP_DB_USER'@'%'"
+# The same account as information_schema's GRANTEE column spells it, as an SQL string.
+signup_grantee_sql="'''$SIGNUP_DB_USER''@''%'''"
+signup_privileges() {
+    root_sql <<SQL | LC_ALL=C sort
+SELECT CONCAT_WS(' ', 'global', PRIVILEGE_TYPE, IS_GRANTABLE)
+    FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = $signup_grantee_sql
+UNION ALL SELECT CONCAT_WS(' ', 'database', TABLE_SCHEMA, PRIVILEGE_TYPE, IS_GRANTABLE)
+    FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = $signup_grantee_sql
+UNION ALL SELECT CONCAT_WS(' ', 'table', TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE, IS_GRANTABLE)
+    FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE = $signup_grantee_sql
+UNION ALL SELECT CONCAT_WS(' ', 'column', TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, PRIVILEGE_TYPE, IS_GRANTABLE)
+    FROM information_schema.COLUMN_PRIVILEGES WHERE GRANTEE = $signup_grantee_sql;
+SQL
+}
+signup_expected="$(LC_ALL=C sort <<EOF
+global USAGE NO
+column $DB_REALMD account id SELECT NO
+column $DB_REALMD account username SELECT NO
+column $DB_REALMD account s SELECT NO
+column $DB_REALMD account username INSERT NO
+column $DB_REALMD account v INSERT NO
+column $DB_REALMD account s INSERT NO
+column $DB_REALMD realmlist id SELECT NO
+table $DB_REALMD realmcharacters INSERT NO
+EOF
+)"
+
+root_sql <<SQL
+CREATE USER IF NOT EXISTS $signup_grantee IDENTIFIED BY '$SIGNUP_DB_PASSWORD';
+ALTER USER $signup_grantee IDENTIFIED BY '$SIGNUP_DB_PASSWORD';
+SQL
+if [ "$(signup_privileges)" != "$signup_expected" ]; then
+    root_sql <<SQL
+REVOKE ALL PRIVILEGES, GRANT OPTION FROM $signup_grantee;
+GRANT SELECT (\`id\`, \`username\`, \`s\`), INSERT (\`username\`, \`v\`, \`s\`) ON \`$DB_REALMD\`.\`account\` TO $signup_grantee;
+GRANT SELECT (\`id\`) ON \`$DB_REALMD\`.\`realmlist\` TO $signup_grantee;
+GRANT INSERT ON \`$DB_REALMD\`.\`realmcharacters\` TO $signup_grantee;
+FLUSH PRIVILEGES;
+SQL
+    [ "$(signup_privileges)" = "$signup_expected" ] ||
+        die "the sign-up user '$SIGNUP_DB_USER' does not hold exactly its privileges after GRANT"
+    log "sign-up user '$SIGNUP_DB_USER': privileges granted"
+fi
+log "sign-up user '$SIGNUP_DB_USER' ready (adds accounts to $DB_REALMD, nothing else)"
+
 accounts="$(root_sql -e 'SELECT COUNT(*) FROM account' "$DB_REALMD")"
 if [ "$accounts" = 0 ]; then
-    log "no accounts yet — once mangosd is up:"
+    log "no accounts yet — the app's Create account makes one, or, once mangosd is up:"
     log "  docker compose exec mangosd vmangos-console account create <name> <password>"
 fi
 log "done"

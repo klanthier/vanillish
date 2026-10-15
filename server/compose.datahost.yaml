@@ -1,16 +1,18 @@
 # Only the data host, for a mangos server you already run (vmangos, cMaNGOS, anything 1.12.1 with
-# Warden off). It hands the iNilla app the game data and pfQuest; your server does the rest.
+# Warden off). It hands the Vanillish and iNilla apps the game data and pfQuest; your server does
+# the rest, accounts included (sign-up is off here: this host has no database to add them to).
 #
 #   WOW_DATA_DIR="/path/to/WoW 1.12.1/Data" docker compose -f compose.datahost.yaml up -d
 #
-# or put WOW_DATA_DIR (and the optional settings below) in .env. Then, in the app's Game data
-# screen: http://<this machine>:8099/
+# or put WOW_DATA_DIR (and the optional settings below) in .env. Without WOW_DATA_DIR it serves the
+# vanillish-wowdata volume the setup script imports the archives into. Then, in the app: this
+# machine's address (http://<this machine>:8099/ in the Game data screen).
 
-name: inilla-datahost
+name: vanillish-datahost
 
 services:
   datahost:
-    image: inilla-datahost:local
+    image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-datahost:0.3.0
     build:
       context: datahost
     restart: unless-stopped
@@ -35,8 +37,28 @@ services:
     environment:
       # Empty: open to everyone on the network. Set one for anything but a home LAN.
       INILLA_DATA_TOKEN: ${INILLA_DATA_TOKEN:-}
+      INILLA_SIGNUP: "off"
+      # Optional, for /server.json: set them (in .env or the shell) and the app also learns where
+      # your realm is, so typing this machine's address is enough. Unset, it gets the data alone and
+      # logs in at the address it typed, on port 3724.
+      #   INILLA_AUTH_HOST, INILLA_AUTH_PORT   your realmd, when not this machine or not 3724
+      #   INILLA_CORE                          vmangos, cmangos, …
+      #   INILLA_REALM_NAME, INILLA_REALM_TYPE the realm to pick (pve, pvp, rp, rppvp)
+      #   INILLA_WORLD_ADDRESS, INILLA_WORLD_PORT, INILLA_WORLD_SAME_HOST
+      #   INILLA_SERVER_NAME, INILLA_MESSAGE   a name and a sentence the app shows
+      INILLA_SERVER_NAME:
+      INILLA_CORE:
+      INILLA_AUTH_HOST:
+      INILLA_AUTH_PORT:
+      INILLA_REALM_NAME:
+      INILLA_REALM_TYPE:
+      INILLA_WORLD_ADDRESS:
+      INILLA_WORLD_PORT:
+      INILLA_WORLD_SAME_HOST:
+      INILLA_MESSAGE:
     volumes:
-      - ${WOW_DATA_DIR:?set WOW_DATA_DIR to your 1.12.1 client's Data folder}:/client/Data:ro
+      # The archives: a folder (WOW_DATA_DIR), or the volume the setup script imports them into.
+      - ${WOW_DATA_DIR:-vanillish-wowdata}:/client/Data:ro
       # Optional: a German 1.12.1 client's Data folder.
       - ${WOW_DATA_DIR_DEDE:-./docker/empty}:/client/deDE/Data:ro
       - ./addons:/addons:ro
@@ -52,3 +74,5 @@ services:
 
 volumes:
   datahost:
+  vanillish-wowdata:
+    external: true
