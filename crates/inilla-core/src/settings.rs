@@ -130,6 +130,10 @@ pub struct InillaSettings {
     /// Vanillish: on a foldable's near-square inner screen, follow the device into portrait too
     /// (the cover screen always stays landscape).
     pub inner_any_orientation: bool,
+    /// Vanillish: keep the game's connection alive while the app is in the background (a
+    /// notification shows it), so a fold to the lock screen or a quick look at another app does
+    /// not drop the session.
+    pub stay_connected: bool,
 }
 
 impl Default for InillaSettings {
@@ -153,6 +157,7 @@ impl Default for InillaSettings {
             setup_done: false,
             tabletop_split: true,
             inner_any_orientation: false,
+            stay_connected: true,
         }
     }
 }

@@ -41,6 +41,22 @@ impl SafeArea {
 #[derive(Resource, Default)]
 pub(crate) struct KeyboardRequest(pub(crate) bool);
 
+/// Vanillish: what the focused text field holds, set each frame by the screen that owns it, so the
+/// Android soft keyboard opens as the right kind (a password is never learned or suggested; an
+/// address gets the URL layout). Reset to `Text` every frame before the screens run.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ImePurpose {
+    #[default]
+    Text,
+    Password,
+    Url,
+}
+
+/// Vanillish: system Back presses (Android's key or gesture) not yet handled this frame. The
+/// screens take theirs first (close a form, a panel); what is left becomes the game's Escape.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct BackPresses(pub(crate) u32);
+
 /// Keys a HUD button presses for the player: the chat bar's Send (`Enter`) and Close (`Escape`),
 /// which the iOS keyboard has no key for. Each goes down in one frame and up in the next, ahead of
 /// Bevy's input systems, so the text law sees an ordinary key.
@@ -63,6 +79,8 @@ impl Plugin for PlatformPlugin {
         app.init_resource::<SafeArea>()
             .init_resource::<IslandInset>()
             .init_resource::<KeyboardRequest>()
+            .init_resource::<ImePurpose>()
+            .init_resource::<BackPresses>()
             .init_resource::<SyntheticKeys>()
             .add_systems(Startup, window_options)
             .add_systems(
