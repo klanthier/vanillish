@@ -81,7 +81,9 @@ android {
                 storePassword = signing.getProperty("storePassword")
                 keyAlias = signing.getProperty("keyAlias")
                 // A PKCS12 keystore (keytool's default) has one password for the store and the key.
-                keyPassword = signing.getProperty("keyPassword") ?: signing.getProperty("storePassword")
+                // An empty one (`keyPassword=` in keystore.properties) is unset, as in the env.
+                keyPassword = signing.getProperty("keyPassword")?.takeIf { it.isNotEmpty() }
+                    ?: signing.getProperty("storePassword")
             }
         }
     }

@@ -1,6 +1,7 @@
 # Vanillish's gate: Linux only (1× Actions minutes), on every push and PR. It keeps the Android build
 # green without making an APK (vanillish-apk.yml does that, on demand and on tags):
 #
+# - every Java `native` has its Rust export (android/tools/test_jni_natives.py);
 # - rustfmt over our code; clippy on the iNilla crates (host) and on the Android entry and
 #   inilla-platform's Android half (for aarch64-linux-android);
 # - the engine-free crates' tests (touch/controller mapping, fold geometry, profiles, data);
@@ -40,6 +41,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: JNI natives (Java ↔ jni_exports.rs)
+        # Seconds, and first: build-rust.sh checks the built library's exports, but only
+        # vanillish-apk builds one. This reads the same contract from the sources, and tests the
+        # scanner build-rust.sh uses.
+        run: python3 android/tools/test_jni_natives.py
 
       - name: Free disk space
         # Keeps /usr/local/lib/android: the SDK is what the Android steps use.
