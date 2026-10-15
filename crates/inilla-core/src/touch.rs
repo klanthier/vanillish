@@ -1093,7 +1093,7 @@ impl TouchEngine {
             let el = &layout.elements[index];
             let role = match &el.kind {
                 ElementKind::Radial => {
-                    self.radial = Some(radial_for(screen));
+                    self.radial = Some(radial_for(screen, layout.class));
                     Role::Radial
                 }
                 _ => {
@@ -1478,9 +1478,9 @@ impl TouchEngine {
                         Some(HubItem::More) => {
                             self.radial = self.screen.as_ref().map(|s| {
                                 if layout.feel.radial_at_thumb {
-                                    radial_near(hub.center, s)
+                                    radial_near(hub.center, s, layout.class)
                                 } else {
-                                    radial_for(s)
+                                    radial_for(s, layout.class)
                                 }
                             })
                         }
@@ -1709,13 +1709,20 @@ impl TouchEngine {
     }
 }
 
-/// The touch radial, centred where the HUD lays out (the safe area, or the deck), and no bigger
-/// than a phone's (Vanillish): on a tablet the wedges stay within a thumb's travel of each other.
-fn radial_for(screen: &Screen) -> TouchRadial {
+/// The touch radial, centred where the HUD lays out (the safe area, or the deck). Vanillish: on
+/// the inner screen and the tabletop deck it is no bigger than a phone's, so the wedges stay within
+/// a thumb's travel of each other; a phone (and iOS, always a phone, iPads included) keeps
+/// iNilla's rule.
+fn radial_for(screen: &Screen, class: crate::fold::ScreenClass) -> TouchRadial {
     let h = screen.deck.map_or(screen.size[1], |d| d.size()[1]);
+    let r = (h * 0.36).max(110.0);
     TouchRadial {
         center: screen.layout_rect().center(),
-        radius: (h * 0.36).clamp(110.0, 170.0),
+        radius: if class == crate::fold::ScreenClass::Phone {
+            r
+        } else {
+            r.min(170.0)
+        },
         selected: None,
     }
 }
@@ -1742,8 +1749,8 @@ pub fn park(world: Rect, ui_hit: &dyn Fn(Vec2) -> bool) -> Vec2 {
 }
 
 /// Vanillish: the touch radial as close to `at` (the thumb) as it fits whole.
-fn radial_near(at: Vec2, screen: &Screen) -> TouchRadial {
-    let mut r = radial_for(screen);
+fn radial_near(at: Vec2, screen: &Screen, class: crate::fold::ScreenClass) -> TouchRadial {
+    let mut r = radial_for(screen, class);
     let area = screen.layout_rect();
     let margin = r.radius * 1.35;
     for (axis, v) in at.iter().enumerate() {
@@ -2570,5 +2577,23 @@ mod tests {
         }
         .with_camera_on_left(true);
         assert_eq!(s.strip, None);
+    }
+
+    /// iNilla's radial on a phone class — every iOS device, an iPad too — and the capped one on
+    /// Android's inner screen.
+    #[test]
+    fn only_a_big_android_screen_caps_the_radial() {
+        use crate::fold::ScreenClass;
+        let ipad = Screen::new(1194.0, 834.0);
+        let r = radial_for(&ipad, ScreenClass::Phone).radius;
+        assert!((r - 0.36 * 834.0).abs() < 1e-3, "{r}");
+        assert_eq!(radial_for(&ipad, ScreenClass::Tablet).radius, 170.0);
+        // A phone is under the cap anyway, and never under the floor.
+        let phone = Screen::new(960.0, 411.4);
+        assert!((radial_for(&phone, ScreenClass::Phone).radius - 0.36 * 411.4).abs() < 1e-3);
+        assert_eq!(
+            radial_for(&Screen::new(500.0, 200.0), ScreenClass::Phone).radius,
+            110.0
+        );
     }
 }
