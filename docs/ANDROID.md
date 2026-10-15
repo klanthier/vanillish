@@ -7,8 +7,129 @@ its inner screen and the inner screen half folded on a table each get a layout o
 Nothing inside the game is rewritten, and iOS behaves as it did.
 
 It needs Android 12 (API 31) or later, an arm64 phone and Vulkan 1.1. The APK is sideloaded
-([ANDROID-BUILD.md](ANDROID-BUILD.md)); the game data comes from your own 1.12.1 client
-([ANDROID-DATA.md](ANDROID-DATA.md)).
+([ANDROID-BUILD.md](ANDROID-BUILD.md)); the game data comes from your own 1.12.1 client, most
+simply through a server of your own and its address ([Quick connect](#quick-connect),
+[ANDROID-DATA.md](ANDROID-DATA.md)).
+
+## Quick connect
+
+Vanillish's first screen is **Connect**: one field, **Server address**, and **Connect**. Type the
+address of the computer that runs your server — [`server/`](../server/README.md) sets one up in
+one command on a Mac with Apple silicon (or Linux, or Windows with WSL) and prints that address —
+and the app sets up the rest: the server, the game files and your account. iOS keeps iNilla's
+flow; a desktop rehearses this one with `INILLA_QUICK_CONNECT=1` (and `INILLA_METERED=1` or `0`
+for the network's answer).
+
+### What to type
+
+| typed | what the app asks |
+|---|---|
+| `192.168.1.20`, `my-mac.local` | `http://192.168.1.20:8099/server.json`: the server's data host, on its port |
+| `192.168.1.20:3724` (the realmlist habit) | the same: 3724 is the realm's port, so 8099 |
+| `host:<another port>` | a data host on that port: `http://host:<port>/server.json` |
+| `http://…` or `https://…` | `server.json` under that URL (a data host behind a reverse proxy) |
+
+An IPv6 address works bare or in brackets (`[fd00::2]:8099`).
+
+### What happens
+
+1. **The server.** The app reads `server.json` (4 s to connect, 10 s to answer). A Vanillish
+   server describes itself there, and becomes a server in the launcher, made the current one: its
+   name, its logon (on the host typed, unless it names another), its core, its realm by name when
+   it has exactly one, and where its game files are. When every realm runs on that same machine but
+   hands out another address (the Mac's old IP, a container's), the world is reached at the address
+   typed instead, so a Mac whose address changed works again once the new one is typed. A line says
+   what was found (`✔ Vanillish · vmangos · realm Vanillish (PvE) · LAN`), and the server's own
+   message, if it has one, shows under it. Connecting to the same server again updates it in place:
+   its accounts, saved passwords and language stay, and no second copy appears.
+2. **The game files** (the left column). Already all here: "✔ The game files are here — …
+   archives, … GB." Otherwise, in turn: the language, when the server has several; the access
+   code, when the server's owner set one ([below](#the-access-code)); the list of files; then the
+   download, **by itself on an unmetered network** (Wi-Fi) with room for it. On a metered one
+   (mobile data, or a hotspot marked metered) the screen says "This phone is on a metered
+   connection (mobile data or a hotspot): the download counts against your plan." and waits for
+   **Download the game (… GB)**; with too little room the button stays off ("Not enough space: … GB
+   needed, … GB free."). It is the setup screen's download: resumable (**Pause**, **Resume the
+   download**), every archive checked against its SHA-256, the server's addons (pfQuest) installed
+   after the archives. A server that shares no game files says "This server does not share the
+   game files. Bring your own:" over **Import from folder…**.
+3. **The account** (the right column, "Your account on" the server), meanwhile: sign-up needs no
+   game files. **Create an account** comes filled in, with a name (`PLAYER` and four digits) and a
+   generated password, both editable; **Create account** creates it ([Sign-up](#sign-up)). **I have
+   an account** takes a name and a password and **Save**s them: nothing is sent, and a wrong
+   password shows at the login. Both start with **Remember the password (sealed on this phone with
+   an Android Keystore key)** and **Log in automatically when Vanillish starts** ticked.
+4. **Play.** Once the download is done: "Vanillish opens the archives when it starts: restart it to
+   play.", and **Restart Vanillish now**. Vanillish starts again by itself, in a fresh process (the
+   game opens its archives only at start), and the saved account logs in by itself, on the realm
+   picked by name. Until then the account card says "Vanillish logs in as NAME once the game files
+   are in." (then "… when it starts again."). When the game files were already open at launch, the
+   card has **▶ Play as NAME** instead.
+
+The relaunch carries the whole flow: the server and the account are in `servers.toml` (a server
+Connect set up also keeps `info`, where it described itself, and its data's `locale`, the language
+picked, so a resumed download stays in it), the password and the access code in the Keystore. A
+Connect left before an account was made opens again at the next launch.
+
+### Sign-up
+
+- **The name**: 3 to 16 letters or digits (ASCII), stored in capitals. A server may set other
+  lengths in `server.json`, for the name and the password, never more than 16 (vmangos' limit).
+- **The password**: 6 to 16 characters — letters, digits and symbols, without spaces, `"`, `'` or
+  `\`. Capitals do not matter: 1.12 sends passwords in capitals. The generated one is 12 capitals
+  and digits, without 0, O, 1 or I.
+- **The server never sees the password.** The phone works out the account's SRP6 salt and verifier
+  (benilla's own SRP6, the code that logs in) and sends only them, to the data host's
+  `POST /accounts`. The generated password is shown once, in clear on the form (**Hide** hides it);
+  once the account is created it is sealed in the Keystore (with **Remember the password** ticked)
+  and nothing shows it again: note it down to log in from another device.
+- **A refusal says why**: "That account name is taken. If it is yours, choose "I have an
+  account"."; "This server does not take sign-ups from here." (sign-up off, or the phone not on a
+  private network); "Too many new accounts from here: try again in N minutes." (5 in 10 minutes and
+  20 a day per address, 30 an hour in all); "The server is still starting. Try again in a minute.".
+  When no answer came, **Create account** again sends the very same request, so the account is
+  never made twice.
+- A server that takes no sign-ups from the app shows only **I have an account**, with "This server
+  does not take sign-ups from the app: ask its owner for an account, then enter it here." No
+  account made in the app is a game master.
+
+### The access code
+
+A server whose owner set `INILLA_DATA_TOKEN` says so in `server.json`, which stays open. The files
+column then asks for the **Access code**, and **Continue** seals it in the Keystore for that server
+and sends it with the download and the sign-up (as `Authorization: Bearer`); the account card asks
+for it only when the files column is not already asking. A code the server refuses is forgotten
+and asked for again: "The server did not accept that access code." Deleting the server in the
+launcher deletes its code too.
+
+### When the server does not describe itself
+
+| what answers | what Connect does |
+|---|---|
+| an iNilla data host from before `server.json` (its `/` starts with `inilla-datahost`) | its game files alone: a server on the typed host and port 3724 with that data source, under "This server shares its game files, but says nothing about its realm: it is reached on the usual port 3724."; no sign-up, so **I have an account** |
+| nothing on 8099, but a logon server on 3724 (a 2 s TCP connect) | a plain 1.12.1 realm: the launcher's server form, filled in with the host, under "A 1.12.1 realm answers at \<host\>, but it does not describe itself: no game files to download, no sign-up. Check the details and save." (the edit form, when the launcher has that server already) |
+| nothing | "Nothing answers at \<host\>. Is the server running, and is this phone on the same Wi-Fi as it (not a guest network, not mobile data)? On the server's computer the firewall must let in ports 3724, 8085 and 8099.", the network's own reason under it |
+| a `server.json` this version cannot use (another format, another client build) | "Vanillish cannot use this server: …" — for a newer format, "update the app" |
+
+When Connect opens again for a server it set up (after a relaunch, from the launcher), it asks the
+server again, once. If only the realm answers: "Only the realm answers at \<host\>: the server's
+data host (port 8099) does not, so the game files and sign-up wait until it is running again."
+
+### Around it
+
+- Without the game data, Connect is the first screen, Back on the other screens leads to it, and it
+  has no **× Close** until the data is here. A current server without a data source (entered by
+  hand without a data URL, or one that shares no game files) starts at the setup screen instead,
+  as before.
+- With the game data, a launch with no server yet (the files came another way), or with a server
+  Connect set up and no account on it yet, opens Connect; otherwise the automatic login or the
+  launcher, as before.
+- **Enter the details myself** opens the launcher's server form (iNilla's). **Other ways to get the
+  game files…** opens the setup screen ([ANDROID-DATA.md](ANDROID-DATA.md)) with this server's data
+  URL and access code filled in; its **Connect** button comes back.
+- In the launcher, **Connect to a server…** takes the place of **+ Add server**, and a server
+  Connect set up has **Create account**, which opens Connect's sign-up for another account (as
+  **Use another account** on Connect does).
 
 ## Where it lives
 
@@ -18,12 +139,15 @@ It needs Android 12 (API 31) or later, an arm64 phone and Vulkan 1.1. The APK is
 | `crates/inilla-platform/src/android/` | the OS glue behind iNilla's plain Rust calls: JNI into the Java `Bridge` class (`with_env`, `call_bridge`), the app's folders, the clipboard, the device (screen on, haptics, safe area, memory, frame rate, orientation, game mode, Back), the fold, the Keystore, logcat, the thermal state (`AThermal`). |
 | `crates/inilla-platform/src/{gamepad/android,pointer,picker}.rs` | the controller store, the mouse and pen queue, the folder picker: plain Rust the JNI shims feed, tested on any host. |
 | `crates/inilla-core/src/{fold,import}.rs` | the screen classes, their layouts, the tabletop split, the interface scale per screen; copying the game data in from a picked folder. Engine-free, unit-tested. |
+| `crates/inilla-core/src/connect.rs` | quick connect: the address typed, `server.json`, the server profile it makes, the game files' next step, the sign-up's checks, body and reply. Engine-free (the network and SRP6 are the caller's), unit-tested. |
+| `crates/benilla-app/src/inilla/{connect,ui/connect}.rs` | quick connect's jobs (the probe, the manifest-then-download chain, the sign-up with benilla's SRP6, the account saved) and its screen. |
 | `crates/benilla-app/src/inilla/android.rs` | the Bevy side: the soft keyboard's text, Back, the native window's size, leaving and coming back to the screen, the frame-rate vote, Game Dashboard's modes, the session service. |
 | `crates/benilla-app/src/inilla/screen.rs` | which screen the game is on, its layout, the world above the hinge, the orientation, the edges the back swipe holds off. |
 | `crates/benilla-app/src/inilla/host_pointer.rs` | a hardware mouse and a hovering pen, into iNilla's virtual mouse. |
 | `crates/benilla-app/src/inilla/ui/words.rs` | every sentence that names the platform or the app: iNilla's on iOS, Vanillish's on Android. |
 | `android/` | the Gradle project: the Java classes (`VanillishActivity`, `Bridge`, `GamepadBridge`, `PointerBridge`, `FolderImport`, `FoldTracker`, `GameSessionService`, `Relauncher`, in `io.github.klanthier.vanillish`), the manifest, the resources, `build-rust.sh`, `build-apk.sh`, `tools/`. |
 | `.github/workflows/vanillish-*.yml` | the gate on every push, and the APK pipeline. |
+| `server/`, `.github/workflows/server-*.yml` | the server quick connect talks to: vmangos and the data host in Docker, the one-command setup, its check and its images ([server/README.md](../server/README.md)). |
 
 Rust asks Java for things through static methods on `Bridge` (it pulls: insets, the fold and Back
 presses are cached there for it to read); Java hands Rust events through `static native` methods,
@@ -211,7 +335,8 @@ The Back gesture or key is the Escape key iOS has none of, and it never leaves t
 1. With the on-screen keyboard up, the first Back closes the keyboard (Android's own rule).
 2. On iNilla's screens it undoes the most local thing first: an open dropdown, the password prompt,
    the server or account form, the layout editor (Done), the log viewer (back to Settings), then
-   the screen itself (without game data, back to the setup screen).
+   the screen itself (without game data, back to the first screen: Connect, or the setup screen
+   when that came first).
 3. Anything left is the game's Escape: it closes the open window, or opens the game menu.
 
 Vanillish opts out of predictive back (the manifest's `enableOnBackInvokedCallback="false"`), which
@@ -324,7 +449,7 @@ build, which is a separate app with its own folders.
 | `…/files/benilla-config/` | benilla's state, as on every platform: `config.toml`, key bindings, macros, saved variables, `AddOns/`, `Screenshots/`, and `Diagnostics/` (session logs, crash reports). |
 | `…/files/benilla-config/inilla/` | iNilla's files: `settings.toml`, `servers.toml`, `controller.toml`, and the touch layouts `touch.toml` (cover), `touch-tablet.toml` (inner), `touch-tabletop.toml` (tabletop). |
 | `…/files/.vanillish/Data/` | the game data, once imported or downloaded. Beside the drop box on the same storage, so importing a copied folder is a rename, not a second 5 GB copy. |
-| `/data/user/0/<package>/files/secrets.bin` | the saved passwords, sealed (private storage: nothing else can read it); `secrets.bin.unreadable` beside it is one whose key is gone ([Passwords](#passwords)). |
+| `/data/user/0/<package>/files/secrets.bin` | the saved passwords and access codes, sealed (private storage: nothing else can read it); `secrets.bin.unreadable` beside it is one whose key is gone ([Passwords](#passwords)). |
 | `/data/user/0/<package>/cache/vanillish/` | caches and temporary files; Android may clear them. |
 
 Shared storage can be away for a moment at launch (right after a system update, while Android
@@ -348,6 +473,8 @@ The key never leaves the Keystore and is never backed up, so a copy of the file 
 elsewhere. If the key is gone (a reinstall, *Clear storage*), the passwords are forgotten and asked
 for again at the next login; the file that can no longer be read is set aside as
 `secrets.bin.unreadable`, not deleted, and the next password saved starts a new `secrets.bin`.
+Quick connect saves an account's password the same way, and a server's access code beside it
+(`data-token:<server id>`).
 
 A Keystore that is only busy (right after the phone starts, under load) forgets nothing: Vanillish
 tries again after a moment, and if it still fails, keeps the file as it is. That login asks for
@@ -367,7 +494,7 @@ Every attribute in `android/app/src/main/AndroidManifest.xml` is there for a rea
 | `extractNativeLibs="true"` (and Gradle's `useLegacyPackaging`) | the library is stored compressed in the APK — it keeps its symbol table — and unpacked at install. |
 | `android.game_mode_config` → `res/xml/game_mode_config.xml` | Performance and Battery modes declared; no system downscaling, no frame-rate override. |
 | `uses-feature android.hardware.vulkan.version` `0x401000` | wgpu's Vulkan backend: Vulkan 1.1 is the floor. The gamepad and the touchscreen are optional features. |
-| `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | the game server, the data host, the remote console. |
+| `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | the game server, the data host, the remote console; whether the network is metered (`Bridge.networkMetered`), before quick connect starts a download by itself. |
 | `VIBRATE` | haptics on the HUD and the radial menu. |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS` | staying connected: `GameSessionService` and its notification. |
 | activity `enableOnBackInvokedCallback="false"` | no predictive back, which targetSdk 36 turns on from Android 16: it would hand every Back key, whatever its source, to the back callback ahead of the Activity, making a pad's Back and a mouse's side button the game's Escape. Without it the Back key and the gesture reach the game as a key, as on Android 12–15. |
@@ -407,6 +534,20 @@ lost mid-frame, which Bevy cannot recover from.
   would have its arrows and Back taken as the d-pad and Options.
 - **Copying over USB**: if the PC stamps the files with a time in the future (another time zone,
   a clock off), the folder reads as "still changing" until that time passes.
+- **Android 17's local network permission.** Vanillish targets SDK 36, which keeps the local
+  network open to it on Android 17 too. An app that targets 37 needs the runtime permission
+  `ACCESS_LOCAL_NETWORK` for every connection on the LAN — Connect, the realm, the data host,
+  `.local` names, the remote console — and without it they time out. Vanillish does not ask for it
+  yet: raising `vanillish.targetSdk` to 37 needs that request, and an answer to a refusal, first.
+- **Sign-up behind Docker Desktop or OrbStack**: the server sees every phone at the Docker
+  runtime's own gateway address, a private one, so its `INILLA_SIGNUP=lan` (the default) takes a
+  sign-up from whoever reaches port 8099, and the per-address limits count every phone together.
+  A server reachable from the internet needs `INILLA_DATA_TOKEN`
+  ([server/docs/OPERATIONS.md](../server/docs/OPERATIONS.md#accounts-and-gm-levels)).
+- **The automatic download**: Android counts most Wi-Fi as unmetered, and a phone's hotspot too
+  unless it is marked metered, so on such a hotspot Connect starts 5 GB with no tap.
+- **A `.local` name** resolves on Wi-Fi only, not over mobile data or a VPN; the IP the server
+  printed always works.
 - **iOS**: Vanillish keeps iOS's behaviour by construction (the Android arms are `cfg`-gated, iOS's
   words are asserted by a test), but this port has not been built for iOS.
 
@@ -446,3 +587,7 @@ first device runs should check, on the Fold8 Ultra:
 11. DeX and a mouse: pointer positions in a DeX window (its title bar), mouse-look sensitivity
     captured and not, a trackpad's scroll direction and speed.
 12. Heat: twenty minutes at High on the inner screen against Balanced, with the perf overlay on.
+13. Quick connect against `server/setup-mac.sh`'s server: the IP typed and the `.local` name; the
+    download starting by itself on Wi-Fi and waiting for a tap on mobile data; Create account,
+    then the first login after **Restart Vanillish now**; a second Connect to the same server
+    keeping one server; an access code; Android 17 with targetSdk 36.

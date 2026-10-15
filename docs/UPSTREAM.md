@@ -6,7 +6,8 @@ publishes (below). Vanillish merges both the same way: real merge commits, never
 squashed copy. Its own code is in its own places — `crates/vanillish-android`, `android/`,
 `crates/inilla-platform/src/android/`, the `vanillish-*` workflows — and in new files inside
 iNilla's crates; changes inside iNilla's or benilla's files are carries (listed below), kept few
-and small so a merge conflicts on as little as possible.
+and small so a merge conflicts on as little as possible. Its server, `server/`, is iNilla-server's
+taken in as files, and synced by its own diff ([below](#server-and-inilla-server)).
 
 ## Syncing
 
@@ -66,7 +67,7 @@ change that adds Android behaviour is.
 |---|---|
 | `Cargo.toml` | `[profile.android]` (release, no LTO, symbols kept), beside iNilla's `[profile.ios]` |
 | `Cargo.lock` | the `vanillish-android` package; `jni` and `ndk-context` for `inilla-platform`. After a conflict, take the incoming one and let a `cargo check` add these back, rather than merge it by hand |
-| `crates/benilla-app/Cargo.toml` | `arboard` not on Android either: it has no backend there (the clipboard is `inilla-platform`'s) |
+| `crates/benilla-app/Cargo.toml` | `arboard` not on Android either: it has no backend there (the clipboard is `inilla-platform`'s); `benilla-srp` in `[dependencies]`, for quick connect's sign-up, which makes the account's SRP6 salt and verifier on the phone (already in the tree through `benilla-protocol`) |
 | `crates/benilla-app/src/textinput/clipboard.rs` | iNilla's iOS pasteboard backend serves Android too (`ClipboardManager`, through `inilla-platform`) |
 | `crates/benilla-app/src/world_backdrop.rs` | `WorldViewport`: the world drawn in part of the window — above the hinge on a tabletop — with the size-carrier and the world camera following it; `world_frame_floor`, the bottom the `WorldFrame`-anchored overlays measure up from (the window's, which on a tabletop is not the world's); tests |
 | `crates/benilla-app/src/vplates.rs` | nameplates seated up from `world_frame_floor` instead of the world viewport's height: on a tabletop every plate sat a deck-height low, on the deck below the hinge |
@@ -87,23 +88,24 @@ change that adds Android behaviour is.
 |---|---|
 | `README.md`, `AGENTS.md`, `docs/UPSTREAM.md` | a Vanillish section on top; iNilla's text below it unchanged |
 | `.github/workflows/inilla-ipa.yml` | tags `v*` but not `vanillish-v*`, which `vanillish-apk.yml` builds |
-| `crates/inilla-core/src/lib.rs` | `mod fold`, `mod import` |
+| `crates/inilla-core/src/lib.rs` | `mod fold`, `mod import`, `mod connect` |
 | `crates/inilla-core/src/settings.rs` | `tabletop_split`, `inner_any_orientation`, `stay_connected`, `last_game_mode`, `hide_touch_with_mouse`; `GameMode` and `follow_game_mode` (Game Dashboard picks the preset), tested |
 | `crates/inilla-core/src/touch.rs` | the screen split at a hinge (the world above, the deck below) and the deck's look pad (`park`, public for the controller's look); pen hover, with no cursor over the deck; mouse buttons 3–5; the layout's screen class; the hub's radii; on the inner screen and the tabletop the radial at the thumb and capped at 170 pt (a phone class, so every iOS device, keeps iNilla's size) |
 | `crates/inilla-core/src/data.rs` | the build-mismatch message says "this client", not "iNilla" |
+| `crates/inilla-core/src/profiles.rs` | `ServerProfile::info` (where the server described itself, for quick connect to ask again), `DataSource::locale` (the language picked, so a resumed download stays in it), `DataSource::token_key` (the access code's keychain key); both fields default, so an older `servers.toml` loads (tested) |
 | `crates/inilla-platform/Cargo.toml` | `jni` 0.21 and `ndk-context` on Android |
 | `crates/inilla-platform/src/lib.rs` | `mod android`, `mod picker`, `mod pointer` |
-| `crates/inilla-platform/src/device.rs` | an Android arm for every call; new calls (no-ops on iOS): `fold`, `fold_in_window` (`$INILLA_FOLD` on a desktop), `set_frame_rate`, `refresh_rate`, `game_mode`, `take_back_presses`, `set_session_service`, `set_orientation`, `set_gesture_exclusion`, `relaunch`, `quit`, `thermal_headroom` |
+| `crates/inilla-platform/src/device.rs` | an Android arm for every call; new calls (no-ops on iOS): `fold`, `fold_in_window` (`$INILLA_FOLD` on a desktop), `set_frame_rate`, `refresh_rate`, `game_mode`, `take_back_presses`, `set_session_service`, `set_orientation`, `set_gesture_exclusion`, `relaunch`, `quit`, `thermal_headroom`, `network_metered` (`$INILLA_METERED` on a desktop) |
 | `crates/inilla-platform/src/paths.rs` | the Android roots (`Android/data/<package>/files`, `.vanillish/Data`), `Host::Android`, `android_package`; `storage_unavailable`: shared storage did not answer at launch (asked again for about three seconds), so the roots are a private stand-in |
 | `crates/inilla-platform/src/keychain.rs` | Android: sealed with an Android Keystore key, in private storage; `Unsealed` and `judge` (tested): only a key gone for good forgets the file, a busy Keystore keeps it |
 | `crates/inilla-platform/src/pasteboard.rs` | Android's `ClipboardManager` |
 | `crates/inilla-platform/src/audio.rs` | Android: audio focus for "mix with other apps" |
 | `crates/inilla-platform/src/gamepad.rs` | `NATIVE` (the OS reports the pads: iOS and Android); `mod android` |
 | `crates/inilla-platform/src/stdio.rs` | Android: the captured output goes to logcat (tracing's own lines excepted), each line's head cut on a char boundary; everywhere, fds 1 and 2 are pointed back at the original stderr (or `/dev/null`) when the reader thread ends, so a later print never meets a dead pipe |
-| `crates/benilla-app/src/inilla/mod.rs` | the `android`, `screen`, `host_pointer` modules; `touch_device()` true on Android; `Inilla::other_layouts` |
+| `crates/benilla-app/src/inilla/mod.rs` | the `android`, `screen`, `host_pointer`, `connect` modules (`ConnectPlugin`); `touch_device()` true on Android; `Inilla::other_layouts` |
 | `crates/benilla-app/src/inilla/boot.rs` | Android's log filter, `TMPDIR`, `RUST_BACKTRACE`; off iOS, the launch-time import only as a rename of a settled, whole folder (`import::launch_guard`) |
 | `crates/benilla-app/src/inilla/console.rs` | the addresses ranked for Android's interface names too: Wi-Fi, then the hotspot and USB tethering, then anything else in the system's order, a VPN last; cellular data and its 464XLAT address (`v4-*`) dropped; the page under the app's name |
-| `crates/benilla-app/src/inilla/data.rs` | the folder import job, which refuses a picked folder whose files changed within `SETTLE`; Check for copied data's settled and cut-short guards off iOS; their messages; `needs_restart` also when a job added, removed or replaced an archive since the boot; no job but the manifest's while `paths::storage_unavailable` |
+| `crates/benilla-app/src/inilla/data.rs` | the folder import job, which refuses a picked folder whose files changed within `SETTLE`; Check for copied data's settled and cut-short guards off iOS; their messages; `needs_restart` also when a job added, removed or replaced an archive since the boot; no job but the manifest's while `paths::storage_unavailable`; quick connect borrows `Http` (`Http::quick`, short timeouts; the sign-up's JSON `POST` as `connect::Post`), `SPARE` and `TOKEN_REFUSED` |
 | `crates/benilla-app/src/inilla/hud.rs` | `HudScreen`; the tabletop's crease and deck; the chat bar's composing word; the controller radial above the hinge |
 | `crates/benilla-app/src/inilla/icons.rs` | button tooltips anchored over the world's rect (above the hinge on a tabletop), offset by `UIParent`'s edges, in its own units |
 | `crates/benilla-app/src/inilla/mouse.rs` | the middle, back and forward buttons |
@@ -111,20 +113,70 @@ change that adds Android behaviour is.
 | `crates/benilla-app/src/inilla/platform.rs` | `ImePurpose`, `BackPresses`; Android's safe area, re-read after a screen change; the screen kept on during a data job; iNilla's own fields raise the keyboard; the interface scale per screen class; the preset's CVars only when the preset changes; `Pacing` (the frame cap stands down when the display paces); `clear_the_island` for a top cut-out and the hinge, and while it insets, the stock open-bag stack (`updateContainerFrameAnchors`) measuring `UIParent` instead of the screen (`island_chunk`, tested) |
 | `crates/benilla-app/src/inilla/store.rs` | a layout file per screen class; `remove_layout` |
 | `crates/benilla-app/src/inilla/touch.rs` | `HudScreen`; the HUD steps aside for a hardware mouse or keyboard; pen hover |
-| `crates/benilla-app/src/inilla/ui/mod.rs` | the words from `words.rs`; `restart()` relaunches; Back closes iNilla's screens first; each field's `ImePurpose`; the layout editor handed the layout's own screen (`HudScreen.layout_screen`) |
+| `crates/benilla-app/src/inilla/ui/mod.rs` | the words from `words.rs`; `restart()` relaunches; Back closes iNilla's screens first; each field's `ImePurpose`; the layout editor handed the layout's own screen (`HudScreen.layout_screen`); `Panel::Connect` and `Overlay::{connect, connect_home}`: with quick connect the first screen is Connect (`first_screen`), the setup screen's header leads back to it and so does Back; the font test reads the connect files |
 | `crates/benilla-app/src/inilla/ui/settings.rs` | the Android rows, the frame rates, the Touch tab's screen class and tabletop switch, no silent-switch row, Share session log, Reset all resets every screen's layout |
-| `crates/benilla-app/src/inilla/ui/setup.rs` | Import from folder…, Resume, the free space, Pause for the copy; the notice in place of the setup when shared storage did not answer at launch; the words |
-| `crates/benilla-app/src/inilla/ui/launcher.rs` | the words; password and address fields |
+| `crates/benilla-app/src/inilla/ui/setup.rs` | Import from folder…, Resume, the free space, Pause for the copy; the notice in place of the setup when shared storage did not answer at launch; the words; the running job's progress split out (`progress`), for Connect's download |
+| `crates/benilla-app/src/inilla/ui/launcher.rs` | the words; password and address fields; with quick connect, **Connect to a server…** for **+ Add server** and **Create account** on a server that described itself; `ServerForm::{prefilled, edit_noted}` (the form Connect opens on a plain realm, with its note), an edit keeping `info` and the data's `locale`; deleting a server deletes its access code |
 | `crates/benilla-app/src/inilla/ui/logs.rs` | Android's copy capped to the last lines; Share… |
 | `crates/benilla-app/src/inilla/ui/editor.rs` | laid out on the screen it is handed in place of the window's safe area (on a tabletop split at the hinge, the elements on the deck, at the login and character screens too); the deck outlined on a tabletop; a reset puts back this screen's own layout |
 
 Vanillish's new files in iNilla's crates conflict with nothing unless iNilla adds one of the same
-name: `inilla-core/src/{fold,import}.rs`, `inilla-platform/src/{picker,pointer}.rs`,
+name: `inilla-core/src/{fold,import,connect}.rs`, `inilla-platform/src/{picker,pointer}.rs`,
 `inilla-platform/src/gamepad/android.rs`, `inilla-platform/src/android/`, and in
-`benilla-app/src/inilla/`: `android.rs`, `screen.rs`, `host_pointer.rs`, `ui/words.rs`.
+`benilla-app/src/inilla/`: `android.rs`, `screen.rs`, `host_pointer.rs`, `connect.rs`,
+`ui/connect.rs`, `ui/words.rs`.
 
 Neither benilla nor iNilla builds for Android, so nothing there notices a change that breaks the
 Android build; `vanillish-check`'s Android type-check is what catches it.
+
+## `server/` and iNilla-server
+
+`server/` is [Martze96/iNilla-server](https://github.com/Martze96/iNilla-server) at `990cc15`,
+taken in as files by `db4c82e8` (its tree is exactly `990cc15`'s), not as a history: there is no
+remote and no subtree for it. Its changes since are Vanillish's, below. To take what iNilla-server
+has published since, apply its diff under `server/`, on a branch:
+
+```sh
+git fetch https://github.com/Martze96/iNilla-server main
+git log --oneline 990cc15..FETCH_HEAD        # what is new there
+git checkout -b sync-server-$(date +%Y%m%d)
+git diff --binary 990cc15 FETCH_HEAD | git apply -3 --directory=server
+git status                                   # U: both sides changed it; resolve it Vanillish's way
+bash server/ci/setup-test.sh
+cargo test --manifest-path server/datahost/Cargo.toml
+server/ci/check.sh                           # Docker: the stack with no game data, sign-up, a logon
+```
+
+then name the new base commit here in place of `990cc15`. The fetch brings `990cc15`'s objects,
+which `-3` needs for its three-way merge. What a sync must keep:
+
+- **The names**: compose project `vanillish`, the images `ghcr.io/klanthier/vanillish-vmangos` and
+  `vanillish-datahost`, the volume `vanillish-wowdata`, the user `vanillish_signup`. iNilla-server
+  says `inilla` in the same places.
+- **The tags**: a change under `docker/` needs the next `-r<N>` on the vmangos tag in
+  `compose.yaml`, and a change under `datahost/` a new version in `datahost/Cargo.toml`, named by
+  both compose files (`ci/pins.sh` checks they agree): `server-images.yml` refuses to publish other
+  files under a tag the registry already has (unless run by hand with `republish`). A new
+  `VMANGOS_COMMIT` from iNilla-server makes a new tag by itself.
+- **The datahost's contract** with the app (`/server.json`, `POST /accounts`): the app reads it in
+  `crates/inilla-core/src/connect.rs`.
+
+What Vanillish changed in `server/`:
+
+| file | change |
+|---|---|
+| `README.md`, `docs/OPERATIONS.md`, `docs/DESIGN.md`, `addons/README.md` | rewritten for Vanillish: the Mac first, the one-command setup, the prebuilt images, quick connect, sign-up; credits to iNilla-server |
+| `setup-mac.sh`, `setup-linux.sh` (new) | the one-command setup: the server's files into `~/Vanillish-server`, Docker (Docker Desktop, OrbStack or Colima on a Mac; Docker Engine on Linux; Docker Desktop under WSL), the address, `.env`, the archives copied once into `vanillish-wowdata`, the images pulled and the first start followed, the address to type; `setup-linux.sh` hands over to `setup-mac.sh` |
+| `compose.yaml` | project `vanillish`; the images `${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-vmangos:<VMANGOS_COMMIT>-r1` and `vanillish-datahost:0.3.0`, pulled, with `build:` beside them for a tag the registry lacks; the archives from the external volume `vanillish-wowdata` unless `WOW_DATA_DIR` names a folder; `VMANGOS_DB_SHA256`, `BUILD_JOBS`; db-init's `SIGNUP_DB_PASSWORD`; the data host's `server.json` settings (`INILLA_SERVER_NAME`, `INILLA_CORE`, `INILLA_AUTH_PORT`, `INILLA_REALM_*`, `INILLA_WORLD_*`, `INILLA_MESSAGE`) and sign-up (`INILLA_SIGNUP`, `lan` by default; `INILLA_SIGNUP_DB_*`), started after db-init alone; `REALM_NAME` `Vanillish` |
+| `compose.datahost.yaml` | project `vanillish-datahost`, the published image, the volume as the default data, sign-up off, the optional `server.json` settings |
+| `.env.example` | `SIGNUP_DB_PASSWORD`, `INILLA_SIGNUP`, `INILLA_MESSAGE`, the volume in place of a required `WOW_DATA_DIR`, `VANILLISH_REGISTRY`, `VMANGOS_DB_SHA256`, `BUILD_JOBS`; the Vanillish names |
+| `.dockerignore`, `datahost/.dockerignore` | no archive of any case (a `.part` too), no `Data/` or `WTF/` folder, no `.env` in a build context: the images are published |
+| `docker/vmangos/Dockerfile` | native on amd64 and arm64: `-fsigned-char -ffp-contract=off` on every translation unit (checked from the compile database), `BUILD_JOBS`; the world dump checked against GitHub's digest or `VMANGOS_DB_SHA256`, on the build platform; vmangos' `LICENSE` in the image; Vanillish's labels |
+| `docker/vmangos/bin/inilla-db-init` | the sign-up user `vanillish_signup` and its column grants, checked and reset when they differ; `REALM_NAME` `Vanillish` |
+| `docker/vmangos/bin/inilla-lib.sh`, `inilla-{extract,mangosd,realmd}`, `vmangos-console` | `check_secret`, for the sign-up password too; shellcheck-clean |
+| `datahost/` (`src/info.rs`, `src/accounts.rs` new; `src/main.rs`, `src/http.rs`, `Cargo.toml` 0.3.0 and its own `[workspace]`, `Cargo.lock`, `Dockerfile`) | `GET /server.json`; `POST /accounts` (the SRP6 salt and verifier into realmd's database as `vanillish_signup`, `INILLA_SIGNUP`, the token, the rate limits); a start with no game data; the request head bounded |
+| `ci/` (new) | `check.sh` (the stack with no game data: the sign-up user's grants, `/server.json`, sign-up, an SRP6 logon), `accounts_e2e.py`, `srp6.py`, `setup-test.sh`, `pins.sh`, `image-state.sh`, `test_ci_tools.sh` |
+| `.github/workflows/server-check.yml`, `server-images.yml` (new, outside `server/`) | the check on amd64 and arm64 runners; the multi-arch images published to GHCR |
 
 ---
 

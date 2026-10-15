@@ -3,11 +3,12 @@
 This repository is **Vanillish**, iNilla built for Android (the Galaxy Z Fold8 Ultra first). Ours:
 `crates/vanillish-android` (the app's `libvanillish.so` and its JNI exports), `android/` (the Gradle
 project, the Java side, the build scripts), `crates/inilla-platform/src/android/`, the new Android
-modules in iNilla's crates (`inilla-core`'s `fold` and `import`, `inilla-platform`'s
-`gamepad/android`, `pointer`, `picker`, `benilla-app`'s `inilla::{android,screen,host_pointer}` and
-`inilla/ui/words.rs`) and the `vanillish-*` workflows. Everything else is iNilla's or upstream
-benilla's, merged in (`docs/UPSTREAM.md`). Read `docs/ANDROID.md` first, then
-`docs/ANDROID-BUILD.md`.
+modules in iNilla's crates (`inilla-core`'s `fold`, `import` and `connect`, `inilla-platform`'s
+`gamepad/android`, `pointer`, `picker`, `benilla-app`'s
+`inilla::{android,screen,host_pointer,connect}` and `inilla/ui/{words,connect}.rs`), `server/`
+(iNilla-server, taken in at 990cc15) and the `vanillish-*` and `server-*` workflows. Everything
+else is iNilla's or upstream benilla's, merged in (`docs/UPSTREAM.md`). Read `docs/ANDROID.md`
+first, then `docs/ANDROID-BUILD.md`, and `server/README.md` for the server.
 
 - Rust → Java: static methods on `io.github.klanthier.vanillish.Bridge`, through
   `inilla_platform::android::{call_bridge, call_bridge_void, with_env}`; never `FindClass`, never a
@@ -31,6 +32,15 @@ benilla's, merged in (`docs/UPSTREAM.md`). Read `docs/ANDROID.md` first, then
   cargo ndk -t arm64-v8a -P 31 check -p vanillish-android
   python3 android/tools/test_jni_natives.py
   (cd android && ./gradlew --no-daemon -q :app:compileReleaseJavaWithJavac)
+  ```
+
+  and when `server/` changed (`check.sh` needs Docker: the stack with no game data, sign-up and an
+  SRP6 logon, as `server-check` runs it on amd64 and arm64):
+
+  ```sh
+  bash server/ci/setup-test.sh
+  cargo test --manifest-path server/datahost/Cargo.toml
+  server/ci/check.sh
   ```
 
 ---
