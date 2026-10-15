@@ -130,6 +130,24 @@ pub(crate) fn set_frame_rate(hz: f32) {
     super::call_bridge_void("setFrameRate", "(F)V", &[JValue::Float(hz)]);
 }
 
+/// The panel's refresh rate now and the highest it offers, in Hz.
+pub(crate) fn refresh_rate() -> Option<(f32, f32)> {
+    let v = floats("refreshRate")?;
+    (v.len() >= 2 && v[1] > 0.0).then(|| (v[0], v[1]))
+}
+
+/// Game Dashboard's mode (`GameManager.GAME_MODE_*`).
+pub(crate) fn game_mode() -> i32 {
+    super::call_bridge("gameMode", "()I", &[], |_, v| v.i()).unwrap_or(0)
+}
+
+/// Back presses since the last call.
+pub(crate) fn take_back_presses() -> u32 {
+    super::call_bridge("takeBackPresses", "()I", &[], |_, v| v.i())
+        .unwrap_or(0)
+        .max(0) as u32
+}
+
 /// Which orientations the game may take: `0` landscape (either way up, by the sensor), `1` any.
 pub(crate) fn set_orientation_mode(mode: i32) {
     super::call_bridge_void("setOrientationMode", "(I)V", &[JValue::Int(mode)]);

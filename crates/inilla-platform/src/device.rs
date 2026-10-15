@@ -253,6 +253,57 @@ pub fn set_frame_rate(hz: f32) {
     let _ = hz;
 }
 
+/// The display's refresh rate now and the highest it offers at its resolution, in Hz, where the
+/// OS says (Android). `None` elsewhere.
+pub fn refresh_rate() -> Option<(f32, f32)> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::refresh_rate()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
+/// The OS's game mode, where it has one (Android's Game Dashboard): the player asked the system
+/// for performance or battery life.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GameMode {
+    #[default]
+    Standard,
+    Performance,
+    Battery,
+}
+
+pub fn game_mode() -> GameMode {
+    #[cfg(target_os = "android")]
+    {
+        match crate::android::device::game_mode() {
+            2 => GameMode::Performance,
+            3 => GameMode::Battery,
+            _ => GameMode::Standard,
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        GameMode::Standard
+    }
+}
+
+/// The system Back presses (key or gesture) since the last call — Android's stand-in for the
+/// Escape key iOS has none of. Always 0 where there is no such thing.
+pub fn take_back_presses() -> u32 {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::device::take_back_presses()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        0
+    }
+}
+
 /// Which orientations the game may take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Orientation {

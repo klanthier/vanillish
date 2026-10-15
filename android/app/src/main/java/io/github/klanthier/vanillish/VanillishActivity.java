@@ -1,5 +1,6 @@
 package io.github.klanthier.vanillish;
 
+import android.app.GameManager;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
 import android.os.Bundle;
@@ -9,6 +10,7 @@ import android.system.Os;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -62,13 +64,8 @@ public class VanillishActivity extends GameActivity {
         started = true;
         applyDebugKnobs();
 
-        // Loads libvanillish.so and starts android_main.
+        // Sets the window up (onSetUpWindow, below), loads libvanillish.so, starts android_main.
         super.onCreate(savedInstanceState);
-
-        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        WindowManager.LayoutParams lp = getWindow().getAttributes();
-        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
-        getWindow().setAttributes(lp);
         hideSystemBars();
 
         pads = new GamepadBridge(this);
@@ -82,6 +79,34 @@ public class VanillishActivity extends GameActivity {
                 Bridge.onBack();
             }
         });
+    }
+
+    /**
+     * GameActivity's own set-up asks for ADJUST_RESIZE at run time, overriding the manifest: the
+     * game would shrink (and its automatic UI scale with it) whenever the keyboard opens. The
+     * keyboard floats over the game instead; the HUD's chat bar shows the line being typed.
+     */
+    @Override
+    protected void onSetUpWindow() {
+        super.onSetUpWindow();
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN
+                | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        getWindow().setAttributes(lp);
+    }
+
+    /** The game's surface, for the frame-rate vote ({@link Bridge#setFrameRate}). */
+    android.view.Surface gameSurface() {
+        return mSurfaceView != null ? mSurfaceView.getHolder().getSurface() : null;
+    }
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        super.surfaceChanged(holder, format, width, height);
+        // A new surface (resume, a fold to the other panel) forgets the vote.
+        Bridge.applyFrameRate();
     }
 
     private void applyDebugKnobs() {
@@ -127,6 +152,9 @@ public class VanillishActivity extends GameActivity {
         Bridge.applyFrameRate();
         Bridge.applyOrientation();
         Bridge.applyAudioFocus();
+        // Game Dashboard's Performance / Battery modes (read on every resume, as Android asks).
+        GameManager gm = getSystemService(GameManager.class);
+        Bridge.gameMode = gm != null ? gm.getGameMode() : 0;
         if (pads != null) pads.sync();
     }
 

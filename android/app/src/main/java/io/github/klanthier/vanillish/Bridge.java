@@ -25,6 +25,7 @@ import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Log;
 import android.view.Display;
+import android.view.Surface;
 import android.view.Window;
 import android.view.WindowManager;
 
@@ -97,37 +98,58 @@ public final class Bridge {
     private static volatile float frameRate = 0f;
 
     /**
-     * The refresh rate the game wants (0 = the panel's highest): the display mode with the
-     * current resolution and the highest refresh rate at or under it. Samsung honours the window's
-     * preferred mode more reliably than a surface vote; the Rust side also votes on the surface.
+     * The rate the game renders at (0 = the panel's highest), voted on the game's surface with
+     * {@code Surface.setFrameRate} — the call Android recommends for games: the LTPO panel then
+     * drops to 60 or 30 with the preset instead of idling at 120 against a capped game, and runs
+     * at 120 for High (Samsung's adaptive refresh may otherwise hold a game at 60). Each panel of a
+     * foldable has its own modes, so the vote is re-applied on every new surface.
      */
     public static void setFrameRate(float hz) {
         frameRate = hz;
         onUi(Bridge::applyFrameRate);
     }
 
+    /** The highest refresh rate the current panel offers at its current resolution. */
+    static float maxRefreshRate(Display d) {
+        Display.Mode current = d.getMode();
+        float best = current.getRefreshRate();
+        for (Display.Mode m : d.getSupportedModes()) {
+            if (m.getPhysicalWidth() == current.getPhysicalWidth()
+                    && m.getPhysicalHeight() == current.getPhysicalHeight()) {
+                best = Math.max(best, m.getRefreshRate());
+            }
+        }
+        return best;
+    }
+
     static void applyFrameRate() {
-        Activity a = activity;
+        VanillishActivity a = activity;
         if (a == null) return;
         Display d = a.getDisplay();
-        if (d == null) return;
-        Display.Mode current = d.getMode();
-        Display.Mode best = null;
-        float want = frameRate <= 0f ? Float.MAX_VALUE : frameRate + 0.5f;
-        for (Display.Mode m : d.getSupportedModes()) {
-            if (m.getPhysicalWidth() != current.getPhysicalWidth()
-                    || m.getPhysicalHeight() != current.getPhysicalHeight()) {
-                continue;
-            }
-            if (m.getRefreshRate() > want) continue;
-            if (best == null || m.getRefreshRate() > best.getRefreshRate()) best = m;
+        Surface s = a.gameSurface();
+        if (d == null || s == null || !s.isValid()) return;
+        float hz = frameRate > 0f ? frameRate : maxRefreshRate(d);
+        try {
+            s.setFrameRate(hz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "setFrameRate: " + e);
         }
-        WindowManager.LayoutParams lp = a.getWindow().getAttributes();
-        int id = best != null ? best.getModeId() : 0;
-        if (lp.preferredDisplayModeId != id) {
-            lp.preferredDisplayModeId = id;
-            a.getWindow().setAttributes(lp);
-        }
+    }
+
+    /** The panel's refresh rate now, and the highest it offers: {current, max}. */
+    public static float[] refreshRate() {
+        Activity a = activity;
+        Display d = a != null ? a.getDisplay() : null;
+        if (d == null) return new float[] {0f, 0f};
+        return new float[] {d.getRefreshRate(), maxRefreshRate(d)};
+    }
+
+    /** Game Dashboard's mode (GameManager.GAME_MODE_*: 1 standard, 2 performance, 3 battery). */
+    static volatile int gameMode;
+
+    public static int gameMode() {
+        return gameMode;
     }
 
     private static volatile int orientationMode = 0;
