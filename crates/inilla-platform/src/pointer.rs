@@ -9,7 +9,7 @@
 //! and a pen's hover (a pen touching the screen stays a touch), comes to [`push`] through
 //! `libvanillish`'s JNI shims and is consumed there. No fake finger is made, and no button press
 //! is left for Android to turn into Back. (The Back key Android also makes of the back button is
-//! dropped too: [`MouseBackKeys`].) The app [`drain`]s the queue once a frame
+//! dropped by the Activity too.) The app [`drain`]s the queue once a frame
 //! (`inilla::host_pointer`), and [`HostMouse`] turns the mouse's reports into the virtual mouse's
 //! operations. Input still reaches the game through that one seam.
 //!
@@ -310,46 +310,6 @@ impl HostMouse {
                 self.held |= bit;
                 out.push(MouseOp::Down(b));
             }
-        }
-    }
-}
-
-/// Android also makes a Back key of a mouse's back button. Where the Activity sees that key
-/// (`PointerBridge.onKey`), it drops it. With predictive back (Android 16, targetSdk 36), Android
-/// hands the key to the back callback before the Activity sees it. In that case the one Back press
-/// that follows a release of the button is taken out here, so the button stays BUTTON5 and never
-/// becomes the game's Escape as well.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MouseBackKeys {
-    /// Back presses still expected from the button's releases.
-    owed: u32,
-    /// Until when (seconds) they are expected.
-    until: f64,
-}
-
-impl MouseBackKeys {
-    /// How long after the button's release its Back press may still arrive (seconds): the press
-    /// follows the release on the same thread, a frame or two later at most.
-    pub const WINDOW: f64 = 0.5;
-
-    /// The mouse's back button came up at `now`.
-    pub fn released(&mut self, now: f64) {
-        self.expire(now);
-        self.owed = self.owed.saturating_add(1);
-        self.until = now + Self::WINDOW;
-    }
-
-    /// Of `presses` Back presses seen by `now`, how many are the player's own.
-    pub fn filter(&mut self, presses: u32, now: f64) -> u32 {
-        self.expire(now);
-        let ours = presses.min(self.owed);
-        self.owed -= ours;
-        presses - ours
-    }
-
-    fn expire(&mut self, now: f64) {
-        if now > self.until {
-            self.owed = 0;
         }
     }
 }
@@ -746,26 +706,6 @@ mod tests {
         assert!(!mouse(action::HOVER_EXIT, 0, 1.0, 1.0).is_use());
         assert!(!mouse(action::CANCEL, 1, 1.0, 1.0).is_use());
         assert!(!HostPointerEvent::PenHover(Some([1.0, 1.0])).is_use());
-    }
-
-    #[test]
-    fn the_back_press_after_the_back_button_is_the_buttons() {
-        let mut k = MouseBackKeys::default();
-        // Nothing owed: every Back is the player's.
-        assert_eq!(k.filter(1, 0.0), 1);
-        k.released(1.0);
-        // The press may arrive in the same frame or a little later; one is taken, once.
-        assert_eq!(k.filter(0, 1.0), 0);
-        assert_eq!(k.filter(2, 1.1), 1);
-        assert_eq!(k.filter(1, 1.2), 1);
-        // Where the Activity dropped the key itself (no predictive back), nothing comes: what is
-        // owed expires, and a later Back gesture is the player's.
-        k.released(2.0);
-        assert_eq!(k.filter(1, 2.0 + MouseBackKeys::WINDOW + 0.01), 1);
-        // Two clicks, two presses.
-        k.released(5.0);
-        k.released(5.1);
-        assert_eq!(k.filter(2, 5.2), 0);
     }
 
     #[test]

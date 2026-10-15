@@ -29,19 +29,16 @@ use bevy::window::{
     WindowFocused,
 };
 
-use inilla_core::touch::{MouseButton as KButton, MouseOp, Vec2 as Point};
-use inilla_platform::pointer::{self, HostMouse, HostPointerEvent, MouseBackKeys, PointerImage};
+use inilla_core::touch::{MouseOp, Vec2 as Point};
+use inilla_platform::pointer::{self, HostMouse, HostPointerEvent, PointerImage};
 
 use super::mouse::VirtualMouse;
-use super::platform::BackPresses;
 use super::InputProducers;
 
 /// The host's mouse, pen and keyboard between the queue and the game.
 #[derive(Resource, Default)]
 pub(crate) struct HostPointer {
     mouse: HostMouse,
-    /// The Back presses Android makes of the mouse's back button, taken back.
-    back_keys: MouseBackKeys,
     /// Real-time seconds of the last report from a hardware mouse, and of the last key of a
     /// hardware keyboard (`0` = never).
     last_mouse: f64,
@@ -94,13 +91,12 @@ fn on_android() -> bool {
 }
 
 /// The host's reports since the last frame, into the virtual mouse and [`HostPointer`]. In
-/// `InputProducers`, ahead of the touch pass, which takes the pen's hover from here, and after
-/// Android's Back presses are counted (`android`), so the back button's own can be taken out
-/// before the screens take theirs.
+/// `InputProducers`, ahead of the touch pass, which takes the pen's hover from here. The Back key
+/// Android also makes of the back button never comes here or to the game: the Activity drops it
+/// (`PointerBridge.onKey`; the manifest opts out of predictive back, which would take it first).
 pub(crate) fn drain(
     mut host: ResMut<HostPointer>,
     mut vm: ResMut<VirtualMouse>,
-    mut back: ResMut<BackPresses>,
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time<Real>>,
     mut focus: MessageReader<WindowFocused>,
@@ -114,8 +110,6 @@ pub(crate) fn drain(
     if focus.read().any(|f| !f.focused) {
         host.mouse.release_all(&mut ops);
     }
-    // Those releases are made here, not by a button coming up: no Back key follows them.
-    let reported = ops.len();
     let events = pointer::drain();
     if let Ok(window) = windows.single() {
         let scale = window.resolution.scale_factor();
@@ -141,18 +135,6 @@ pub(crate) fn drain(
                 }
             }
         }
-    }
-    // Android 16 hands the Back key of the back button to the back callback, which counts it with
-    // the gesture's: taken out here, so the button is BUTTON5 alone, as on the desktop.
-    let back_releases = ops[reported..]
-        .iter()
-        .filter(|op| **op == MouseOp::Up(KButton::Back));
-    for _ in back_releases {
-        host.back_keys.released(now);
-    }
-    let presses = host.back_keys.filter(back.0, now);
-    if presses != back.0 {
-        back.0 = presses;
     }
     vm.extend(ops.drain(..));
 }

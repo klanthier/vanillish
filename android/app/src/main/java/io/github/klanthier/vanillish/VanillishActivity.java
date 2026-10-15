@@ -81,8 +81,11 @@ public class VanillishActivity extends GameActivity {
                     }
                 });
 
-        // Back (the key, the gesture, predictive back on Android 16) is Escape in the game: it
-        // closes the open window, or opens the game menu — as on every other client.
+        // Back (the key, the gesture) is Escape in the game: it closes the open window, or opens
+        // the game menu — as on every other client. It reaches the game as a key (GameActivity
+        // takes it, winit_keys counts it): the manifest opts out of predictive back, so a pad's
+        // Back stays the pad's and a mouse's is dropped. Android therefore never falls back to
+        // this callback; it is only a safety net.
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {

@@ -401,9 +401,13 @@ mod buffer {
 /// winit's key messages, sorted before anything reads them (Android) — plain Bevy apart from the
 /// Activity's Back count (a no-op off Android), so it is tested on the host.
 ///
-/// - **Back** (the key, Android 12–15 without predictive back) is counted into [`BackPresses`] and
-///   removed: to the game it is an unknown key. The callback's presses (the gesture, Android 16)
-///   come from the Activity and are added here too.
+/// - **Back** (a keyboard's key, and the gesture, which Android hands the window as the key) is
+///   counted into [`BackPresses`] and removed: to the game it is an unknown key. The manifest opts
+///   the Activity out of predictive back, so Android 16 and later send it here as 12–15 do, rather
+///   than to a back callback ahead of every key handler — where a pad's Back (`GamepadBridge`, its
+///   Options) and a mouse's (`PointerBridge`, dropped) would be the game's Escape as well. The
+///   Activity's back callback (`Bridge.onBack`, added here too) is only a safety net: GameActivity
+///   takes the key, so Android never falls back to it.
 /// - **Enter** from a hardware keyboard has `"\n"` for its text and its logical key; it becomes
 ///   the named key (iOS's Return gets the same rewrite in `platform`).
 /// - A **character key's release** is noted (`WinitKeys::typed`) for the IME bridge: while the
