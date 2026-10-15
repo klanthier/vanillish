@@ -5,8 +5,20 @@
 //!
 //! Off iOS [`poll`] reports nothing: the desktop build reads pads through Bevy's gilrs input
 //! instead (see the app's `inilla::pad`).
+//!
+//! Vanillish: on Android the app's Java side takes controller events before GameActivity sees
+//! them and feeds them to [`android`] (through `libvanillish`'s JNI shims); [`poll`] reads that
+//! store, so the mapper, the HUD and the hints work unchanged.
 
 use inilla_core::pad::PadState;
+
+/// This OS hands controllers to [`poll`] (GameController on iOS, the InputDevice bridge on
+/// Android); elsewhere the app reads them through gilrs.
+pub const NATIVE: bool = cfg!(any(target_os = "ios", target_os = "android"));
+
+/// Vanillish: the Android controller store (plain Rust, tested on any host).
+#[cfg(any(target_os = "android", test))]
+pub mod android;
 
 /// One connected controller.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +37,8 @@ pub fn poll(out: &mut Vec<Pad>) {
     out.clear();
     #[cfg(target_os = "ios")]
     ios::poll(out);
+    #[cfg(target_os = "android")]
+    android::poll(out);
 }
 
 /// Rumble `strength` (`0..1`) for `seconds` on controller `id`, where it has haptics.

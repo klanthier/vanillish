@@ -1,0 +1,9 @@
+.gradle/
+build/
+app/build/
+local.properties
+keystore.properties
+*.jks
+*.keystore
+# Built by build-rust.sh (cargo-ndk) before every Gradle run.
+app/src/main/jniLibs/

@@ -1,0 +1,409 @@
+package io.github.klanthier.vanillish;
+
+import android.app.Activity;
+import android.app.ActivityManager;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Process;
+import android.os.VibrationAttributes;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
+import android.provider.Settings;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.util.Log;
+import android.view.Display;
+import android.view.Window;
+import android.view.WindowManager;
+
+import java.security.KeyStore;
+import java.util.Arrays;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+
+/**
+ * Everything Rust asks of Android, as static methods (crates/inilla-platform/src/android).
+ *
+ * <p>Rust calls these from any thread — Bevy's main thread, its task pool, a worker — and never
+ * waits on the UI thread: what must happen there is posted to it, and what Android pushes (insets,
+ * the fold, the Back key) is cached here for Rust to read. Every method is safe to call before the
+ * Activity exists or after it is gone.
+ */
+public final class Bridge {
+    private static final String TAG = "vanillish";
+
+    private Bridge() {}
+
+    static volatile VanillishActivity activity;
+    static volatile Context app;
+
+    private static final Handler ui = new Handler(Looper.getMainLooper());
+
+    static void attach(VanillishActivity a) {
+        activity = a;
+        app = a.getApplicationContext();
+    }
+
+    static void detach(VanillishActivity a) {
+        if (activity == a) {
+            activity = null;
+        }
+    }
+
+    private static void onUi(Runnable r) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            r.run();
+        } else {
+            ui.post(r);
+        }
+    }
+
+    // ---- The window ---------------------------------------------------------------------------
+
+    private static volatile boolean keepScreenOn;
+
+    /** FLAG_KEEP_SCREEN_ON: a controller player never touches the screen. */
+    public static void keepScreenOn(boolean on) {
+        keepScreenOn = on;
+        onUi(Bridge::applyKeepScreenOn);
+    }
+
+    static void applyKeepScreenOn() {
+        Activity a = activity;
+        if (a == null) return;
+        Window w = a.getWindow();
+        if (keepScreenOn) {
+            w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            w.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
+    private static volatile float frameRate = 0f;
+
+    /**
+     * The refresh rate the game wants (0 = the panel's highest): the display mode with the
+     * current resolution and the highest refresh rate at or under it. Samsung honours the window's
+     * preferred mode more reliably than a surface vote; the Rust side also votes on the surface.
+     */
+    public static void setFrameRate(float hz) {
+        frameRate = hz;
+        onUi(Bridge::applyFrameRate);
+    }
+
+    static void applyFrameRate() {
+        Activity a = activity;
+        if (a == null) return;
+        Display d = a.getDisplay();
+        if (d == null) return;
+        Display.Mode current = d.getMode();
+        Display.Mode best = null;
+        float want = frameRate <= 0f ? Float.MAX_VALUE : frameRate + 0.5f;
+        for (Display.Mode m : d.getSupportedModes()) {
+            if (m.getPhysicalWidth() != current.getPhysicalWidth()
+                    || m.getPhysicalHeight() != current.getPhysicalHeight()) {
+                continue;
+            }
+            if (m.getRefreshRate() > want) continue;
+            if (best == null || m.getRefreshRate() > best.getRefreshRate()) best = m;
+        }
+        WindowManager.LayoutParams lp = a.getWindow().getAttributes();
+        int id = best != null ? best.getModeId() : 0;
+        if (lp.preferredDisplayModeId != id) {
+            lp.preferredDisplayModeId = id;
+            a.getWindow().setAttributes(lp);
+        }
+    }
+
+    private static volatile int orientationMode = 0;
+
+    /** 0: landscape, either way up. 1: whatever the device is held in. */
+    public static void setOrientationMode(int mode) {
+        orientationMode = mode;
+        onUi(Bridge::applyOrientation);
+    }
+
+    static void applyOrientation() {
+        Activity a = activity;
+        if (a == null) return;
+        int want = orientationMode == 1
+                ? ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+                : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+        if (a.getRequestedOrientation() != want) a.setRequestedOrientation(want);
+    }
+
+    // ---- Insets and the fold (pushed by the Activity, read by Rust) ---------------------------
+
+    /** {top, left, bottom, right} in dp, then the camera side (-1 none, 0 left, 1 right). */
+    static volatile float[] safeArea = {0f, 0f, 0f, 0f, -1f};
+
+    public static float[] safeArea() {
+        return safeArea;
+    }
+
+    /**
+     * {present, halfOpen, horizontal, left, top, right, bottom (dp, window coordinates),
+     * separating, occluding}; present = 0 when no hinge crosses the window.
+     */
+    static volatile float[] fold = new float[9];
+
+    public static float[] fold() {
+        return fold;
+    }
+
+    // ---- Back -----------------------------------------------------------------------------------
+
+    private static int backPresses;
+
+    static synchronized void onBack() {
+        backPresses++;
+    }
+
+    /** Back presses since the last call (each one is the Escape key iOS has no key for either). */
+    public static synchronized int takeBackPresses() {
+        int n = backPresses;
+        backPresses = 0;
+        return n;
+    }
+
+    // ---- Haptics --------------------------------------------------------------------------------
+
+    private static Vibrator vibrator;
+    private static VibrationEffect[] effects;
+
+    /** 0 light, 1 medium, 2 heavy, 3 selection — iOS's impact intensities 0.4 / 0.7 / 1.0. */
+    public static void haptic(int kind) {
+        Context c = app;
+        if (c == null || kind < 0 || kind > 3) return;
+        try {
+            if (vibrator == null) {
+                VibratorManager vm = c.getSystemService(VibratorManager.class);
+                vibrator = vm != null ? vm.getDefaultVibrator() : null;
+                if (vibrator == null || !vibrator.hasVibrator()) {
+                    vibrator = null;
+                    return;
+                }
+                effects = new VibrationEffect[4];
+                boolean prims = vibrator.areAllPrimitivesSupported(
+                        VibrationEffect.Composition.PRIMITIVE_CLICK,
+                        VibrationEffect.Composition.PRIMITIVE_TICK);
+                if (prims) {
+                    effects[0] = VibrationEffect.startComposition()
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.4f).compose();
+                    effects[1] = VibrationEffect.startComposition()
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.7f).compose();
+                    effects[2] = VibrationEffect.startComposition()
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 1.0f).compose();
+                    effects[3] = VibrationEffect.startComposition()
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, 0.6f).compose();
+                } else {
+                    effects[0] = VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK);
+                    effects[1] = VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK);
+                    effects[2] = VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK);
+                    effects[3] = VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK);
+                }
+            }
+            if (vibrator == null) return;
+            if (Build.VERSION.SDK_INT >= 33) {
+                vibrator.vibrate(effects[kind],
+                        VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH));
+            } else {
+                vibrator.vibrate(effects[kind]);
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "haptic: " + e);
+        }
+    }
+
+    // ---- The clipboard --------------------------------------------------------------------------
+
+    public static String clipboardGet() {
+        Context c = app;
+        if (c == null) return null;
+        try {
+            ClipboardManager cm = c.getSystemService(ClipboardManager.class);
+            if (cm == null || !cm.hasPrimaryClip()) return null;
+            ClipData clip = cm.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) return null;
+            CharSequence t = clip.getItemAt(0).coerceToText(c);
+            return t != null ? t.toString() : null;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "clipboard: " + e);
+            return null;
+        }
+    }
+
+    public static boolean clipboardSet(String text) {
+        Context c = app;
+        if (c == null) return false;
+        try {
+            ClipboardManager cm = c.getSystemService(ClipboardManager.class);
+            if (cm == null) return false;
+            cm.setPrimaryClip(ClipData.newPlainText("Vanillish", text));
+            return true;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "clipboard: " + e);
+            return false;
+        }
+    }
+
+    // ---- Audio focus ----------------------------------------------------------------------------
+
+    private static volatile boolean audioExclusive;
+    private static AudioFocusRequest focus;
+
+    /**
+     * Exclusive: ask for AUDIOFOCUS_GAIN, so the player's music pauses (iOS's SoloAmbient). Not:
+     * give it back and never ask (Ambient: their music plays under the game).
+     */
+    public static void audioFocus(boolean exclusive) {
+        audioExclusive = exclusive;
+        onUi(Bridge::applyAudioFocus);
+    }
+
+    static void applyAudioFocus() {
+        Context c = app;
+        if (c == null) return;
+        AudioManager am = c.getSystemService(AudioManager.class);
+        if (am == null) return;
+        if (audioExclusive) {
+            if (focus == null) {
+                focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_GAME)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .build())
+                        .setOnAudioFocusChangeListener(change -> {}, ui)
+                        .build();
+            }
+            am.requestAudioFocus(focus);
+        } else if (focus != null) {
+            am.abandonAudioFocusRequest(focus);
+        }
+    }
+
+    // ---- Memory ---------------------------------------------------------------------------------
+
+    /** ActivityManager.MemoryInfo: {availMem, threshold, totalMem, lowMemory}. */
+    public static long[] memoryInfo() {
+        Context c = app;
+        if (c == null) return null;
+        ActivityManager am = c.getSystemService(ActivityManager.class);
+        if (am == null) return null;
+        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(mi);
+        return new long[] {mi.availMem, mi.threshold, mi.totalMem, mi.lowMemory ? 1 : 0};
+    }
+
+    // ---- Secrets: AES-256-GCM under a key in the Android Keystore -------------------------------
+
+    private static final String KEY_ALIAS = "vanillish.secrets.v1";
+    private static final byte FORMAT = 1;
+
+    private static SecretKey key(boolean create) throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        KeyStore.Entry e = ks.getEntry(KEY_ALIAS, null);
+        if (e instanceof KeyStore.SecretKeyEntry) {
+            return ((KeyStore.SecretKeyEntry) e).getSecretKey();
+        }
+        if (!create) return null;
+        KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        kg.init(new KeyGenParameterSpec.Builder(KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build());
+        return kg.generateKey();
+    }
+
+    /** {@code 0x01 | iv[12] | ciphertext+tag}, or null if the Keystore refused. */
+    public static synchronized byte[] seal(byte[] plain) {
+        try {
+            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(Cipher.ENCRYPT_MODE, key(true));
+            byte[] iv = c.getIV();
+            byte[] body = c.doFinal(plain);
+            byte[] out = new byte[1 + iv.length + body.length];
+            out[0] = FORMAT;
+            System.arraycopy(iv, 0, out, 1, iv.length);
+            System.arraycopy(body, 0, out, 1 + iv.length, body.length);
+            return out;
+        } catch (Exception e) {
+            Log.w(TAG, "seal: " + e);
+            return null;
+        }
+    }
+
+    /** The plain bytes, or null (no key any more, a damaged file). */
+    public static synchronized byte[] unseal(byte[] sealed) {
+        try {
+            if (sealed == null || sealed.length < 1 + 12 + 16 || sealed[0] != FORMAT) return null;
+            SecretKey k = key(false);
+            if (k == null) return null;
+            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(Cipher.DECRYPT_MODE, k, new GCMParameterSpec(128, Arrays.copyOfRange(sealed, 1, 13)));
+            return c.doFinal(sealed, 13, sealed.length - 13);
+        } catch (Exception e) {
+            Log.w(TAG, "unseal: " + e);
+            return null;
+        }
+    }
+
+    // ---- The rest of the system -----------------------------------------------------------------
+
+    /** A web page; {@code app-settings:} opens the app's page in the system settings. */
+    public static boolean openUrl(String url) {
+        Context c = app;
+        if (c == null || url == null) return false;
+        Intent i;
+        if (url.startsWith("app-settings:")) {
+            i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", c.getPackageName(), null));
+        } else {
+            i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            c.startActivity(i);
+            return true;
+        } catch (ActivityNotFoundException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Start the game over in a fresh process: the relauncher (its own process) waits for this one
+     * to end, then opens the game again. This process ends here.
+     */
+    public static void relaunch() {
+        Context c = app;
+        if (c == null) {
+            Process.killProcess(Process.myPid());
+            return;
+        }
+        Intent i = new Intent(c, Relauncher.class);
+        i.putExtra(Relauncher.EXTRA_PID, Process.myPid());
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        c.startActivity(i);
+        Activity a = activity;
+        if (a != null) a.finishAffinity();
+        Runtime.getRuntime().exit(0);
+    }
+}

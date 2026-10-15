@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- iNilla's night-blue field, as a radial gradient (ios/tools/make-icons.py's colours). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient
+        android:type="radial"
+        android:centerX="0.5"
+        android:centerY="0.42"
+        android:gradientRadius="80dp"
+        android:startColor="#1C2240"
+        android:endColor="#06070E" />
+</shape>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vanillish: iNilla's gold ring and crown gem around a "V" (the 66 dp safe zone of 108). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- The ring. -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#D4AF37"
+        android:strokeWidth="2.6"
+        android:pathData="M54,27 A27,27 0 1,1 53.99,27 Z" />
+    <!-- The crown gem. -->
+    <path
+        android:fillColor="#FADE82"
+        android:pathData="M54,23.4 L57.4,27 L54,30.6 L50.6,27 Z" />
+    <!-- The V: two staves meeting at the foot. -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M40.5,38 L46.2,38 L54,63.5 L61.8,38 L67.5,38 L57.2,72 L50.8,72 Z" />
+</vector>

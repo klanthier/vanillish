@@ -3957,7 +3957,9 @@ dependencies = [
  "block2 0.6.2",
  "crossbeam-channel",
  "inilla-core",
+ "jni 0.21.1",
  "libc",
+ "ndk-context",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
  "security-framework",
@@ -6991,6 +6993,17 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vanillish-android"
+version = "0.2.0"
+dependencies = [
+ "benilla-app",
+ "benilla-buildstamp",
+ "bevy",
+ "inilla-platform",
+ "jni 0.21.1",
+]
 
 [[package]]
 name = "variadics_please"

@@ -1,0 +1,33 @@
+[package]
+name = "vanillish-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vanillish: the Android app entry — libvanillish.so, whose android_main (GameActivity's native thread) runs the same client iNilla runs on iOS; build.rs stamps the git build id like the `benilla` shim"
+
+[lints]
+workspace = true
+
+[lib]
+name = "vanillish"
+# `cdylib` is what the APK loads (`System.loadLibrary("vanillish")`, by GameActivity's
+# `android.app.lib_name`); `rlib` keeps `cargo check`/`test` working on any host.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# The developer build: benilla's instruments (debug panel, perf HUD, inspector) compiled in.
+dev = ["benilla-app/dev"]
+
+[dependencies]
+benilla-app = { path = "../benilla-app", default-features = false }
+inilla-platform = { path = "../inilla-platform" }
+# For `bevy::android` (the `AndroidApp` Bevy's winit runner reads); the workspace's own bevy.
+bevy.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The JNI shims the Java side calls (`GamepadBridge`): jni 0.21, as inilla-platform.
+jni = "0.21"
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }
