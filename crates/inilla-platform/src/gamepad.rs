@@ -3,8 +3,8 @@
 //! (all of them present `GCExtendedGamepad`). Polled once a frame on the main thread; a controller
 //! paired in iOS Settings → Bluetooth (or plugged in over USB-C/Lightning) appears here on its own.
 //!
-//! Off iOS [`poll`] reports nothing: the desktop build reads pads through Bevy's gilrs input
-//! instead (see the app's `inilla::pad`).
+//! Off iOS (and Android) [`poll`] reports nothing: the desktop build reads pads through Bevy's
+//! gilrs input instead (see the app's `inilla::pad`).
 //!
 //! Vanillish: on Android the app's Java side takes controller events before GameActivity sees
 //! them and feeds them to [`android`] (through `libvanillish`'s JNI shims); [`poll`] reads that
@@ -23,16 +23,18 @@ pub mod android;
 /// One connected controller.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pad {
-    /// Stable while the controller stays connected.
+    /// Stable while the controller stays connected (Vanillish: Android's `InputDevice` id).
     pub id: u64,
-    /// `vendorName`, e.g. "Backbone One" / "Xbox Wireless Controller".
+    /// `vendorName`, e.g. "Backbone One" / "Xbox Wireless Controller" (Vanillish: the
+    /// `InputDevice` name).
     pub name: String,
-    /// `productCategory`, e.g. "Xbox One", "DualSense", "MFi".
+    /// `productCategory`, e.g. "Xbox One", "DualSense", "MFi" (Vanillish: the family its vendor
+    /// and product ids name, `android::family`; empty when they name none).
     pub category: String,
     pub state: PadState,
 }
 
-/// Every connected extended gamepad, this instant.
+/// Every connected extended gamepad, this instant (Vanillish: on Android, the last used first).
 pub fn poll(out: &mut Vec<Pad>) {
     out.clear();
     #[cfg(target_os = "ios")]
