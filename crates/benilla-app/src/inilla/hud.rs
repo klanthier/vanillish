@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use inilla_core::pad::{Layer, PadBinding, PadButton, Special, RADIAL_ITEMS};
 use inilla_core::touch::{ElementKind, HubItem, Screen, TouchHub};
 
+use super::android::ImePreedit;
 use super::hints::ChatLine;
 use super::icons::{HudTooltip, Icons};
 use super::pad::PadHud;
@@ -74,7 +75,8 @@ fn draw(
     client: Res<State<ClientState>>,
     hud: Res<HudScreen>,
     time: Res<Time<Real>>,
-    chat: Res<ChatLine>,
+    // Vanillish: with the soft keyboard's word still being composed (a pair: a system takes 16).
+    (chat, composing): (Res<ChatLine>, Res<ImePreedit>),
     mut keys: ResMut<SyntheticKeys>,
     tooltip: Res<HudTooltip>,
     mut fps: Local<f32>,
@@ -242,14 +244,8 @@ fn draw(
             &icon_textures,
         );
     } else if let Some(r) = pad.frame.radial {
-        let c = egui::pos2(screen.size[0] / 2.0, screen.size[1] / 2.0);
-        draw_radial(
-            &painter,
-            c,
-            (screen.size[1] * 0.36).max(110.0),
-            r.selected,
-            &icon_textures,
-        );
+        let (c, radius) = pad_radial_place(&screen);
+        draw_radial(&painter, c, radius, r.selected, &icon_textures);
     }
 
     // ── the controller bar ──
@@ -313,7 +309,7 @@ fn draw(
 
     // ── the chat bar: the line being typed, above the iOS keyboard that covers the edit box ──
     if in_world && chat.typing {
-        chat_bar(&ctx, &chat, &mut keys, &screen, &safe);
+        chat_bar(&ctx, &chat, &composing.0, &mut keys, &screen, &safe);
     }
 
     // ── perf overlay ──
@@ -554,6 +550,17 @@ fn draw_view_button(p: &egui::Painter, rect: egui::Rect, a: f32, view: &str, pre
             );
         }
     }
+}
+
+/// Where the controller's radial goes, and how large: mid-screen. Vanillish: on a tabletop, in
+/// the middle of the world above the hinge, where the eyes are, and sized to it — the screen's
+/// middle is the crease.
+fn pad_radial_place(screen: &Screen) -> (egui::Pos2, f32) {
+    let (center, height) = match screen.world {
+        Some(world) => (world.center(), world.size()[1]),
+        None => ([screen.size[0] / 2.0, screen.size[1] / 2.0], screen.size[1]),
+    };
+    (egui::pos2(center[0], center[1]), (height * 0.36).max(110.0))
 }
 
 fn draw_radial(
@@ -889,9 +896,15 @@ fn strip_codes(s: &str) -> String {
 /// The line being typed, with Send and Close. In landscape the iOS keyboard covers the stock edit
 /// box and has no Escape key, so without this a player can neither see what they type nor leave
 /// the chat box without sending.
+///
+/// Vanillish: after the line, the word Android's soft keyboard is still composing (`composing`,
+/// [`ImePreedit`]) — Gboard and Samsung Keyboard hold it back until a space, a punctuation mark or
+/// a suggestion commits it, so the game's line does not have it yet. It is shown dimmed and
+/// underlined, as the keyboards themselves mark it.
 fn chat_bar(
     ctx: &egui::Context,
     chat: &ChatLine,
+    composing: &str,
     keys: &mut SyntheticKeys,
     screen: &Screen,
     safe: &SafeArea,
@@ -930,6 +943,9 @@ fn chat_bar(
                                         .size(16.0)
                                         .color(egui::Color32::WHITE),
                                 );
+                                if let Some(word) = composing_word(ui, composing) {
+                                    ui.add(egui::Label::new(word));
+                                }
                                 return;
                             }
                             let header = strip_codes(&chat.header);
@@ -937,23 +953,58 @@ fn chat_bar(
                                 ui.label(egui::RichText::new(header).size(16.0).color(GOLD));
                             }
                             let text = strip_codes(&chat.text);
-                            let shown = if text.is_empty() {
+                            // Vanillish: the composing word is laid out first, so a long line
+                            // gives way to it rather than push it out of the bar.
+                            let word = composing_word(ui, composing);
+                            let shown = if text.is_empty() && word.is_none() {
                                 "…".to_string()
                             } else {
                                 text
                             };
-                            ui.add(
-                                egui::Label::new(
+                            // No gap before the word: it continues the line (a word the keyboard
+                            // re-opens is half sent, half composing).
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            if !shown.is_empty() {
+                                let room = ui.available_width()
+                                    - word.as_ref().map_or(0.0, |w| w.size().x);
+                                let line = egui::WidgetText::from(
                                     egui::RichText::new(shown)
                                         .size(16.0)
                                         .color(egui::Color32::WHITE),
                                 )
-                                .truncate(),
-                            );
+                                .into_galley(
+                                    ui,
+                                    Some(egui::TextWrapMode::Truncate),
+                                    room.max(48.0),
+                                    egui::FontSelection::Default,
+                                );
+                                ui.add(egui::Label::new(line));
+                            }
+                            if let Some(word) = word {
+                                ui.add(egui::Label::new(word));
+                            }
                         });
                     });
                 });
         });
+}
+
+/// Vanillish: the soft keyboard's composing word as the chat bar shows it — dimmed and
+/// underlined, on one line, in at most half the room left — or `None` when there is none.
+fn composing_word(ui: &egui::Ui, composing: &str) -> Option<std::sync::Arc<egui::Galley>> {
+    if composing.is_empty() {
+        return None;
+    }
+    let text = egui::RichText::new(composing)
+        .size(16.0)
+        .color(egui::Color32::from_gray(185))
+        .underline();
+    Some(egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        ui.available_width() * 0.5,
+        egui::FontSelection::Default,
+    ))
 }
 
 fn draw_cursor(p: &egui::Painter, at: egui::Pos2) {
@@ -1099,5 +1150,29 @@ fn draw_pad_bar(
             GOLD,
         );
         x += size + gap;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inilla_core::touch::Rect;
+
+    /// A Z Fold8 Ultra's inner screen in points: the controller's radial in its middle, unless
+    /// half folded on a table, where it goes in the middle of the world above the hinge.
+    #[test]
+    fn the_controller_radial_is_mid_world_on_a_tabletop() {
+        let whole = Screen::new(954.0, 859.0);
+        let (c, r) = pad_radial_place(&whole);
+        assert_eq!((c.x, c.y), (477.0, 429.5));
+        assert!((r - 859.0 * 0.36).abs() < 1e-3);
+
+        let hinge = Rect::new([0.0, 429.5], [954.0, 429.5]);
+        let split = whole.split_at_hinge(hinge, 8.0);
+        let (c, r) = pad_radial_place(&split);
+        assert_eq!((c.x, c.y), (477.0, 429.5 / 2.0));
+        assert!((r - 429.5 * 0.36).abs() < 1e-3);
+        // The selected entry (34 points) and its name stay above the hinge.
+        assert!(c.y + r + 34.0 + 16.0 < 429.5);
     }
 }

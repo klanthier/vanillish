@@ -15,7 +15,6 @@ use benilla_world::build_id::BuildId;
 use inilla_core::fold::ScreenClass;
 use inilla_core::pad::{Layer, PadBinding, PadButton, PadProfile, Special};
 use inilla_core::settings::Quality;
-use inilla_core::touch::default_layout;
 
 use super::{hint, row, words, Overlay, Panel, SettingsTab};
 use crate::inilla::data::DataState;
@@ -437,9 +436,15 @@ fn about(ui: &mut egui::Ui, k: &mut Inilla, data: &DataState, build: &BuildId) {
         .button(egui::RichText::new(words::RESET_ALL).color(egui::Color32::LIGHT_RED))
         .clicked()
     {
+        // Vanillish: the system's game mode last seen is kept — not a setting, and a reset is no
+        // change of the mode for the preset to follow.
+        let last_game_mode = k.settings.last_game_mode;
         k.settings = Default::default();
         k.settings.setup_done = true;
-        k.layout = default_layout();
+        k.settings.last_game_mode = last_game_mode;
+        // Vanillish: every screen's layout (the cover's, the inner screen's, the tabletop's), the
+        // one in use staying this screen's.
+        crate::inilla::screen::reset_layouts(k);
         k.pad = PadProfile::default();
     }
 }

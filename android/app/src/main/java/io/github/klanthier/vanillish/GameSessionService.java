@@ -70,13 +70,22 @@ public final class GameSessionService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         pending = false;
         try {
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(NOTIFICATION, notification(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            Notification n = notification();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Android 14+ wants the type, one the manifest declares.
+                startForeground(NOTIFICATION, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
             } else {
-                startForeground(NOTIFICATION, notification());
+                // Android 12 and 13 have no specialUse constant: the manifest's type stands.
+                startForeground(NOTIFICATION, n);
             }
             running = true;
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null && !nm.areNotificationsEnabled()) {
+                // Declined (Android 13+'s POST_NOTIFICATIONS) or switched off: startForeground
+                // needs no permission for its notification, which just does not show. The
+                // service runs all the same; the task manager lists it.
+                Log.i(TAG, "session service: running, its notification hidden (notifications off)");
+            }
         } catch (RuntimeException e) {
             Log.w(TAG, "session service: " + e);
             stopSelf();
@@ -123,8 +132,11 @@ public final class GameSessionService extends Service {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
         PendingIntent tap = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        // The small icon is a white glyph (the status bar draws its alpha only); the launcher
+        // icon's layers are a colored 108 dp canvas, and the adaptive icon is no small icon.
         return new Notification.Builder(this, CHANNEL)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setSmallIcon(R.drawable.ic_stat_vanillish)
+                .setColor(0xFFD4AF37) // iNilla's gold, the shade's accent
                 .setContentTitle(getString(R.string.app_name))
                 .setContentText("Staying connected to the game server. Tap to return.")
                 .setContentIntent(tap)

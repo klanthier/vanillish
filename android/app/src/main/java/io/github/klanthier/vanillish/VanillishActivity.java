@@ -183,10 +183,16 @@ public class VanillishActivity extends GameActivity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         // A fold or unfold moves the game to the other panel: new density, new cut-out.
-        View decor = getWindow().getDecorView();
-        WindowInsetsCompat insets = androidx.core.view.ViewCompat.getRootWindowInsets(decor);
-        if (insets != null) updateSafeArea(insets);
+        refreshSafeArea();
         Bridge.applyFrameRate();
+    }
+
+    @Override
+    public void onMultiWindowModeChanged(boolean inMultiWindowMode, Configuration newConfig) {
+        super.onMultiWindowModeChanged(inMultiWindowMode, newConfig);
+        // Into a window (split screen, pop-up view, DeX) or back to full screen: the system bars
+        // start or stop counting.
+        refreshSafeArea();
     }
 
     @Override
@@ -195,19 +201,69 @@ public class VanillishActivity extends GameActivity {
         return super.onApplyWindowInsets(v, insets);
     }
 
+    /** The safe area again from the window's current insets. */
+    private void refreshSafeArea() {
+        View decor = getWindow().getDecorView();
+        WindowInsetsCompat insets = androidx.core.view.ViewCompat.getRootWindowInsets(decor);
+        if (insets != null) updateSafeArea(insets);
+    }
+
     /**
-     * The cut-out (and a waterfall edge) in dp, Bevy's logical pixels. The system bars are hidden,
-     * so they do not count — as on iOS, where the home indicator is hidden too.
+     * The safe area in dp, Bevy's logical pixels — what the HUD and the stock interface keep
+     * clear of:
+     *
+     * <ul>
+     *   <li>the cut-out (and a waterfall edge);</li>
+     *   <li>the bottom of the mandatory system gestures: with gesture navigation the home swipe
+     *       along the bottom edge stays the system's even with the bars hidden, and no exclusion
+     *       rect takes it back, so the deck's bottom row stays above it;</li>
+     *   <li>out of full screen — split screen, a pop-up or DeX window (multi-window mode, or a
+     *       caption bar) — the system bars the window still shows, the caption bar among them.</li>
+     * </ul>
+     *
+     * Full screen, the system bars are hidden (immersive) and only overlay the game when swiped
+     * in, so they do not count — as on iOS, where the home indicator is hidden too.
      */
     private void updateSafeArea(WindowInsetsCompat insets) {
         float density = getResources().getDisplayMetrics().density;
-        Insets cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout());
-        float side = -1f;
-        if (cut.left > 0 && cut.left >= cut.right) side = 0f;
-        else if (cut.right > 0) side = 1f;
+        int cutout = WindowInsetsCompat.Type.displayCutout();
+        boolean windowed = isInMultiWindowMode()
+                || !insets.getInsets(WindowInsetsCompat.Type.captionBar()).equals(Insets.NONE);
+        // A mask's insets are the largest of its types' on each side.
+        Insets area = insets.getInsets(
+                windowed ? cutout | WindowInsetsCompat.Type.systemBars() : cutout);
+        int home = insets.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom;
+        area = Insets.max(area, Insets.of(0, 0, 0, home));
         Bridge.safeArea = new float[] {
-            cut.top / density, cut.left / density, cut.bottom / density, cut.right / density, side,
+            area.top / density, area.left / density, area.bottom / density, area.right / density,
+            cameraSide(insets),
         };
+    }
+
+    /**
+     * The side of a landscape screen the camera's cut-out is on: 0 left, 1 right, -1 neither (no
+     * cut-out, or one on the top or bottom edge). The cut-out's bounding rects say which edge it is
+     * on — {@code getBoundingRects()}, at most one per edge, read edge by edge — where the insets
+     * cannot: a curved (waterfall) edge insets both sides alike, with no rect. Only insets with no
+     * platform object behind them fall back to the side with the inset.
+     */
+    private static float cameraSide(WindowInsetsCompat insets) {
+        android.view.WindowInsets platform = insets.toWindowInsets();
+        if (platform != null) {
+            android.view.DisplayCutout cut = platform.getDisplayCutout();
+            if (cut == null) return -1f;
+            android.graphics.Rect left = cut.getBoundingRectLeft();
+            android.graphics.Rect right = cut.getBoundingRectRight();
+            long leftArea = (long) left.width() * left.height();
+            long rightArea = (long) right.width() * right.height();
+            if (leftArea > 0 && leftArea >= rightArea) return 0f;
+            if (rightArea > 0) return 1f;
+            return -1f;
+        }
+        Insets inset = insets.getInsets(WindowInsetsCompat.Type.displayCutout());
+        if (inset.left > 0 && inset.left >= inset.right) return 0f;
+        if (inset.right > 0) return 1f;
+        return -1f;
     }
 
     @Override
