@@ -40,7 +40,7 @@ ordinary mouse (`inilla/mouse.rs`) — plus ordinary key messages for typing:
 | fingers | GameActivity → winit's touch events → iNilla's touch engine, as on iOS. At most eight fingers: a ninth is dropped before winit sees it. |
 | the soft keyboard | GameTextInput's text buffer, read every frame by the IME bridge (`inilla::android`) → characters and Backspace as key messages, Enter and Tab as keys pressed for the player. |
 | a hardware keyboard | winit's key events, as on the desktop (a hardware Enter is rewritten to the Enter key). |
-| Back | the Back key or gesture → `BackPresses` → iNilla's screens first, then the game's Escape. |
+| Back | the Back key or gesture, as a key (predictive back is off) → winit → `BackPresses` → iNilla's screens first, then the game's Escape. |
 | a controller | `GamepadBridge.java` → `jni_exports.rs` → `inilla_platform::gamepad::android` → iNilla's mapper, unchanged. |
 | a mouse, a trackpad, a hovering pen | `PointerBridge.java` → `jni_exports.rs` → `inilla_platform::pointer` → `inilla::host_pointer` → the virtual mouse. |
 
@@ -70,6 +70,10 @@ you are on, has **Copy the phone layout here** to start the inner screen or the 
 phone layout, and **Reset layout** puts back the current screen's own shipped layout. **Reset all
 Vanillish settings** (Settings → About) resets every screen's layout.
 
+On the inner screen and the tabletop, the hub's **More** opens the touch radial menu at your thumb,
+and the radial is no bigger than a phone's (at most 170 dp from its centre), so every wedge stays
+within the thumb's reach. The cover screen keeps iNilla's radial, as does iOS, iPads included.
+
 The interface size follows the screen too (Settings → General → Interface size, Automatic):
 
 | screen | automatic `uiScale` | why |
@@ -86,18 +90,26 @@ below 0.64).
 
 Half fold the unfolded phone, stand it on a table with the hinge across, and in the world:
 
-- the 3D world and the stock interface — windows, action bars, chat — end at the hinge;
+- the 3D world and the stock interface — windows, action bars, chat — end at the hinge, and the
+  nameplates and chat bubbles stay over their units above it;
 - below it the HUD has a black deck to itself, with the crease drawn faintly as a line the fingers
   should not rest on;
 - a drag on the deck's empty middle looks around (a look pad); a tap there clicks nothing;
-- the controller's radial menu opens in the middle of the world above the hinge.
+- the deck has no world under it, so nothing there points into one: a mouse, a hovering pen and
+  the controller's cursor reach the world above the hinge only (over the deck the pen shows no
+  cursor, and a mouse neither hovers, clicks nor starts mouse-look);
+- the controller's radial menu opens in the middle of the world above the hinge, and its cursor
+  stays above the hinge.
 
 The login and character screens stay whole-screen; the split is in the world only, and only while
-the hinge still reads half open. **Settings → Touch → Tabletop: the game above the hinge, the
-controls below it** turns the split off; a half-folded inner screen is then the inner screen.
+the hinge still reads half open. The layout editor still places the tabletop's controls on the
+deck, wherever you open it (the character screen too), so they land where the world will have them.
+**Settings → Touch → Tabletop: the game above the hinge, the controls below it** turns the split
+off; a half-folded inner screen is then the inner screen.
 
 Stock windows taller than the half above the hinge (about 600 units), long dropdowns, and addons
-that size themselves with `GetScreenHeight()` can reach into the deck.
+that size themselves with `GetScreenHeight()` can reach into the deck. Open bags do not: their
+stack starts a new column where the half above the hinge ends.
 
 ### Orientation
 
@@ -202,8 +214,11 @@ The Back gesture or key is the Escape key iOS has none of, and it never leaves t
    the screen itself (without game data, back to the setup screen).
 3. Anything left is the game's Escape: it closes the open window, or opens the game menu.
 
-A controller's B never acts as Back, and a mouse's side button is a mouse button, not Back
-(below).
+Vanillish opts out of predictive back (the manifest's `enableOnBackInvokedCallback="false"`), which
+Android 16 turns on by default: on every version the gesture reaches the game as the Back key, as
+on Android 12–15. Predictive back would take every Back key first, whatever sent it; without it, a
+controller's Back button stays the controller's (the game menu, below) and a mouse's side button
+stays a mouse button (below). A controller's B never acts as Back.
 
 ## Controllers
 
@@ -221,7 +236,8 @@ in a USB-C one; it works with no setup, in iNilla's mapping and with iNilla's se
   is in control, so a clip on the cover screen and a pad on the table both work without
   disconnecting either.
 - **Home** goes to the Android home screen. **B** is the game's B, never Back. Start/☰ opens the
-  radial menu, Select/View/Create (Back on cheaper pads) the game menu, as on iOS.
+  radial menu, Select/View/Create (Back on cheaper pads, which is never Android's Back) the game
+  menu, as on iOS.
 - Pulling down the notification shade, folding the phone or anything else that takes the focus
   releases every held button.
 - Very quick taps — down and up between two frames — still count.
@@ -236,7 +252,8 @@ USB, as on the desktop client:
   sword, the hand, a held item's icon);
 - the wheel zooms the camera and scrolls lists; a trackpad's two-finger swipe does the same;
 - the wheel button and the two side buttons are `BUTTON3`, `BUTTON4` (autorun by default) and
-  `BUTTON5` for key bindings. The side "back" button is `BUTTON5` and never Android's Back;
+  `BUTTON5` for key bindings. The side "back" button is `BUTTON5` alone, never Android's Back, on
+  every Android version;
 - holding the right button turns the camera; a mouse's pointer is captured and hidden meanwhile and
   comes back where it was. A trackpad is never captured: mouse-look on one follows its pointer and
   stops at the screen's edge.
@@ -262,11 +279,17 @@ process, and the game's connection, alive while you look at another app or lock 
 *Game connection*, white V icon); tapping it returns to the game.
 
 - It runs only in the world, and stops when you leave the world, turn the setting off, quit, or
-  swipe Vanillish away from Recents.
+  swipe Vanillish away from Recents — and when the session ends while the game is off the screen
+  (the logout below, or a lost connection).
 - The first time, Android 13 and later ask for permission to show notifications. Without it the
   service runs all the same; the game then shows only in the system's list of running apps.
 - The world does not update while the game is off the screen; the connection stays up, and what the
   server sent waits for your return.
+- Not for ever: 30 minutes after your last input — counted on the clock, through a locked phone's
+  sleep — the game asks the server to log the character out, the idle logout it would make on the
+  screen. If the character is still in the world 5 minutes later (the server refuses a logout in
+  combat), the connection is closed. Either way the character leaves the world, and the service
+  stops.
 - Leaving the screen, Vanillish saves its settings and layouts, lets go of every held key and mutes
   its sound; coming back, the sound returns.
 - How a fold behaves depends on Samsung's **Settings → Display → Continue apps on cover screen**:
@@ -283,7 +306,7 @@ Everything else is iNilla's ([INILLA.md](INILLA.md#settings)).
 | Touch | **This screen** (the screen class), **Copy the phone layout here**, **Tabletop: the game above the hinge, the controls below it** (on). **Reset layout** puts back this screen's own layout. |
 | Controller | the pairing hint names Android's Bluetooth settings and USB-C clips. |
 | Audio | no silent-switch row: Android has no switch, and Mute or Vibrate mode does not silence the game (the volume keys set its volume). **Let music and podcasts from other apps keep playing** off asks Android for the audio focus, which pauses them. |
-| Debug | the console's hint adds the phone's hotspot and `adb forward`; the session log row says where the log is; **Share session log…**. |
+| Debug | the console's addresses list Wi-Fi first, then the phone's hotspot or USB tethering, then any other network, a VPN's last (cellular data's never), and **Copy address** takes the first; its hint adds the hotspot and `adb forward`; the session log row says where the log is; **Share session log…**. |
 | About | **Vanillish — benilla for Android**, the credit to benilla and iNilla, **Reset all Vanillish settings** (every screen's layout too; the Game Dashboard mode last seen is kept). |
 
 In `benilla-config/inilla/settings.toml` the Android-only settings are `tabletop_split`,
@@ -301,11 +324,15 @@ build, which is a separate app with its own folders.
 | `…/files/benilla-config/` | benilla's state, as on every platform: `config.toml`, key bindings, macros, saved variables, `AddOns/`, `Screenshots/`, and `Diagnostics/` (session logs, crash reports). |
 | `…/files/benilla-config/inilla/` | iNilla's files: `settings.toml`, `servers.toml`, `controller.toml`, and the touch layouts `touch.toml` (cover), `touch-tablet.toml` (inner), `touch-tabletop.toml` (tabletop). |
 | `…/files/.vanillish/Data/` | the game data, once imported or downloaded. Beside the drop box on the same storage, so importing a copied folder is a rename, not a second 5 GB copy. |
-| `/data/user/0/<package>/files/secrets.bin` | the saved passwords, sealed (private storage: nothing else can read it). |
+| `/data/user/0/<package>/files/secrets.bin` | the saved passwords, sealed (private storage: nothing else can read it); `secrets.bin.unreadable` beside it is one whose key is gone ([Passwords](#passwords)). |
 | `/data/user/0/<package>/cache/vanillish/` | caches and temporary files; Android may clear them. |
 
-If shared storage is not mounted, everything falls back to private storage
-(`/data/user/0/<package>/files/Documents/`), out of a PC's reach.
+Shared storage can be away for a moment at launch (right after a system update, while Android
+restarts the service behind it). Vanillish then asks again for about three seconds; if it still
+does not answer, the setup screen says "Shared storage is not available right now. Close Vanillish
+and open it again." in place of the setup, and no download, import or addon sync starts. Nothing
+is lost: the folders are where they were for the next launch. Meanwhile the game runs from a
+private stand-in (`/data/user/0/<package>/files/Documents/`) that the next launch does not use.
 
 **Uninstalling deletes all of it** — the game data, the settings, the layouts, the SavedVariables —
 and so does *Clear storage* in the app's settings. (Uninstalling from the system settings may offer
@@ -319,8 +346,14 @@ Android Auto Backup is off for Vanillish: copy `benilla-config` to a PC to keep 
 Keystore** (alias `vanillish.secrets.v1`); the sealed file, `secrets.bin`, sits in private storage.
 The key never leaves the Keystore and is never backed up, so a copy of the file is useless
 elsewhere. If the key is gone (a reinstall, *Clear storage*), the passwords are forgotten and asked
-for again at the next login. If the Keystore refuses, the account form says "Password not saved:
-the Android Keystore refused it" and the launcher asks at each login.
+for again at the next login; the file that can no longer be read is set aside as
+`secrets.bin.unreadable`, not deleted, and the next password saved starts a new `secrets.bin`.
+
+A Keystore that is only busy (right after the phone starts, under load) forgets nothing: Vanillish
+tries again after a moment, and if it still fails, keeps the file as it is. That login asks for
+the password this once, and a password saved meanwhile is not saved. Whenever the Keystore refuses
+a password, the account form or the password prompt says "Password not saved: the Android Keystore
+refused it", and the launcher asks for it at each login until it is saved.
 
 ## The manifest
 
@@ -337,6 +370,7 @@ Every attribute in `android/app/src/main/AndroidManifest.xml` is there for a rea
 | `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | the game server, the data host, the remote console. |
 | `VIBRATE` | haptics on the HUD and the radial menu. |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS` | staying connected: `GameSessionService` and its notification. |
+| activity `enableOnBackInvokedCallback="false"` | no predictive back, which targetSdk 36 turns on from Android 16: it would hand every Back key, whatever its source, to the back callback ahead of the Activity, making a pad's Back and a mouse's side button the game's Escape. Without it the Back key and the gesture reach the game as a key, as on Android 12–15. |
 | activity `configChanges` (the full list) | folding, unfolding, rotating, a controller or keyboard connecting, DeX, a theme change: none may recreate the Activity — a Bevy app cannot be built twice in one process. |
 | `launchMode="singleTask"` | a second launch never makes a second Activity. |
 | `screenOrientation="sensorLandscape"`, `resizeableActivity="true"` | landscape either way up (the inner screen may be let into portrait); split screen and DeX windows allowed. |
@@ -368,8 +402,6 @@ lost mid-frame, which Bevy cannot recover from.
 - **With the on-screen keyboard up**, a hardware keyboard's arrows, Home and End move the
   keyboard's cursor, not the game's caret; the text the game gets is still right.
 - **Tabletop**: windows taller than the half above the hinge and some addons reach into the deck.
-- **A mouse's back button** on Android 16: a real Back gesture within half a second after releasing
-  it is dropped too.
 - **Controllers**: a generic HID pad laid out like a DualShock 4 without Android's mapping file
   could read its triggers as the right stick; a Bluetooth keyboard that Android takes for a gamepad
   would have its arrows and Back taken as the d-pad and Options.
@@ -391,20 +423,26 @@ first device runs should check, on the Fold8 Ultra:
    Activity, the right layout each time, the surface and the frame-rate vote back.
 3. Tabletop: the world drawn above the hinge only (the viewport on Adreno/Vulkan), and the stock
    interface ending exactly at the hinge (`return UIParent:GetBottom()` in the remote console's Lua
-   prompt).
+   prompt); nameplates and chat bubbles over their units, open bags wrapping below the top, and a
+   mouse or the controller's cursor over the deck picking nothing in the world.
 4. The back swipe held off beside the stick on One UI 9, and how it meets Samsung's Edge panel.
 5. The panel's measured rate in each preset, with Motion smoothness Adaptive and Standard, and
    with Game Booster's settings; Game Dashboard's modes (`adb shell cmd game mode …`), and whether
    One UI offers them.
 6. Gboard and Samsung Keyboard: the composing word, passwords, Backspace in an empty box, Return;
-   Back on Android 16 against 12–15.
+   Back on Android 16 and later against 12–15, with predictive back off: the gesture the game's
+   Escape, a pad's Back its game menu, a mouse's side button `BUTTON5` alone.
 7. Controllers: Xbox, DualSense, Switch Pro, a Backbone on the cover screen, an 8BitDo. The logcat
    line `vanillish: controller <id>: <name> [vvvv:pppp] "<family>", axes …` names the axis layout
    chosen; triggers rest at 0; the LT layer engages; nothing stays held after the shade or a
    fold.
-8. Staying connected: start and stop, the permission prompt's timing, the notification.
-9. The data: the folder picker opening in Download, a copy resumed after the app was killed, the
-   share sheet, a real 1.12.1 `Data` folder passing the archive checks.
-10. DeX and a mouse: pointer positions in a DeX window (its title bar), mouse-look sensitivity
+8. Staying connected: start and stop, the permission prompt's timing, the notification; the logout
+   30 minutes after the last input with the phone locked, and the service stopping with it.
+9. The data: the folder picker opening in Download, a folder picked on a USB drive or a network
+   share, a copy resumed after the app was killed, the share sheet, a real 1.12.1 `Data` folder
+   passing the archive checks.
+10. Saved passwords: a login right after the phone starts, while the Keystore may be busy, keeps
+    them (asked for once at worst).
+11. DeX and a mouse: pointer positions in a DeX window (its title bar), mouse-look sensitivity
     captured and not, a trackpad's scroll direction and speed.
-11. Heat: twenty minutes at High on the inner screen against Balanced, with the perf overlay on.
+12. Heat: twenty minutes at High on the inner screen against Balanced, with the perf overlay on.

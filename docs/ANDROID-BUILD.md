@@ -129,6 +129,8 @@ What `vanillish-check` runs, rustfmt and lint aside — type-checks, no code gen
 ```sh
 python3 android/tools/test_jni_natives.py     # every Java `native` has its Rust export
 cargo test -p inilla-core -p inilla-platform
+cargo clippy -p inilla-core -p inilla-platform --all-targets -- -D warnings
+cargo clippy -p benilla-app --all-targets -- -D warnings   # default features, as upstream's gate
 cargo check -p benilla-app --no-default-features
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
 cargo ndk -t arm64-v8a -P 31 check -p vanillish-android
@@ -143,7 +145,7 @@ rename both in the same change, or the first test above fails.
 
 | workflow | when | what |
 |---|---|---|
-| `vanillish-check` | every push (not for `*.md`, `docs/`, `ios/` alone) and PR | the JNI natives test; rustfmt over iNilla's and Vanillish's code; the engine-free tests; clippy (host, and the Android entry and platform layer for `aarch64-linux-android`); the desktop type-check; the Android type-check with cargo-ndk; the Java compiles; Android lint, which reports and never blocks (its report is an artifact for 7 days). |
+| `vanillish-check` | every push (not for `*.md`, `docs/`, `ios/` alone) and PR | the JNI natives test; rustfmt over iNilla's and Vanillish's code; the engine-free tests; clippy (on the host the iNilla crates and the app, with the app's default features as upstream's `--workspace` gate builds it; the Android entry and platform layer for `aarch64-linux-android`); the desktop type-check; the Android type-check with cargo-ndk; the Java compiles; Android lint, which reports and never blocks (its report is an artifact for 7 days). |
 | `vanillish-apk` | Run workflow, and `vanillish-v*` tags | the APK, on one `ubuntu-24.04` runner. |
 | `inilla-check` | every push and PR | iNilla's gate, unchanged — its iOS type-check keeps the fork mergeable back into iNilla. |
 
@@ -275,6 +277,9 @@ get them:
 
 Settings → Debug → **Remote console on the local network**, then the address it shows in a browser
 on the same Wi-Fi, or on a computer joined to the phone's hotspot ([DEBUGGING.md](DEBUGGING.md#2-on-the-same-wi-fi-the-remote-console)).
+The addresses come Wi-Fi first, then the hotspot or USB tethering, then any other network, and a
+VPN's last (only the VPN's other end can reach it); cellular data's, which nothing can reach, are
+not shown. **Copy address** copies the first.
 Over USB, with no network at all:
 
 ```sh
@@ -336,6 +341,9 @@ do nothing off Android.
   ([Signing](#signing)).
 - The app opens and closes at once → `adb logcat -s vanillish` shows its last words; the session
   log from the attempt is in `benilla-config/Diagnostics`.
+- "Shared storage is not available right now" on the setup screen → Android had not opened
+  `Android/data` a few seconds into the launch (right after a system update, say); logcat has
+  `vanillish: shared storage (Android/data) is not available…`. Close the app and open it again.
 - `build-rust.sh` stops on the android-activity pin → `Cargo.lock` moved (a Bevy update); change the
   two pins together ([Toolchain](#toolchain)).
 - `build-rust.sh` names a `Java_…` symbol that is not exported → a Java `native` method without its

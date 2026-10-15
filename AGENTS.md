@@ -25,6 +25,8 @@ benilla's, merged in (`docs/UPSTREAM.md`). Read `docs/ANDROID.md` first, then
 
   ```sh
   cargo test -p inilla-core -p inilla-platform
+  cargo clippy -p inilla-core -p inilla-platform --all-targets -- -D warnings
+  cargo clippy -p benilla-app --all-targets -- -D warnings
   cargo check -p benilla-app --no-default-features
   cargo ndk -t arm64-v8a -P 31 check -p vanillish-android
   python3 android/tools/test_jni_natives.py

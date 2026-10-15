@@ -26,7 +26,8 @@ Vulkan 1.1, and tuned for the **Samsung Galaxy Z Fold8 Ultra**:
   Bluetooth pads, in iNilla's WoW Forever layout with the pad's own button symbols; a USB-C clip on
   the folded phone makes the cover screen a handheld.
 - **Staying connected**: a look at another app or folding the phone shut does not drop you from
-  the server.
+  the server; half an hour after your last input the character logs out, as the game's own idle
+  logout would.
 - And Android's own: the system keyboard with its suggestions, Back as the game's Escape, passwords
   sealed with an Android Keystore key, logcat and the share sheet for logs.
 

@@ -61,11 +61,20 @@ a USB-C stick or drive:
    `Screenshots`, `Logs` or `Errors`, at most 400 folders — takes the folder with the most
    complete set of archives, checks the free space, and copies them in with a progress bar.
    - **Pause** stops between two 4 MiB chunks. **Resume copying from \<folder\>** continues where
-     it stopped — after a Pause, a crash, or Android ending the app in the background: the picker's
-     permission and the partly copied files survive.
-   - An archive already there at its size is kept, not copied again.
+     it stopped — after a Pause, a crash, a power cut, or Android ending the app in the
+     background: the picker's permission and the partly copied files (hidden, `.<archive>.copy`)
+     survive. A part continues only from the very file it was copied from (the same folder, size
+     and time, and the same first bytes), and only from what was surely on the phone's storage (it
+     is synced every 64 MiB); anything else starts that archive over. A download's partly fetched
+     files are never continued by a copy.
+   - An archive already there at its size is kept, not copied again — unless its source changed
+     after it was copied, which is copied again.
    - Each archive's size and MPQ header are checked before it takes its name, so an interrupted
      copy never leaves a half archive for the game to open.
+   - A folder something is still writing into is refused, since a file being fetched can already
+     have its full size and header (a torrent client sizes its files first): if any file changed
+     in the last 15 seconds, the message is "\<folder\> changed in the last few seconds — a copy or
+     download may still be running. Let it finish, then try again.", and Resume tries again.
 4. It is a **copy**: the original folder stays where it was, and the message at the end says how
    much deleting it frees.
 
@@ -93,6 +102,11 @@ The game opens its archives when it starts: when new data has arrived, **Restart
 starts it again by itself, in a fresh process. If it does not come back, open it from the apps
 screen.
 
+The setup screen is also there with the data complete (Settings → Debug → **Game data…**). Once an
+import, a copy or a download from there has added, removed or replaced an archive, it offers
+**Restart Vanillish now** instead of **Continue**: the running game still holds the old archives'
+tables, and would read the new files with them.
+
 ## Things to know
 
 | where | what to know |
@@ -103,5 +117,6 @@ screen.
 | the phone's file managers | cannot open `Android/data`: from the phone, Import from folder…; from a PC, USB. |
 | updating | keeps the data, as long as the new APK is signed with the same key; uninstalling deletes it ([ANDROID-BUILD.md](ANDROID-BUILD.md#signing)). |
 | the PC's clock | a USB copy stamped with a time in the future (another time zone, a clock off) reads as "still changing" until that time passes. |
+| shared storage at launch | right after a system update Android can take a moment to open `Android/data`. If it has not after about three seconds, the setup screen says "Shared storage is not available right now. Close Vanillish and open it again." and starts no download or import; nothing is lost. |
 
 Copyright: the archives are Blizzard's; [DATA.md](DATA.md#a-word-on-copyright) says the rest.
