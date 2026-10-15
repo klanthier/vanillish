@@ -134,22 +134,20 @@ pub(super) fn show(
     let files_ask = match (&here, &current) {
         (Some(found), Some(profile)) => {
             let token = connect.token_for(profile);
-            let step = files_step(found, profile, data, token.is_some(), connect.token_refused);
+            let step = files_step(
+                found,
+                profile,
+                data.status.complete(),
+                token.is_some(),
+                connect.token_refused,
+            );
             step == DataStep::AskToken && data.busy().is_none()
         }
         _ => false,
     };
     // Reopened for a server Connect set up before (after a relaunch, from the launcher): ask it
     // again for its sign-up rules and its files, once.
-    if here.is_none() && connect.busy().is_none() {
-        if let Some(base) = current.as_ref().and_then(|s| s.info.clone()) {
-            if connect.asked.as_deref() != Some(base.as_str()) {
-                if let Ok(addr) = kc::parse_address(&base) {
-                    connect.start_probe(addr);
-                }
-            }
-        }
-    }
+    connect.ask_again(current.as_ref());
     ui.columns(2, |cols| {
         egui::ScrollArea::vertical()
             .id_salt("connect-server")
@@ -269,7 +267,13 @@ fn files(
         return;
     }
     let token = connect.token_for(profile);
-    let step = files_step(found, profile, data, token.is_some(), connect.token_refused);
+    let step = files_step(
+        found,
+        profile,
+        data.status.complete(),
+        token.is_some(),
+        connect.token_refused,
+    );
     match step {
         DataStep::Have => {
             let st = &data.status;

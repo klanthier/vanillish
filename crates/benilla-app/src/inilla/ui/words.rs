@@ -352,6 +352,14 @@ pub(crate) fn plain_realm(host: &str) -> String {
     )
 }
 
+/// The server Connect set up before, asked again: its realm answers, its data host does not.
+pub(crate) fn only_the_realm(host: &str) -> String {
+    format!(
+        "Only the realm answers at {host}: the server's data host (port 8099) does not, so the \
+         game files and sign-up wait until it is running again."
+    )
+}
+
 /// The server described itself in a way this app cannot use.
 pub(crate) fn unusable(why: &str) -> String {
     format!(concat!(app!(), " cannot use this server: {}."), why)
@@ -490,7 +498,10 @@ pub(crate) fn register_error(e: &RegisterError) -> String {
             "No answer from the server ({why}). Try again: the same request goes out, so the \
              account is never made twice."
         ),
-        RegisterError::Failed(m) => format!("Sign-up failed: {m}. Ask the server's owner."),
+        RegisterError::Failed(m) => format!(
+            "Sign-up failed: {}. Ask the server's owner.",
+            m.trim().trim_end_matches('.')
+        ),
     }
 }
 
@@ -559,6 +570,17 @@ mod tests {
         assert_eq!(
             register_error(&RegisterError::BadName("Too short.".into())),
             "Too short."
+        );
+        // The server's sentence ends with its own full stop: one, not two.
+        assert_eq!(
+            register_error(&RegisterError::Failed(
+                "The salt is not 64 hex digits.".into()
+            )),
+            "Sign-up failed: The salt is not 64 hex digits. Ask the server's owner."
+        );
+        assert_eq!(
+            register_error(&RegisterError::Failed("the server answered 404".into())),
+            "Sign-up failed: the server answered 404. Ask the server's owner."
         );
         assert!(unreachable("10.0.0.5").contains("3724, 8085 and 8099"));
         assert!(unusable("it is for client build 6005").ends_with("build 6005."));

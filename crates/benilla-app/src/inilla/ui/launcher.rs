@@ -77,6 +77,21 @@ impl ServerForm {
         }
     }
 
+    /// Vanillish: the edit form of `s`, a server the launcher has already, with `note` over it
+    /// (Connect found a plain realm at its address again).
+    pub(crate) fn edit_noted(s: &ServerProfile, note: String) -> Self {
+        Self {
+            note: Some(note),
+            ..Self::from(s)
+        }
+    }
+
+    /// The server the form edits; `None` for a new one.
+    #[cfg(test)]
+    pub(crate) fn editing(&self) -> Option<&str> {
+        self.editing.as_deref()
+    }
+
     fn build(&self) -> Result<ServerProfile, Vec<String>> {
         let mut p = ServerProfile::new(self.name.trim(), self.host.trim());
         if let Some(id) = &self.editing {
@@ -435,6 +450,9 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
                     for account in inilla.launcher.remove_server(&id) {
                         inilla_platform::keychain::delete(&format!("account:{account}"));
                     }
+                    // Vanillish: and the access code Connect saved for its data, so no secret
+                    // outlives the server it was for.
+                    inilla_platform::keychain::delete(&DataSource::token_key(&id));
                     done = true;
                 }
             }

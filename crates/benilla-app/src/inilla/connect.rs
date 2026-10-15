@@ -87,7 +87,8 @@ pub(crate) struct Kept {
 }
 
 enum Done {
-    Probe(Address, Probe),
+    /// What the address led to; `true` when it was the current server asked again on its own.
+    Probe(Address, Probe, bool),
     SignUp(Result<String, RegisterError>),
 }
 
@@ -116,7 +117,8 @@ pub(crate) struct Connect {
     pub(crate) password: Option<(String, String)>,
     /// The access code per server id, read from the Keystore once.
     token: Option<(String, Option<String>)>,
-    /// The base last asked on its own (the screen reopened for a known server): once.
+    /// The base last asked on its own (the screen reopened for a known server): once
+    /// ([`Connect::reask`]).
     pub(crate) asked: Option<String>,
     job: Option<(Busy, JoinHandle<Done>)>,
 }
@@ -133,20 +135,48 @@ impl Connect {
             .filter(|f| current.is_some_and(|c| c.id == f.id))
     }
 
-    /// Ask `addr` what it is, on a worker thread.
+    /// The base to ask again on its own, once: the current server's, when Connect reopens for a
+    /// server it set up before (after a relaunch, from the launcher) and holds nothing on it. Only
+    /// these asks are counted, so a Connect the player typed that found nothing keeps its sentence
+    /// on screen instead of being followed at once by the old server's.
+    pub(crate) fn reask(&self, current: Option<&ServerProfile>) -> Option<String> {
+        if self.job.is_some() || self.here(current).is_some() {
+            return None;
+        }
+        let base = current?.info.clone()?;
+        (self.asked.as_deref() != Some(base.as_str())).then_some(base)
+    }
+
+    /// Ask the current server again on its own, when [`Self::reask`] says to.
+    pub(crate) fn ask_again(&mut self, current: Option<&ServerProfile>) {
+        let Some(base) = self.reask(current) else {
+            return;
+        };
+        self.asked = Some(base.clone());
+        if let Ok(addr) = kc::parse_address(&base) {
+            self.probe(addr, true);
+        }
+    }
+
+    /// Ask `addr` — the address the player typed — what it is, on a worker thread.
     pub(crate) fn start_probe(&mut self, addr: Address) {
+        self.probe(addr, false);
+    }
+
+    /// `again`: not typed now, but the current server asked again on its own — what it finds is
+    /// shown here, and never leads away from the screen.
+    fn probe(&mut self, addr: Address, again: bool) {
         if self.job.is_some() {
             return;
         }
         info!("inilla: connect: asking {}", addr.base);
         self.status = None;
         self.detail = None;
-        self.asked = Some(addr.base.clone());
         let handle = std::thread::Builder::new()
             .name("inilla-connect".into())
             .spawn(move || {
                 let found = kc::probe(&Http::quick(None), &addr, &tcp_listens);
-                Done::Probe(addr, found)
+                Done::Probe(addr, found, again)
             });
         match handle {
             Ok(h) => self.job = Some((Busy::Probing, h)),
@@ -210,19 +240,26 @@ impl Connect {
     }
 }
 
-/// What the game files need next for the server Connect found: [`kc::data_step`] for a server that
-/// described itself; for an older data host, its manifest (or its access code once refused).
+/// What the game files need next for the server Connect found (`complete`: the archives are all
+/// here): [`kc::data_step`] for a server that described itself; for an older data host, its
+/// manifest. Either way the access code once the data host `refused` it — even where the
+/// description says no code is needed (one set since it was read, a proxy in front): asking the
+/// host again unchanged would only be refused again, and again.
 pub(crate) fn files_step(
     found: &Found,
     profile: &ServerProfile,
-    data: &DataState,
+    complete: bool,
     have_token: bool,
     refused: bool,
 ) -> DataStep {
     let chosen = profile.data.as_ref().and_then(|d| d.locale.as_deref());
-    let complete = data.status.complete();
     match &found.info {
-        Some(info) => data_step(info, &found.base, complete, chosen, have_token && !refused),
+        Some(info) => {
+            match data_step(info, &found.base, complete, chosen, have_token && !refused) {
+                DataStep::Fetch { .. } if refused => DataStep::AskToken,
+                step => step,
+            }
+        }
         None if complete => DataStep::Have,
         None if refused => DataStep::AskToken,
         None => DataStep::Fetch {
@@ -336,7 +373,9 @@ fn poll_connect(
         return;
     };
     match done {
-        Done::Probe(addr, found) => probed(&mut connect, &mut inilla, &mut overlay, addr, found),
+        Done::Probe(addr, found, again) => {
+            probed(&mut connect, &mut inilla, &mut overlay, addr, found, again)
+        }
         Done::SignUp(result) => signed_up(&mut connect, &mut inilla, &mut overlay, result),
     }
 }
@@ -347,6 +386,7 @@ fn probed(
     overlay: &mut Overlay,
     addr: Address,
     found: Probe,
+    again: bool,
 ) {
     connect.pending = None;
     connect.token_refused = false;
@@ -373,18 +413,37 @@ fn probed(
         }
         Probe::DataOnly { base } => {
             info!("inilla: connect {base} → an older data host, data only");
-            let id = kc::adopt(&mut inilla.launcher, kc::manual_profile(&addr, Some(&base)));
+            let id = kc::adopt_data_host(&mut inilla.launcher, &addr, &base);
             connect.found = Some(Found {
                 id,
                 base,
                 info: None,
             });
         }
+        // The current server asked again on its own (its data host is down, its realm up): said
+        // here — the player opened this screen, often to add another server, and stays on it.
+        Probe::RealmOnly if again => {
+            info!("inilla: connect {} → only the realm answers", addr.base);
+            connect.found = None;
+            connect.status = Some((false, words::only_the_realm(&addr.host)));
+        }
         Probe::RealmOnly => {
             info!("inilla: connect {} → a plain realm on 3724", addr.host);
             connect.found = None;
             let p = kc::manual_profile(&addr, None);
-            overlay.server_form = Some(ServerForm::prefilled(&p, words::plain_realm(&addr.host)));
+            let note = words::plain_realm(&addr.host);
+            // A server the launcher has for this logon already is edited, not added a second time.
+            let known = kc::same_logon(&inilla.launcher, &p.host, p.port).cloned();
+            overlay.server_form = Some(match known {
+                Some(s) => {
+                    if inilla.launcher.last_server.as_deref() != Some(s.id.as_str()) {
+                        inilla.launcher.last_server = Some(s.id.clone());
+                        inilla.launcher.last_account = None;
+                    }
+                    ServerForm::edit_noted(&s, note)
+                }
+                None => ServerForm::prefilled(&p, note),
+            });
             overlay.panel = Some(Panel::Launcher);
         }
         Probe::Unusable { why } => {
@@ -463,7 +522,7 @@ fn chain_download(mut connect: ResMut<Connect>, inilla: Res<Inilla>, mut data: R
     let step = files_step(
         &found,
         &profile,
-        &data,
+        data.status.complete(),
         token.is_some(),
         connect.token_refused,
     );
@@ -660,6 +719,260 @@ mod tests {
             benilla_srp::password_verifier(&user, &pass, &salt).to_vec(),
             verifier
         );
+    }
+
+    /// The whole flow against a real data host (`server/datahost`, `INILLA_SIGNUP=lan`, a token,
+    /// a realm in a container), as the phone runs it: the app's own client, its SRP6, its chain's
+    /// reading of a refused token. `VANILLISH_LIVE=<host:port> VANILLISH_LIVE_TOKEN=<token> cargo
+    /// test -p benilla-app --lib a_real_data_host -- --ignored --nocapture`; it prints the account
+    /// it made, whose `s`/`v` rows the database must hold as posted.
+    #[test]
+    #[ignore = "needs a running data host: $VANILLISH_LIVE"]
+    fn a_real_data_host_takes_the_whole_flow() {
+        use inilla_core::data as kd;
+        use inilla_core::profiles::Launcher;
+        let typed = std::env::var("VANILLISH_LIVE").expect("$VANILLISH_LIVE");
+        let token = std::env::var("VANILLISH_LIVE_TOKEN").ok();
+        let addr = parse_address(&typed).unwrap();
+        let Probe::Described { info, base } = kc::probe(&Http::quick(None), &addr, &tcp_listens)
+        else {
+            panic!("{typed} did not describe itself");
+        };
+        println!("described: {info:?}");
+        let mut launcher = Launcher::default();
+        let id = kc::adopt(&mut launcher, info.profile(&addr));
+        let p = launcher.server(&id).unwrap().clone();
+        println!(
+            "profile: {} {}:{} realm={:?} override={:?} data={:?}",
+            p.name, p.host, p.port, p.realm_name, p.realm_override, p.data
+        );
+        assert_eq!(p.host, addr.host);
+
+        // The data: a refused token reads as the one sentence the chain asks the code again on.
+        let need_token = info.data.as_ref().is_some_and(|d| d.token);
+        let step = data_step(&info, &base, false, None, token.is_some());
+        let DataStep::Fetch { url, .. } = step else {
+            panic!("{step:?}");
+        };
+        if need_token {
+            assert_eq!(
+                kd::fetch_manifest(&Http::new(None), &url).err().as_deref(),
+                Some(TOKEN_REFUSED)
+            );
+        }
+        let http = Http::new(token.clone());
+        let m = kd::fetch_manifest(&http, &url).unwrap();
+        let dir = std::env::temp_dir().join(format!("vanillish-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        kd::download(&http, &url, &m, &dir, |_| {}, &|| true).unwrap();
+        assert!(kd::verify(&m, &dir, |_, _, _| {}).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The account: refused without the code when it needs one, made with it, the lost answer
+        // replayed, another salt for the same name taken.
+        let rules = info.sign_up_rules().expect("sign-up open").clone();
+        let register_url = info.register_url(&base).unwrap();
+        let name = kc::suggest_name(rand::random());
+        let up = sign_up(&rules, &name, "s3cret!", &make_verifier).unwrap();
+        if rules.token {
+            assert_eq!(
+                register(&Http::quick(None), &register_url, &up),
+                Err(RegisterError::TokenRequired)
+            );
+        }
+        let with = Http::quick(token);
+        assert_eq!(register(&with, &register_url, &up), Ok(name.clone()));
+        assert_eq!(register(&with, &register_url, &up), Ok(name.clone()));
+        let again = sign_up(&rules, &name, "s3cret!", &make_verifier).unwrap();
+        assert_eq!(
+            register(&with, &register_url, &again),
+            Err(RegisterError::NameTaken)
+        );
+        println!("created {name}: {}", up.json);
+    }
+
+    fn inilla() -> Inilla {
+        Inilla {
+            settings: Default::default(),
+            launcher: Default::default(),
+            layout: Default::default(),
+            other_layouts: Default::default(),
+            pad: Default::default(),
+        }
+    }
+
+    /// What the full stack describes: one realm in a container, the data behind no token.
+    fn stack() -> ServerInfo {
+        kc::parse_server_info(
+            r#"{"format":1,"name":"Home","core":"vmangos","build":5875,"auth":{"port":3724},
+                "realms":[{"name":"Home","world":{"address":"172.18.0.3","port":8085,"same_host":true}}],
+                "data":{"url":"","token":false,"default":"enUS",
+                        "locales":[{"locale":"enUS","path":"enUS/","bytes":5400000000}]},
+                "registration":{"open":true,"credentials":"srp6"}}"#,
+        )
+        .unwrap()
+    }
+
+    /// A refused access code is asked for again — even where the description says none is needed
+    /// (one set since it was read): the chain must not ask the host again and again.
+    #[test]
+    fn a_refused_code_is_asked_for_whatever_the_description_says() {
+        let addr = parse_address("192.168.1.20").unwrap();
+        let info = stack();
+        let profile = info.profile(&addr);
+        let found = Found {
+            id: profile.id.clone(),
+            base: addr.base.clone(),
+            info: Some(info),
+        };
+        let fetch = DataStep::Fetch {
+            url: addr.base.clone(),
+            locale: None,
+        };
+        assert_eq!(files_step(&found, &profile, false, false, false), fetch);
+        assert_eq!(
+            files_step(&found, &profile, false, false, true),
+            DataStep::AskToken
+        );
+        assert_eq!(
+            files_step(&found, &profile, false, true, true),
+            DataStep::AskToken
+        );
+        // The archives are all here: nothing to ask.
+        assert_eq!(
+            files_step(&found, &profile, true, false, true),
+            DataStep::Have
+        );
+        // An older data host: its manifest, until it refuses the code.
+        let older = Found {
+            info: None,
+            ..found
+        };
+        let mut by_hand = kc::manual_profile(&addr, Some(&addr.base));
+        by_hand.id = older.id.clone();
+        assert_eq!(files_step(&older, &by_hand, false, false, false), fetch);
+        assert_eq!(
+            files_step(&older, &by_hand, false, false, true),
+            DataStep::AskToken
+        );
+    }
+
+    /// The current server is asked again on its own once; a Connect the player typed that found
+    /// nothing is not followed by the old server's answer.
+    #[test]
+    fn the_current_server_is_asked_again_once_and_never_over_a_typed_answer() {
+        let mut c = Connect::default();
+        let mut known = ServerProfile::new("Home", "192.168.1.20");
+        known.info = Some("http://192.168.1.20:8099/".into());
+        assert_eq!(
+            c.reask(Some(&known)).as_deref(),
+            Some("http://192.168.1.20:8099/")
+        );
+        assert_eq!(c.reask(None), None);
+        assert_eq!(c.reask(Some(&ServerProfile::new("x", "10.0.0.1"))), None);
+        c.asked = known.info.clone();
+        assert_eq!(c.reask(Some(&known)), None, "once");
+        // The player typed another address, and nothing answered there.
+        let (mut i, mut o) = (inilla(), Overlay::default());
+        i.launcher.last_server = Some(i.launcher.add_server(known.clone()));
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        c.start_probe(parse_address(&format!("127.0.0.1:{port}")).unwrap());
+        assert_eq!(c.busy(), Some(Busy::Probing));
+        assert_eq!(
+            c.reask(i.launcher.current_server()),
+            None,
+            "one job at a time"
+        );
+        let (_, job) = c.job.take().unwrap();
+        let Done::Probe(addr, found, again) = job.join().unwrap() else {
+            panic!("not a probe");
+        };
+        assert!(
+            !again && matches!(found, Probe::Nothing { .. }),
+            "{found:?}"
+        );
+        probed(&mut c, &mut i, &mut o, addr, found, again);
+        assert!(c
+            .status
+            .as_ref()
+            .is_some_and(|(ok, s)| !ok && s.contains("127.0.0.1")));
+        assert_eq!(c.asked, known.info, "a typed address is not counted");
+        assert_eq!(c.reask(i.launcher.current_server()), None);
+        // Another server Connect set up, picked in the launcher: asked once.
+        let mut other = ServerProfile::new("Away", "10.0.0.8");
+        other.info = Some("http://10.0.0.8:8099/".into());
+        assert!(c.reask(Some(&other)).is_some());
+    }
+
+    /// A plain realm found again is the launcher's server edited, never a second one; asked again
+    /// on its own it is only said, and the screen stays.
+    #[test]
+    fn a_plain_realm_found_again_is_edited_not_added() {
+        let (mut c, mut i, mut o) = (Connect::default(), inilla(), Overlay::default());
+        let mut mine = ServerProfile::new("Mine", "192.168.1.20");
+        mine.realm_override = Some("192.168.1.20".into());
+        let id = i.launcher.add_server(mine);
+        i.launcher.last_server = Some(
+            i.launcher
+                .add_server(ServerProfile::new("Other", "10.0.0.8")),
+        );
+        o.panel = Some(Panel::Connect);
+        let addr = parse_address("192.168.1.20:3724").unwrap();
+        probed(&mut c, &mut i, &mut o, addr.clone(), Probe::RealmOnly, true);
+        assert_eq!(o.panel, Some(Panel::Connect));
+        assert!(o.server_form.is_none());
+        assert!(c.status.as_ref().is_some_and(|(ok, _)| !ok));
+        probed(&mut c, &mut i, &mut o, addr, Probe::RealmOnly, false);
+        assert_eq!(o.panel, Some(Panel::Launcher));
+        assert_eq!(
+            o.server_form.as_ref().and_then(ServerForm::editing),
+            Some(id.as_str())
+        );
+        assert_eq!(i.launcher.last_server.as_deref(), Some(id.as_str()));
+        assert_eq!(i.launcher.servers.len(), 2);
+        // A realm the launcher does not have: a new server's form.
+        let new = parse_address("10.0.0.99").unwrap();
+        probed(&mut c, &mut i, &mut o, new, Probe::RealmOnly, false);
+        assert_eq!(o.server_form.as_ref().and_then(ServerForm::editing), None);
+    }
+
+    /// A server that described itself, answered once by its data host alone, keeps all it said.
+    #[test]
+    fn an_older_answer_keeps_the_profile_whole() {
+        let (mut c, mut i, mut o) = (Connect::default(), inilla(), Overlay::default());
+        let addr = parse_address("mac-mini.local").unwrap();
+        let info = stack();
+        probed(
+            &mut c,
+            &mut i,
+            &mut o,
+            addr.clone(),
+            Probe::Described {
+                info: Box::new(info),
+                base: addr.base.clone(),
+            },
+            false,
+        );
+        let before = i.launcher.current_server().cloned().unwrap();
+        assert_eq!(before.realm_override.as_deref(), Some("mac-mini.local"));
+        probed(
+            &mut c,
+            &mut i,
+            &mut o,
+            addr.clone(),
+            Probe::DataOnly {
+                base: addr.base.clone(),
+            },
+            true,
+        );
+        assert_eq!(i.launcher.current_server(), Some(&before));
+        assert!(c
+            .found
+            .as_ref()
+            .is_some_and(|f| f.info.is_none() && f.id == before.id));
     }
 
     /// Nothing listens on the port: the probe says so with the network's reason, quickly.

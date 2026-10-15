@@ -67,11 +67,8 @@ pub fn parse_address(input: &str) -> Result<Address, String> {
         let rest = &s[scheme.len()..];
         let rest = rest.split(['?', '#']).next().unwrap_or(rest);
         let authority = rest.split('/').next().unwrap_or("");
-        let (host, port) = split_host_port(authority);
+        let (host, _) = host_port(authority)?;
         check_host(host)?;
-        if port == Some(0) || (authority.ends_with(':') && port.is_none()) {
-            return Err("The port must be between 1 and 65535.".into());
-        }
         let base = format!("{scheme}{}/", rest.trim_end_matches('/'));
         return Ok(Address {
             host: host.to_string(),
@@ -81,17 +78,51 @@ pub fn parse_address(input: &str) -> Result<Address, String> {
     if s.contains('/') {
         return Err("Type the address alone (192.168.1.20), or a whole http:// link.".into());
     }
-    let (host, port) = split_host_port(s);
+    let (host, port) = host_port(s)?;
     check_host(host)?;
     let port = match port {
         None | Some(DEFAULT_AUTH_PORT) => DEFAULT_INFO_PORT,
-        Some(0) => return Err("The port must be between 1 and 65535.".into()),
         Some(p) => p,
     };
     Ok(Address {
         host: host.to_string(),
         base: format!("http://{}:{port}/", bracketed(host)),
     })
+}
+
+/// `host`, `host:port`, `[v6]`, `[v6]:port` or a bare IPv6 literal → the host and the port typed.
+/// Strict where [`split_host_port`] is lenient: a port that is not 1–65535, or anything after a
+/// bracketed host but its port, is refused rather than dropped (`[fd00::2]:99999` would otherwise
+/// become the default port, or a URL nothing can open).
+fn host_port(s: &str) -> Result<(&str, Option<u16>), String> {
+    let port = |p: &str| {
+        p.parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or_else(|| "The port must be between 1 and 65535.".to_string())
+    };
+    if let Some(rest) = s.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .filter(|(h, _)| h.parse::<std::net::Ipv6Addr>().is_ok())
+            .ok_or_else(|| not_an_address(s))?;
+        return match tail {
+            "" => Ok((host, None)),
+            _ => match tail.strip_prefix(':') {
+                Some(p) => Ok((host, Some(port(p)?))),
+                None => Err(not_an_address(s)),
+            },
+        };
+    }
+    match s.rsplit_once(':') {
+        // One colon: `host:port`. More: an IPv6 literal (or a typo `check_host` refuses).
+        Some((h, p)) if !h.contains(':') => Ok((h, Some(port(p)?))),
+        _ => Ok((s, None)),
+    }
+}
+
+fn not_an_address(s: &str) -> String {
+    format!("\"{s}\" is not an address: type an IP (192.168.1.20) or a name (my-mac.local).")
 }
 
 fn check_host(host: &str) -> Result<(), String> {
@@ -105,9 +136,7 @@ fn check_host(host: &str) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err(format!(
-            "\"{host}\" is not an address: type an IP (192.168.1.20) or a name (my-mac.local)."
-        ))
+        Err(not_an_address(host))
     }
 }
 
@@ -624,10 +653,9 @@ pub fn manual_profile(addr: &Address, data: Option<&str>) -> ServerProfile {
 /// secrets), its notes when the server has none, and the language picked for its data — so a
 /// second Connect never makes a twin. Returns the profile's id.
 pub fn adopt(launcher: &mut Launcher, mut p: ServerProfile) -> String {
-    let same = launcher
-        .servers
-        .iter_mut()
-        .find(|s| s.host.eq_ignore_ascii_case(&p.host) && s.port == p.port);
+    let same = same_logon(launcher, &p.host, p.port)
+        .map(|s| s.id.clone())
+        .and_then(|id| launcher.server_mut(&id));
     let id = match same {
         Some(s) => {
             if p.notes.is_empty() {
@@ -654,6 +682,37 @@ pub fn adopt(launcher: &mut Launcher, mut p: ServerProfile) -> String {
         launcher.last_account = None;
     }
     id
+}
+
+/// An older data host (no `server.json`) answered at `base`, reached at `addr`: a new server for
+/// its data on the stock logon — or, for a logon the launcher has already, that server kept as it
+/// is (its realm, its world override, where it described itself before: a `server.json` that
+/// failed once must not wipe them), given this data source only when it had none. Selected either
+/// way; returns its id.
+pub fn adopt_data_host(launcher: &mut Launcher, addr: &Address, base: &str) -> String {
+    let p = manual_profile(addr, Some(base));
+    let Some(id) = same_logon(launcher, &p.host, p.port).map(|s| s.id.clone()) else {
+        return adopt(launcher, p);
+    };
+    if let Some(s) = launcher.server_mut(&id) {
+        if s.data.is_none() {
+            s.data = p.data;
+        }
+    }
+    if launcher.last_server.as_deref() != Some(id.as_str()) {
+        launcher.last_server = Some(id.clone());
+        launcher.last_account = None;
+    }
+    id
+}
+
+/// The launcher's server for the logon at `host:port` (the host in any case), when it has one:
+/// the one [`adopt`] updates, and the one a plain realm found again is edited as, not added twice.
+pub fn same_logon<'a>(launcher: &'a Launcher, host: &str, port: u16) -> Option<&'a ServerProfile> {
+    launcher
+        .servers
+        .iter()
+        .find(|s| s.host.trim().eq_ignore_ascii_case(host.trim()) && s.port == port)
 }
 
 /// What the address led to.
@@ -821,12 +880,10 @@ pub enum RegisterError {
 /// none, falls back on the status, so the two sides only need to agree on statuses.
 pub fn read_reply(status: u16, body: &str, asked: &str) -> Result<String, RegisterError> {
     let r: Reply = serde_json::from_str(body).unwrap_or_default();
-    // 201 created; 200 the replay of a request that already created it.
+    // 201 created; 200 the replay of a request that already created it. The name is the one
+    // asked, whatever the reply echoes: the verifier was made for it, so no other logs in.
     if matches!(status, 200 | 201) && (r.ok || r.username.is_some() || status == 201) {
-        return Ok(r
-            .username
-            .filter(|u| !u.trim().is_empty())
-            .unwrap_or_else(|| asked.to_string()));
+        return Ok(asked.to_string());
     }
     let message = r
         .message
@@ -975,9 +1032,24 @@ mod tests {
             "http://host:0/",
             "http://user:pw@host/",
             "ftp://host",
+            // A bracketed host is an IPv6 literal with nothing after it but a port.
+            "[fd00::2]:99999",
+            "[fd00::2]:0",
+            "[fd00::2]:",
+            "[fd00::2]x",
+            "[fd00::2",
+            "[my-mac.local]:8099",
+            "http://[fd00::2]:99999/",
+            "http://[fd00::2]junk/",
+            "http://host:/",
+            "http://host:99999/",
         ] {
             assert!(parse_address(bad).is_err(), "{bad:?}");
         }
+        assert_eq!(
+            parse_address("host:99999"),
+            Err("The port must be between 1 and 65535.".into())
+        );
     }
 
     #[test]
@@ -1267,6 +1339,48 @@ mod tests {
         let upper = manual_profile(&addr("NAS.local"), Some("http://NAS.local:8099/"));
         assert_eq!(adopt(&mut l, upper), other);
         assert_eq!(l.servers.len(), 2);
+        // The server a logon belongs to, whatever case its host is typed in; none on another port.
+        assert_eq!(
+            same_logon(&l, "nas.LOCAL", 3724).map(|s| s.id.as_str()),
+            Some(other.as_str())
+        );
+        assert_eq!(same_logon(&l, "nas.local", 3725), None);
+        assert_eq!(same_logon(&l, "elsewhere", 3724), None);
+    }
+
+    #[test]
+    fn an_older_answer_never_wipes_what_a_server_said_before() {
+        let mut l = Launcher::default();
+        let a = addr("mac-mini.local");
+        let id = adopt(&mut l, stack().profile(&a));
+        let before = l.server(&id).unwrap().clone();
+        assert!(before.realm_override.is_some() && before.info.is_some());
+        // `server.json` failed this once, the data host's `/` answered: the profile stays whole.
+        l.last_server = None;
+        assert_eq!(adopt_data_host(&mut l, &a, &a.base), id);
+        assert_eq!(l.server(&id), Some(&before));
+        assert_eq!(l.last_server.as_deref(), Some(id.as_str()));
+        assert_eq!(l.servers.len(), 1);
+        // A server entered by hand gets the data source it lacked, and nothing else changes.
+        let mut by_hand = ServerProfile::new("Home", "10.0.0.7");
+        by_hand.realm_override = Some("10.0.0.7".into());
+        let hand = l.add_server(by_hand);
+        let b = addr("10.0.0.7");
+        assert_eq!(adopt_data_host(&mut l, &b, &b.base), hand);
+        let s = l.server(&hand).unwrap();
+        assert_eq!(s.data.as_ref().unwrap().url, "http://10.0.0.7:8099/");
+        assert_eq!(
+            (s.name.as_str(), s.realm_override.as_deref()),
+            ("Home", Some("10.0.0.7"))
+        );
+        assert_eq!(l.last_account, None);
+        // A new host is a new server, on the stock logon.
+        let c = addr("nas.local:9000");
+        let new = adopt_data_host(&mut l, &c, &c.base);
+        let s = l.server(&new).unwrap();
+        assert_eq!((s.host.as_str(), s.port), ("nas.local", 3724));
+        assert_eq!(s.data.as_ref().unwrap().url, "http://nas.local:9000/");
+        assert_eq!(l.servers.len(), 3);
     }
 
     /// A fake network: URL → body, anything else unreachable.
@@ -1679,6 +1793,12 @@ mod tests {
         // Success without a name echoes the one asked for; a 200 that says no is no.
         assert_eq!(reply(200, r#"{"ok":true}"#), Ok("A".into()));
         assert_eq!(reply(201, ""), Ok("A".into()));
+        // A reply that names another account still means the one asked: its verifier is that
+        // name's, so the launcher must not save another name with this password.
+        assert_eq!(
+            reply(201, r#"{"ok":true,"username":"SOMEONE"}"#),
+            Ok("A".into())
+        );
         assert!(reply(200, r#"{"ok":false,"error":"internal"}"#).is_err());
     }
 
