@@ -600,9 +600,9 @@ pub struct Database {
 const ER_DUP_ENTRY: u16 = 1062;
 
 /// Server errors that mean "not ready yet, or busy": too many connections, no such user or
-/// database yet (db-init has not run), shutting down, no such table yet, lock timeout, deadlock,
-/// connection killed.
-const NOT_READY: &[u16] = &[1040, 1044, 1045, 1049, 1053, 1146, 1205, 1213, 1927];
+/// database yet (db-init has not run; 1130 when no user at all may connect from this host yet),
+/// shutting down, no such table yet, lock timeout, deadlock, connection killed.
+const NOT_READY: &[u16] = &[1040, 1044, 1045, 1049, 1053, 1130, 1146, 1205, 1213, 1927];
 
 const REALMCHARACTERS: &str = "INSERT IGNORE INTO realmcharacters (realmid, acctid, numchars) \
                                SELECT id, LAST_INSERT_ID(), 0 FROM realmlist";

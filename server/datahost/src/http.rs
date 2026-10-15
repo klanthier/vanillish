@@ -62,11 +62,23 @@ impl Request {
     }
 }
 
+/// The longest request line or header line read: a line without an end must not grow forever.
+pub const MAX_LINE: u64 = 16 * 1024;
+
+/// One line of the head, at most [`MAX_LINE`] bytes; 0 at the end of the stream.
+fn read_line(r: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
+    let n = r.by_ref().take(MAX_LINE).read_line(line)?;
+    if n as u64 == MAX_LINE && !line.ends_with('\n') {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+    }
+    Ok(n)
+}
+
 /// Read one request off `r`: the head, and the body when `Content-Length` announces at most
 /// [`MAX_BODY`] bytes (see [`Body`] for the rest).
 pub fn read_request(r: &mut impl BufRead) -> io::Result<Request> {
     let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
+    if read_line(r, &mut line)? == 0 {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "no request"));
     }
     let mut parts = line.split_whitespace();
@@ -79,7 +91,7 @@ pub fn read_request(r: &mut impl BufRead) -> io::Result<Request> {
     let mut headers = Vec::new();
     loop {
         let mut h = String::new();
-        if r.read_line(&mut h)? == 0 {
+        if read_line(r, &mut h)? == 0 {
             break;
         }
         let h = h.trim_end();
@@ -411,6 +423,20 @@ mod tests {
             read_request(&mut &raw[..]).is_err(),
             "a body cut short is no request"
         );
+    }
+
+    #[test]
+    fn a_line_without_an_end_is_refused_not_kept() {
+        let long = "x".repeat(MAX_LINE as usize);
+        for raw in [
+            format!("GET /{long} HTTP/1.1\r\n\r\n"),
+            format!("GET / HTTP/1.1\r\nX-Pad: {long}\r\n\r\n"),
+        ] {
+            let e = read_request(&mut raw.as_bytes()).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        }
+        let fits = format!("GET / HTTP/1.1\r\nX-Pad: {}\r\n\r\n", &long[..1000]);
+        assert!(read_request(&mut fits.as_bytes()).is_ok());
     }
 
     #[test]

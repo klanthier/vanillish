@@ -962,6 +962,54 @@ mod tests {
     }
 
     #[test]
+    fn server_flags_read_empty_as_unset() {
+        let cli = Cli::try_parse_from([
+            "inilla-datahost",
+            "serve",
+            "--auth-port",
+            "",
+            "--realm-name",
+            " ",
+            "--core",
+            "vmangos",
+            "--world-same-host",
+            "--signup",
+            "lan",
+            "--signup-db-password",
+            "",
+        ])
+        .unwrap();
+        let Cmd::Serve { data, server, .. } = cli.cmd else {
+            panic!("serve");
+        };
+        assert!(data.is_empty(), "no --data is allowed");
+        let realm = server.realm().unwrap();
+        assert_eq!(
+            (
+                realm.auth_port,
+                realm.realm_name.as_deref(),
+                realm.core.as_deref()
+            ),
+            (None, None, Some("vmangos"))
+        );
+        assert!(realm.world_same_host);
+        assert_eq!(server.signup, Mode::Lan);
+        assert_eq!(
+            server.signup(false).unwrap().registration(true),
+            None,
+            "lan without the database password stays off"
+        );
+        for bad in ["0", "70000", "x"] {
+            let args = ServerArgs {
+                world_port: Some(bad.into()),
+                ..ServerArgs::default()
+            };
+            assert!(args.realm().is_err(), "{bad}");
+        }
+        assert!(Cli::try_parse_from(["inilla-datahost", "serve", "--signup", "yes"]).is_err());
+    }
+
+    #[test]
     fn locale_prefixes_are_four_letters() {
         assert_eq!(split_locale("deDE=/x"), (Some("deDE"), "/x"));
         assert_eq!(split_locale("/games/Data"), (None, "/games/Data"));
