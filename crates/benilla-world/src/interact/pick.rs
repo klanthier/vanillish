@@ -81,11 +81,12 @@ pub type PickParts<'w, 's> = Query<
 /// Vanillish: whether the logical `cursor` (the target's, from its top left) is over what `camera`
 /// draws. `viewport_to_world` takes any point, and one past the viewport casts a ray below or
 /// beside the drawn frustum: on a foldable's tabletop the world is drawn above the hinge, and the
-/// controls' deck below it must neither hover nor click what is not on the screen.
+/// controls' deck below it must neither hover nor click what is not on the screen. A camera whose
+/// target is not measured yet refuses nothing (its rays fail on their own).
 pub fn cursor_over_view(camera: &Camera, cursor: Vec2) -> bool {
     camera
         .logical_viewport_rect()
-        .is_some_and(|r| r.contains(cursor))
+        .is_none_or(|r| r.contains(cursor))
 }
 
 /// The nearest hit among `pickable` under the logical `cursor`: `(entity, world point, distance)`.
