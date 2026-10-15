@@ -78,6 +78,16 @@ pub type PickParts<'w, 's> = Query<
     ),
 >;
 
+/// Vanillish: whether the logical `cursor` (the target's, from its top left) is over what `camera`
+/// draws. `viewport_to_world` takes any point, and one past the viewport casts a ray below or
+/// beside the drawn frustum: on a foldable's tabletop the world is drawn above the hinge, and the
+/// controls' deck below it must neither hover nor click what is not on the screen.
+pub fn cursor_over_view(camera: &Camera, cursor: Vec2) -> bool {
+    camera
+        .logical_viewport_rect()
+        .is_some_and(|r| r.contains(cursor))
+}
+
 /// The nearest hit among `pickable` under the logical `cursor`: `(entity, world point, distance)`.
 /// Only `pickable` can be hit, so a caller that passes only unit meshes clicks through a doodad.
 pub fn pick_at_cursor(
@@ -87,6 +97,9 @@ pub fn pick_at_cursor(
     pickable: &HashSet<Entity>,
     parts: &PickParts,
 ) -> Option<(Entity, Vec3, f32)> {
+    if !cursor_over_view(camera, cursor) {
+        return None; // Vanillish: off the drawn world.
+    }
     let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
     cast_pick_ray(ray, pickable, parts, false)
         .into_iter()
@@ -146,6 +159,9 @@ pub fn pick_object_at_cursor(
     objects: &Query<&WorldObject>,
     sources: &[&dyn PickSource],
 ) -> Option<ObjectHit> {
+    if !cursor_over_view(camera, cursor) {
+        return None; // Vanillish: off the drawn world.
+    }
     let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
     cast_object_ray(ray, pickable, parts, objects, sources, false)
         .into_iter()

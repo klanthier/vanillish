@@ -17,6 +17,8 @@ pub use pick::{
     cast_object_ray, cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor, pick_object_at_cursor,
     ObjectHit, PickBlob, PickBox, PickMember, PickMesh, PickParts, PickSource,
 };
+// Vanillish: the off-the-drawn-world check the picks apply, for the other cursor rays.
+pub use pick::cursor_over_view;
 
 pub use pick::{ray_member, ray_mesh_bounds, ray_posed_mesh, RayHit};
 

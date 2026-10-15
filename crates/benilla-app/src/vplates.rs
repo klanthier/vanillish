@@ -386,6 +386,9 @@ fn drive_vplates(
     let scale = window.map_or(1.0, |w| w.scale_factor());
     // Everything below is in window px, divided by this once for the widget layer's root units.
     let seam = window.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
+    // Vanillish: WorldFrame's bottom is the window's, and on a tabletop the world viewport ends at
+    // the hinge above it.
+    let floor = crate::world_backdrop::world_frame_floor(window, viewport);
     let mut states: Vec<PlateState> = Vec::new();
 
     // Plates seat in squared-distance order from the gx point (0.4, 0.3), Y mirrored from the
@@ -553,7 +556,7 @@ fn drive_vplates(
         // own. The raid-target index is 1-based here, 0-based for the atlas cell.
         let mark = group.raid_target_index(guid.0);
         let x_units = (plate.min.x + plate.max.x) * 0.5 / seam;
-        let y_units = (viewport.y - plate.min.y) / seam;
+        let y_units = (floor - plate.min.y) / seam;
         for click in &clicked {
             if click.key == guid.0 {
                 match click.button.as_str() {

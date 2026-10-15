@@ -277,11 +277,15 @@ fn hud_tooltip(
         } else {
             ("BOTTOMLEFT", r.max[0])
         };
+        // Vanillish: the offsets are in the tooltip's units, `UIParent`'s, as are its edges;
+        // `GetWidth`/`GetHeight` answer the root units its rect spans, short by `uiScale` (0.64
+        // on a tabletop).
         let chunk = format!(
-            "if not HasAction({action}) then return 0 end \
+            "if not HasAction({action}) or not UIParent:GetTop() then return 0 end \
              GameTooltip:SetOwner(UIParent, \"ANCHOR_NONE\") GameTooltip:ClearAllPoints() \
              GameTooltip:SetPoint(\"{point}\", UIParent, \"BOTTOMLEFT\", \
-               UIParent:GetWidth() * {fx}, UIParent:GetHeight() * {fy}) \
+               (UIParent:GetRight() - UIParent:GetLeft()) * {fx}, \
+               (UIParent:GetTop() - UIParent:GetBottom()) * {fy}) \
              GameTooltip:SetAction({action}) GameTooltip:Show() return 1",
             fx = ((x - world.min[0]) / w).clamp(0.0, 1.0),
             fy = ((world.max[1] - r.min[1]) / h).clamp(0.0, 1.0),

@@ -50,6 +50,11 @@ pub(crate) struct HudScreen {
     /// (`Screen::world` above it, `Screen::deck` below). Written only when it moves, so a reader
     /// can ask `is_changed`.
     pub(crate) screen: Screen,
+    /// The screen the layout in use is placed on, wherever the player is: on a tabletop the deck
+    /// even at the glue screens, so the layout editor puts the tabletop's elements where the
+    /// world will. `screen` itself stays whole outside the world, as the world's viewport and the
+    /// stock interface's inset follow it.
+    pub(crate) layout_screen: Screen,
     /// The class whose layout is `Inilla::layout`.
     pub(crate) class: ScreenClass,
     /// The class the screen is settling into.
@@ -60,6 +65,7 @@ impl Default for HudScreen {
     fn default() -> Self {
         Self {
             screen: Screen::new(0.0, 0.0),
+            layout_screen: Screen::new(0.0, 0.0),
             class: ScreenClass::Phone,
             tracker: ClassTracker::default(),
         }
@@ -158,17 +164,16 @@ fn track_screen(
         inilla.layout.enabled = enabled;
     }
 
-    // Split in the world only (the glue screens are the whole window), and only while the hinge
-    // still says tabletop — not for the moment an unfold takes to settle.
-    let base = safe.screen(size[0], size[1]);
-    let split = *client.get() == ClientState::InWorld
-        && hud.class == ScreenClass::Tabletop
-        && seen == ScreenClass::Tabletop;
-    let screen = if split {
-        fold::screen_for(base, ScreenClass::Tabletop, hinge_fold.as_ref())
-    } else {
-        base
-    };
+    let (layout_screen, screen) = split_screens(
+        safe.screen(size[0], size[1]),
+        hud.class,
+        seen,
+        *client.get() == ClientState::InWorld,
+        hinge_fold.as_ref(),
+    );
+    if hud.layout_screen != layout_screen {
+        hud.layout_screen = layout_screen;
+    }
     if hud.screen != screen {
         hud.screen = screen;
     }
@@ -181,6 +186,25 @@ fn track_screen(
             viewport.0 = want;
         }
     }
+}
+
+/// The layout's screen and the HUD's, from the window's (`base`): split at the hinge while the
+/// class in use and the hinge both say tabletop — not for the moment an unfold takes to settle.
+/// The HUD's only in the world (the glue screens are the whole window); the layout's wherever the
+/// player is, so the editor at the glue places the tabletop's elements on the deck the world uses.
+fn split_screens(
+    base: Screen,
+    class: ScreenClass,
+    seen: ScreenClass,
+    in_world: bool,
+    hinge: Option<&Fold>,
+) -> (Screen, Screen) {
+    let layout = if class == ScreenClass::Tabletop && seen == ScreenClass::Tabletop {
+        fold::screen_for(base, ScreenClass::Tabletop, hinge)
+    } else {
+        base
+    };
+    (layout, if in_world { layout } else { base })
 }
 
 /// The world's rect in the window's physical pixels: the full width, from the top down to
@@ -357,5 +381,36 @@ mod tests {
         assert_eq!(r.max, UVec2::new(2504, 1128));
         assert_eq!(world_viewport(&w, 5000.0).max.y, 2256);
         assert_eq!(world_viewport(&w, -3.0).max.y, 1, "never empty");
+    }
+
+    /// On a tabletop the layout is placed on the deck wherever the player is — the editor at the
+    /// character screen too — while the HUD's screen is split in the world only.
+    #[test]
+    fn the_layouts_screen_is_the_deck_even_at_the_glue() {
+        use inilla_core::fold::FoldState;
+        use inilla_core::touch::Rect;
+        let base = Screen::new(954.0, 859.0);
+        let hinge = Fold {
+            state: FoldState::HalfOpened,
+            horizontal: true,
+            bounds: Rect::new([0.0, 430.0], [954.0, 430.0]),
+        };
+        let tabletop = ScreenClass::Tabletop;
+        let (layout, hud) = split_screens(base, tabletop, tabletop, false, Some(&hinge));
+        assert!(layout.deck.is_some() && layout.world.is_some());
+        assert_eq!(hud, base, "the glue screens are the whole window");
+        let (in_world, hud) = split_screens(base, tabletop, tabletop, true, Some(&hinge));
+        assert_eq!(hud, layout);
+        assert_eq!(in_world, layout, "the editor's screen is the world's");
+        // Unfolding (the hinge says otherwise before the class settles), or another class.
+        let tablet = ScreenClass::Tablet;
+        assert_eq!(
+            split_screens(base, tabletop, tablet, true, None),
+            (base, base)
+        );
+        assert_eq!(
+            split_screens(base, tablet, tablet, false, None),
+            (base, base)
+        );
     }
 }

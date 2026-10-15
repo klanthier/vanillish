@@ -523,6 +523,9 @@ fn drive_bubbles(
     };
     // Everything below is in window px, divided by the seam once for the `WorldFrame`'s units.
     let seam = window.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
+    // Vanillish: WorldFrame's bottom is the window's, and on a tabletop the world viewport ends at
+    // the hinge above it.
+    let floor = crate::world_backdrop::world_frame_floor(window, viewport);
     let scale = window.map_or(1.0, Window::scale_factor);
     let basis = plate_basis(viewport);
     feed.geometry = Some(BubbleGeometry {
@@ -556,14 +559,16 @@ fn drive_bubbles(
                 shown: b.fade.shown,
                 alpha: f32::from(b.fade.alpha) / 255.0,
                 seat: match seat {
-                    Some((_, p)) => (p.x / seam, (viewport.y - p.y) / seam),
+                    Some((_, p)) => (p.x / seam, (floor - p.y) / seam),
                     // Short of the near plane (behind the camera) the projection writes no point
                     // (`0x483f7a`) and the placement ignores its verdict, seating the zeroed one
                     // (`0x4b14e4`): the text's BOTTOM on the screen's bottom-left corner. Bevy's
                     // reverse-Z projection reports such a point as past either plane. Such a
                     // speaker is not drawn, so the bubble is shown here only while its fade out
                     // runs, at most 250 ms from the alpha it had, which a fresh line has at 255.
-                    None => (0.0, 0.0),
+                    // Vanillish: the world's bottom-left corner, the hinge's left end on a
+                    // tabletop (`0.0` otherwise).
+                    None => (0.0, (floor - viewport.y) / seam),
                 },
             })
         })

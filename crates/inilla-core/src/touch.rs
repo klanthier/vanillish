@@ -1535,6 +1535,18 @@ impl TouchEngine {
             }
             return;
         }
+        // Vanillish: over the deck below the hinge there is no world to point at (the stock
+        // `WorldFrame` still spans it, and a ray from there picks what is not drawn): the cursor
+        // goes away there too.
+        if screen.world.is_some_and(|w| !w.contains(p)) {
+            self.hover = None;
+            if self.hover_cursor {
+                self.hover_cursor = false;
+                self.cursor_shown = false;
+                self.out.mouse.push(MouseOp::Leave);
+            }
+            return;
+        }
         self.hover = None;
         self.hover_cursor = true;
         self.cursor_shown = true;
@@ -1710,8 +1722,8 @@ fn radial_for(screen: &Screen) -> TouchRadial {
 
 /// Vanillish: where a look from outside the world puts the cursor before its button goes down: a
 /// point of the world no window covers (a right-button down on a window would click it), the
-/// middle first.
-fn park(world: Rect, ui_hit: &dyn Fn(Vec2) -> bool) -> Vec2 {
+/// middle first. The controller's look starts there too on a tabletop (`inilla::pad`).
+pub fn park(world: Rect, ui_hit: &dyn Fn(Vec2) -> bool) -> Vec2 {
     let at = |fx: f32, fy: f32| {
         [
             world.min[0] + fx * (world.max[0] - world.min[0]),

@@ -267,7 +267,8 @@ fn draw_panels(
         });
     let in_world = *client.get() == ClientState::InWorld;
     match panel {
-        Panel::Editor => editor::show(&ctx, &mut overlay, &mut inilla, &hud.screen),
+        // Vanillish: where the layout will be placed (on a tabletop the deck, even at the glue).
+        Panel::Editor => editor::show(&ctx, &mut overlay, &mut inilla, &hud.layout_screen),
         _ => {
             egui::CentralPanel::default().frame(frame).show(&ctx, |ui| {
                 header(ui, &mut overlay, panel, in_world, data.ready_at_boot);
