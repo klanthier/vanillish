@@ -67,6 +67,9 @@ jobs:
       - name: What decides a publish (image-state.sh, pins.sh)
         run: server/ci/test_ci_tools.sh
 
+      - name: The Mac setup's logic (setup-mac.sh, sourced)
+        run: bash server/ci/setup-test.sh
+
   stack:
     if: >-
       github.event_name != 'push' ||

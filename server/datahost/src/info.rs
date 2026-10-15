@@ -164,7 +164,7 @@ pub fn server_json(
             .as_deref()
             .map(|name| RealmEntry {
                 name,
-                kind: realm.realm_type.as_deref(),
+                kind: realm.realm_type.as_deref().and_then(realm_kind),
                 world: World {
                     address: realm.world_address.as_deref(),
                     port: realm.world_port.unwrap_or(8085),
@@ -183,6 +183,19 @@ pub fn server_json(
         message: realm.message.as_deref(),
     };
     serde_json::to_string(&doc).unwrap_or_default()
+}
+
+/// The realm's kind as the contract spells it (`pve`, `pvp`, `rp`, `rppvp`), from whatever
+/// `REALM_TYPE` the operator wrote: db-init accepts any case and the `normal` / `rp-pvp` aliases.
+/// Anything else is left out rather than passed on.
+pub fn realm_kind(t: &str) -> Option<&'static str> {
+    match t.trim().to_ascii_lowercase().as_str() {
+        "pve" | "normal" => Some("pve"),
+        "pvp" => Some("pvp"),
+        "rp" => Some("rp"),
+        "rppvp" | "rp-pvp" | "rp_pvp" => Some("rppvp"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +306,14 @@ mod tests {
             serde_json::to_string(&Locales::of(&two).unwrap()).unwrap(),
             r#"{"format":1,"default":"enUS","locales":[{"locale":"enUS","path":"enUS/","bytes":5400000000,"addons":1},{"locale":"deDE","path":"deDE/","bytes":1,"addons":0}]}"#
         );
+    }
+
+    #[test]
+    fn the_realm_kind_is_the_contracts_spelling() {
+        assert_eq!(super::realm_kind("PvP"), Some("pvp"));
+        assert_eq!(super::realm_kind("normal"), Some("pve"));
+        assert_eq!(super::realm_kind("RP-PvP"), Some("rppvp"));
+        assert_eq!(super::realm_kind("rp"), Some("rp"));
+        assert_eq!(super::realm_kind("ffa"), None);
     }
 }
