@@ -58,6 +58,17 @@ lists what the first device runs must confirm.
    [**iNilla server**](https://github.com/Martze96/iNilla-server). See
    [docs/ANDROID-DATA.md](docs/ANDROID-DATA.md).
 
+**Your own server, in one command.** [`server/`](server/README.md) is a 1.12.1 realm that also
+hands the phone your game files and makes its accounts. On a Mac with Apple silicon, with Docker
+Desktop or OrbStack installed, run this in Terminal, then type the address it prints into
+Vanillish; nothing is compiled, and the game files go from your Mac to the phone over Wi-Fi:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/klanthier/vanillish/klanthier/inilla-android-port/server/setup-mac.sh)"
+```
+
+Linux and Windows (WSL) have the same in `setup-linux.sh`: [server/README.md](server/README.md).
+
 The whole APK builds on Linux or macOS, and on CI on a single Linux runner — see
 [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md).
 
@@ -65,6 +76,7 @@ The whole APK builds on Linux or macOS, and on CI on a single Linux runner — s
 |---|---|
 | [docs/ANDROID.md](docs/ANDROID.md) | what Vanillish adds on Android: the Fold8 Ultra's screens and tabletop, input, the frame rate, the settings that differ, where the files are, known limits |
 | [docs/ANDROID-DATA.md](docs/ANDROID-DATA.md) | getting the game data onto the phone |
+| [server/README.md](server/README.md) | your own server: one command on a Mac, Linux or Windows |
 | [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md) | building, signing and installing the APK, CI, debugging on Android |
 | [docs/INILLA.md](docs/INILLA.md) | the touch controls, the controller, the launcher and the settings, which Vanillish shares |
 | [docs/DEBUGGING.md](docs/DEBUGGING.md) | the remote console, logs, the desktop rehearsal |

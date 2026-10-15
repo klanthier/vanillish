@@ -1,8 +1,9 @@
 # Addons for the app
 
-The data host hands these to the iNilla app together with the game data. The app installs them
-into its `AddOns` folder and updates them when they change here, like the game archives
-(resumable, SHA-256 verified).
+The data host hands these to the app (Vanillish, or iNilla on iOS) together with the game data.
+The app installs them into its `AddOns` folder and updates them when they change here, like the
+game archives (resumable, SHA-256 verified). What you add here survives the setup script's
+updates: it only ever refreshes this README.
 
 | folder | goes to |
 |---|---|
