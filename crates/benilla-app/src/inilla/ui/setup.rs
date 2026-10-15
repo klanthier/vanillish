@@ -298,7 +298,7 @@ pub(super) fn show(
 }
 
 /// Vanillish: **Import from folder…** — the picker, a copy left unfinished (Pause, a crash, the
-/// app killed in the background: its grant and its `.part` files survive), and the free space the
+/// app killed in the background: its grant and its `.copy` files survive), and the free space the
 /// copy will need.
 fn folder_import(ui: &mut egui::Ui, data: &mut DataState) {
     // The picker covers this screen while it is up, so the buttons stay live: a picker whose

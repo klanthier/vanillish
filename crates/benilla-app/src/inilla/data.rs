@@ -302,7 +302,20 @@ impl DataState {
                     truncated: listing.truncated,
                 });
             };
-            let need = ki::bytes_to_copy(&c.files, &dir);
+            // Not a folder something still writes into (a copy, a torrent client filling in a
+            // file it sized first): the header check cannot tell such a file from a whole one.
+            // The grant stays, so Resume tries again.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            if !ki::listing_settled(&c.files, now_ms, SETTLE) {
+                return Err(format!(
+                    "{label} changed in the last few seconds — a copy or download may still be \
+                     running. Let it finish, then try again."
+                ));
+            }
+            let open = PickedOpen { tree: tree.clone() };
+            let need = ki::bytes_to_copy(&c.files, &dir, &ki::Open::origin(&open));
             if let Some(free) = free_space(&dir) {
                 if free < need + SPARE {
                     return Err(format!(
@@ -318,7 +331,6 @@ impl DataState {
                     *g = p.clone();
                 }
             };
-            let open = PickedOpen { tree: tree.clone() };
             let done = ki::copy_in(&open, &c.files, &dir, report, &keep)?;
             picker::forget(&tree);
             Ok(Outcome::Copied {
@@ -354,6 +366,10 @@ impl ki::Open for PickedOpen {
     fn open(&self, id: &str, offset: u64) -> Result<(Box<dyn Read + Send>, u64), String> {
         let file = picker::open(&self.tree, id)?;
         Ok(ki::from_offset(file, offset))
+    }
+
+    fn origin(&self) -> String {
+        self.tree.clone()
     }
 }
 

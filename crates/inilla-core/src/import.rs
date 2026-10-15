@@ -11,10 +11,14 @@
 //! - [`candidates`] groups a listing into the folders that hold archives (the rule
 //!   [`crate::data::find_imports`] applies to a path), complete ones first;
 //! - [`copy_in`] copies one candidate's archives into the data folder: an archive already there at
-//!   its size is kept, a `.<name>.part` from an earlier attempt resumes, the copy goes in 4 MiB
-//!   chunks with Pause checked between them, and every file's size and MPQ header are checked
-//!   before it takes its final name — so an interrupted copy (Pause, a crash, the process killed in
-//!   the background) never leaves a half archive benilla would open;
+//!   its size is kept, a `.<name>.copy` from an earlier attempt resumes (only from the same source
+//!   file, and only what was synced to disk), the copy goes in 4 MiB chunks with Pause checked
+//!   between them, and every file's size and MPQ header are checked before it takes its final
+//!   name — so an interrupted copy (Pause, a crash, the process killed in the background, a power
+//!   cut) never leaves a half archive benilla would open;
+//! - [`listing_settled`] refuses a folder something is still writing into (a copy, a torrent
+//!   client that sized its files first): the header check alone cannot tell such a file from a
+//!   whole one;
 //! - [`mpq_looks_whole`], [`settled`] and [`rename_works`] are the guards the boot-time import of a
 //!   folder copied in over USB applies before it moves anything ([`launch_guard`], from
 //!   `boot::import_from_documents`):
@@ -46,6 +50,15 @@ pub const SKIP_DIRS: &[&str] = &["interface", "wtf", "cache", "screenshots", "lo
 
 /// The copy's unit: Pause is honoured and progress reported between chunks.
 pub const CHUNK: u64 = 4 << 20;
+
+/// How often, in chunks, a copy's bytes are forced to disk (64 MiB at [`CHUNK`]). A resume
+/// trusts only what was synced: after a power cut, f2fs (a Galaxy's `/data`) may keep a file's
+/// length but not its last blocks, which then read as zeros ([`resume_at`]).
+const SYNC_CHUNKS: u64 = 16;
+
+/// How much of a `.copy`'s start is compared with its source before a resume: the MPQ header
+/// and then some.
+const HEAD_CHECK: u64 = 64 << 10;
 
 /// The read buffer inside a chunk.
 const BUF: usize = 1 << 20;
@@ -176,6 +189,11 @@ pub trait Open {
     /// the source cannot seek (a provider that answers with a pipe) — the copy then restarts that
     /// file.
     fn open(&self, id: &str, offset: u64) -> Result<(Box<dyn Read + Send>, u64), String>;
+
+    /// The folder the ids belong to (the picked tree; on the desktop, the root path): with the id,
+    /// size and time it names the source a `.copy` holds, so a resume never continues another
+    /// folder's file of the same name.
+    fn origin(&self) -> String;
 }
 
 /// A file positioned at `offset` for [`Open::open`]: seeked there, or left at `0` when it cannot
@@ -206,6 +224,10 @@ impl Open for FolderOpen {
         let file = fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(from_offset(file, offset))
     }
+
+    fn origin(&self) -> String {
+        self.root.display().to_string()
+    }
 }
 
 /// What a finished [`copy_in`] did.
@@ -234,29 +256,80 @@ fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     })
 }
 
-/// What [`copy_in`] will do with each of `files` in `dir`: [`Step::Keep`] an archive already there
-/// at its listed size, otherwise copy from where a `.part` left off.
-pub fn plan(files: &[Listed], dir: &Path) -> Vec<Step> {
+/// Where [`copy_in`] builds `name` before it takes its final name: `.<name>.copy`. A name of its
+/// own, not the download's `.part` ([`crate::data::part_path`]): neither may resume the other's
+/// bytes, which come from another source. Neither is ever mounted (a leading `.`).
+pub fn copy_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!(".{name}.copy"))
+}
+
+/// Beside a `.copy`, the source its bytes came from ([`source_record`]).
+fn source_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!(".{name}.copy.src"))
+}
+
+/// The source a `.copy` of `f` holds: the picked folder, the document, its listed size and time.
+/// A resume continues only the very same file: another folder's archive of the same name (another
+/// language, another patch level) appended to this one's start would pass the size and header
+/// checks, with tables that do not match its contents.
+fn source_record(origin: &str, f: &Listed) -> String {
+    format!("{origin}\n{}\n{}\n{}\n", f.id, f.size, f.modified_ms)
+}
+
+/// Where a `.copy` of `len` bytes resumes: the last sync boundary ([`SYNC_CHUNKS`]) strictly below
+/// its length — what lies past it may never have reached the disk, and at `len` itself the sync
+/// may not have run.
+fn resume_at(len: u64, chunk: u64) -> u64 {
+    let every = SYNC_CHUNKS * chunk;
+    len.saturating_sub(1) / every * every
+}
+
+/// The archive in place (`m`) is older than its source's last change: the source changed after it
+/// was copied (a torrent still filling it in back then), so it is copied again, not kept.
+fn older_than_source(m: &fs::Metadata, f: &Listed) -> bool {
+    f.modified_ms > 0
+        && m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .is_some_and(|d| (d.as_millis() as i64) < f.modified_ms)
+}
+
+/// What [`copy_in`] will do with each of `files` in `dir`, read from `origin` ([`Open::origin`]):
+/// [`Step::Keep`] an archive already there at its listed size and no older than its source,
+/// otherwise copy from where a `.copy` of the same source left off ([`resume_at`]).
+pub fn plan(files: &[Listed], dir: &Path, origin: &str) -> Vec<Step> {
+    plan_chunked(files, dir, origin, CHUNK)
+}
+
+fn plan_chunked(files: &[Listed], dir: &Path, origin: &str, chunk: u64) -> Vec<Step> {
     files
         .iter()
         .map(|f| {
             let done = find_ci(dir, f.name()).and_then(|p| fs::metadata(p).ok());
             match done {
-                Some(m) if m.is_file() && m.len() == f.size => Step::Keep,
-                _ => match fs::metadata(data::part_path(dir, f.name())) {
-                    Ok(m) if m.len() <= f.size => Step::Fetch { offset: m.len() },
-                    _ => Step::Fetch { offset: 0 },
-                },
+                Some(m) if m.is_file() && m.len() == f.size && !older_than_source(&m, f) => {
+                    Step::Keep
+                }
+                _ => {
+                    let same = fs::read_to_string(source_path(dir, f.name()))
+                        .is_ok_and(|r| r == source_record(origin, f));
+                    match fs::metadata(copy_path(dir, f.name())) {
+                        Ok(m) if same && m.len() <= f.size => Step::Fetch {
+                            offset: resume_at(m.len(), chunk),
+                        },
+                        _ => Step::Fetch { offset: 0 },
+                    }
+                }
             }
         })
         .collect()
 }
 
-/// The bytes still to copy for `files` into `dir` — what the free-space check needs.
-pub fn bytes_to_copy(files: &[Listed], dir: &Path) -> u64 {
+/// The bytes still to copy for `files` into `dir` from `origin` — what the free-space check needs.
+pub fn bytes_to_copy(files: &[Listed], dir: &Path, origin: &str) -> u64 {
     files
         .iter()
-        .zip(plan(files, dir))
+        .zip(plan(files, dir, origin))
         .map(|(f, s)| match s {
             Step::Keep => 0,
             Step::Fetch { offset } => f.size - offset,
@@ -266,10 +339,13 @@ pub fn bytes_to_copy(files: &[Listed], dir: &Path) -> u64 {
 
 /// Copy `files` (one candidate's archives) into `dir`:
 ///
-/// - an archive already there at its listed size is kept;
-/// - a `.<name>.part` ([`crate::data::part_path`]) from an earlier attempt resumes;
+/// - an archive already there at its listed size, and no older than its source, is kept;
+/// - a `.<name>.copy` ([`copy_path`]) from an earlier attempt resumes when the record beside it
+///   names the same source ([`source_record`]) and its first bytes are the source's, from its last
+///   sync boundary ([`resume_at`]);
 /// - the copy goes in [`CHUNK`]s, `keep_going()` checked between them — a stop answers
-///   `Err("paused")` and leaves the `.part` for the next attempt;
+///   `Err("paused")` and leaves the `.copy` for the next attempt — and is synced to disk every
+///   [`SYNC_CHUNKS`] chunks;
 /// - the size and the MPQ header ([`mpq_looks_whole`]) are checked before the rename to the final
 ///   name; a file that fails is discarded.
 ///
@@ -301,7 +377,9 @@ fn copy_in_chunked(
         ));
     }
     fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let steps = plan(files, dir);
+    let origin = open.origin();
+    let steps = plan_chunked(files, dir, &origin, chunk);
+    let every = SYNC_CHUNKS * chunk;
     let mut p = Progress {
         file_count: files.len(),
         bytes_total: files.iter().map(|f| f.size).sum(),
@@ -318,16 +396,23 @@ fn copy_in_chunked(
     let mut out = Copied::default();
     let mut buf = vec![0u8; BUF];
     for (i, (file, step)) in files.iter().zip(&steps).enumerate() {
-        let Step::Fetch { offset } = *step else {
+        let Step::Fetch { mut offset } = *step else {
             out.kept += 1;
             continue;
         };
         let name = file.name();
-        let part = data::part_path(dir, name);
+        let part = copy_path(dir, name);
+        let source = source_path(dir, name);
         p.file = name.to_string();
         p.file_index = i;
         p.state = if offset > 0 { "resuming" } else { "copying" }.into();
         report(&p);
+        if offset > 0 && !same_head(open, file, &part, offset)? {
+            // The record matched, the bytes do not (the file replaced in place at the same size
+            // and time): this one starts over.
+            p.bytes_done -= offset;
+            offset = 0;
+        }
         if offset < file.size {
             let (mut src, at) = open.open(&file.id, offset)?;
             let mut written = match at {
@@ -344,9 +429,9 @@ fn copy_in_chunked(
                 }
             };
             let mut dst = if written > 0 {
-                fs::OpenOptions::new().append(true).open(&part)
+                resume_copy(&part, written)
             } else {
-                fs::File::create(&part)
+                start_copy(&part, &source, &origin, file)
             }
             .map_err(|e| format!("{}: {e}", part.display()))?;
             while written < file.size {
@@ -374,6 +459,11 @@ fn copy_in_chunked(
                     written += n as u64;
                     p.bytes_done += n as u64;
                 }
+                // A boundary a resume may start from: on disk before any byte past it is written.
+                if written % every == 0 {
+                    dst.sync_data()
+                        .map_err(|e| format!("writing {}: {e}", part.display()))?;
+                }
                 report(&p);
             }
             dst.sync_all()
@@ -384,6 +474,7 @@ fn copy_in_chunked(
         let len = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         if len != file.size || !mpq_looks_whole(&part) {
             let _ = fs::remove_file(&part);
+            let _ = fs::remove_file(&source);
             return Err(format!(
                 "{} is not a whole archive (cut short?) and was discarded — copy the folder \
                  again from the original client.",
@@ -397,6 +488,10 @@ fn copy_in_chunked(
             }
         }
         fs::rename(&part, dir.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        let _ = fs::remove_file(&source);
+        // A download's leftover for this archive (or an older build's import part) would only
+        // hold the space now: the archive is in place.
+        let _ = fs::remove_file(data::part_path(dir, name));
         out.copied += 1;
         out.bytes += file.size;
     }
@@ -404,6 +499,47 @@ fn copy_in_chunked(
     p.file.clear();
     report(&p);
     Ok(out)
+}
+
+/// A fresh `.copy` of `file`: emptied and on disk before the record beside it names its source,
+/// so a crash between the two never pairs an old source's bytes with a new record.
+fn start_copy(part: &Path, source: &Path, origin: &str, file: &Listed) -> io::Result<fs::File> {
+    let dst = fs::File::create(part)?;
+    dst.sync_all()?;
+    let mut rec = fs::File::create(source)?;
+    rec.write_all(source_record(origin, file).as_bytes())?;
+    rec.sync_all()?;
+    Ok(dst)
+}
+
+/// A `.copy` cut back to `at`, where the resume continues: past it the bytes may never have
+/// reached the disk.
+fn resume_copy(part: &Path, at: u64) -> io::Result<fs::File> {
+    let mut dst = fs::OpenOptions::new().write(true).open(part)?;
+    dst.set_len(at)?;
+    dst.seek(SeekFrom::End(0))?;
+    Ok(dst)
+}
+
+/// Whether the first bytes of `part` (up to [`HEAD_CHECK`], no further than `offset`) are its
+/// source's. The record names the file; this checks its bytes, MPQ header included (a file
+/// replaced in place at the same size and time, a record that outlived its `.copy`).
+fn same_head(open: &dyn Open, file: &Listed, part: &Path, offset: u64) -> Result<bool, String> {
+    let n = usize::try_from(offset.min(HEAD_CHECK)).unwrap_or(0);
+    let mut ours = vec![0u8; n];
+    if fs::File::open(part)
+        .and_then(|mut f| f.read_exact(&mut ours))
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let (mut src, _) = open.open(&file.id, 0)?;
+    let mut theirs = vec![0u8; n];
+    match src.read_exact(&mut theirs) {
+        Ok(()) => Ok(ours == theirs),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(format!("reading {}: {e}", file.path)),
+    }
 }
 
 /// `read`, retried when a signal interrupts it.
@@ -482,6 +618,21 @@ pub fn settled(status: &DataStatus, quiet: Duration) -> bool {
             .present
             .iter()
             .all(|(name, _)| quiet_since(&status.dir.join(name)))
+}
+
+/// No file of a picked folder's listing changed within `quiet` of `now_ms` (milliseconds since the
+/// epoch): nothing is still writing into it. A torrent client sizes its files first and fills them
+/// in any order, so a file still being fetched has its full size and both its header and its
+/// tables while its middle is zeros — which the size and header checks of [`copy_in`] would take
+/// for whole. A provider that gives no time (`0`) counts as settled, and a time in the future
+/// counts as recent only within `quiet` (a FAT drive's clock may be hours off; that must not block
+/// the import for ever).
+pub fn listing_settled(files: &[Listed], now_ms: i64, quiet: Duration) -> bool {
+    let quiet = i64::try_from(quiet.as_millis()).unwrap_or(i64::MAX);
+    files.iter().all(|f| {
+        let t = f.modified_ms;
+        t <= 0 || t <= now_ms.saturating_sub(quiet) || t > now_ms.saturating_add(quiet)
+    })
 }
 
 /// Whether a file moves from the folder `from` into the folder `to` by a rename — the same mount,
@@ -763,7 +914,8 @@ mod tests {
                 fs::read(dst.join(n)).unwrap(),
                 fs::read(src.join("World of Warcraft/Data").join(n)).unwrap()
             );
-            assert!(!data::part_path(&dst, n).exists());
+            assert!(!copy_path(&dst, n).exists());
+            assert!(!source_path(&dst, n).exists());
         }
         assert_eq!(states.last().map(String::as_str), Some("done"));
         assert!(states.iter().any(|s| s == "checking"));
@@ -772,7 +924,18 @@ mod tests {
         // A second run keeps everything.
         let again = copy_in(&open, &found[0].files, &dst, |_| {}, &|| true).unwrap();
         assert_eq!((again.copied, again.kept), (0, REQUIRED.len()));
-        assert_eq!(bytes_to_copy(&found[0].files, &dst), 0);
+        assert_eq!(bytes_to_copy(&found[0].files, &dst, &open.origin()), 0);
+    }
+
+    /// Stop `copy_in_chunked` (chunks of `chunk`) after `chunks` of them.
+    fn copy_until(open: &dyn Open, files: &[Listed], dst: &Path, chunk: u64, chunks: u32) {
+        let calls = Cell::new(0);
+        let keep = || {
+            calls.set(calls.get() + 1);
+            calls.get() <= chunks
+        };
+        let err = copy_in_chunked(open, files, dst, |_| {}, &keep, chunk).unwrap_err();
+        assert_eq!(err, "paused");
     }
 
     #[test]
@@ -782,21 +945,21 @@ mod tests {
         let files = candidates(&listing.files).remove(0).files;
         let dst = tmp("pause-dst");
         let open = FolderOpen { root: src.clone() };
-        // Stop after the third chunk: the first archive is part-way.
-        let calls = Cell::new(0);
-        let keep = || {
-            calls.set(calls.get() + 1);
-            calls.get() <= 3
-        };
-        let err = copy_in_chunked(&open, &files, &dst, |_| {}, &keep, 1024).unwrap_err();
-        assert_eq!(err, "paused");
+        // Stop after the 20th chunk of 64: the first archive is part-way, past one sync boundary
+        // (16 chunks, 1024 bytes).
+        copy_until(&open, &files, &dst, 64, 20);
         let first = files[0].name();
-        let part = data::part_path(&dst, first);
-        assert_eq!(fs::metadata(&part).unwrap().len(), 3 * 1024);
+        let part = copy_path(&dst, first);
+        assert_eq!(fs::metadata(&part).unwrap().len(), 20 * 64);
         assert!(!dst.join(first).exists());
-        assert_eq!(plan(&files, &dst)[0], Step::Fetch { offset: 3 * 1024 });
-        let total: u64 = files.iter().map(|f| f.size).sum();
-        assert_eq!(bytes_to_copy(&files, &dst), total - 3 * 1024);
+        // It resumes from the last boundary below its length: what lies past it may not have
+        // reached the disk.
+        let origin = open.origin();
+        assert_eq!(
+            plan_chunked(&files, &dst, &origin, 64)[0],
+            Step::Fetch { offset: 1024 }
+        );
+        assert_eq!(plan(&files, &dst, &origin)[0], Step::Fetch { offset: 0 });
         // Resumed: the first progress report already counts the part.
         let mut first_report = None;
         copy_in_chunked(
@@ -807,15 +970,135 @@ mod tests {
                 first_report.get_or_insert((p.state.clone(), p.bytes_done));
             },
             &|| true,
-            1024,
+            64,
         )
         .unwrap();
-        assert_eq!(first_report, Some(("resuming".to_string(), 3 * 1024)));
+        assert_eq!(first_report, Some(("resuming".to_string(), 1024)));
         assert!(data::status(&dst).complete());
         assert_eq!(
             fs::read(dst.join(first)).unwrap(),
             fs::read(src.join("Data").join(first)).unwrap()
         );
+        assert!(!source_path(&dst, first).exists());
+    }
+
+    /// A power cut kept the `.copy`'s length but not its last blocks (zeros on f2fs): the resume
+    /// starts from the last synced boundary and cuts the rest off.
+    #[test]
+    fn a_resume_trusts_only_what_was_synced() {
+        let src = tmp("synced-src");
+        let listing = client(&src, "Data", 5000);
+        let files = candidates(&listing.files).remove(0).files;
+        let dst = tmp("synced-dst");
+        let open = FolderOpen { root: src.clone() };
+        copy_until(&open, &files, &dst, 64, 40);
+        let first = files[0].name();
+        let part = copy_path(&dst, first);
+        let mut bytes = fs::read(&part).unwrap();
+        // Synced at 1024 and 2048; the blocks after the last boundary were lost.
+        assert_eq!(bytes.len(), 40 * 64);
+        bytes[2048..].fill(0);
+        fs::write(&part, &bytes).unwrap();
+        copy_in_chunked(&open, &files, &dst, |_| {}, &|| true, 64).unwrap();
+        assert_eq!(
+            fs::read(dst.join(first)).unwrap(),
+            fs::read(src.join("Data").join(first)).unwrap()
+        );
+    }
+
+    /// A copy cut off from one folder is not finished from another folder's file of the same
+    /// name: the archive would be one's start and the other's end, with the first's tables.
+    #[test]
+    fn a_part_from_another_folder_is_not_resumed() {
+        let a = tmp("other-a");
+        let files_a = candidates(&client(&a, "Data", 5000).files).remove(0).files;
+        let dst = tmp("other-dst");
+        copy_until(&FolderOpen { root: a.clone() }, &files_a, &dst, 64, 20);
+        let first = files_a[0].name().to_string();
+        assert!(copy_path(&dst, &first).exists());
+        // Folder B: the same names, the first one another (longer) archive.
+        let b = tmp("other-b");
+        client(&b, "Data", 5000);
+        fs::write(b.join("Data").join(&first), fake_mpq(7000, 0x5A)).unwrap();
+        let files_b = candidates(&list_folder(&b, MAX_DEPTH).files)
+            .remove(0)
+            .files;
+        let open_b = FolderOpen { root: b.clone() };
+        assert_eq!(
+            plan_chunked(&files_b, &dst, &open_b.origin(), 64)[0],
+            Step::Fetch { offset: 0 }
+        );
+        copy_in_chunked(&open_b, &files_b, &dst, |_| {}, &|| true, 64).unwrap();
+        assert_eq!(
+            fs::read(dst.join(&first)).unwrap(),
+            fs::read(b.join("Data").join(&first)).unwrap()
+        );
+    }
+
+    /// The same folder, the same name, size and time, other bytes (replaced in place): the
+    /// record matches, the first bytes do not, and the copy starts over.
+    #[test]
+    fn a_part_whose_start_differs_from_its_source_starts_over() {
+        let src = tmp("head-src");
+        let files = candidates(&client(&src, "Data", 5000).files)
+            .remove(0)
+            .files;
+        let dst = tmp("head-dst");
+        let open = FolderOpen { root: src.clone() };
+        copy_until(&open, &files, &dst, 64, 20);
+        let first = files[0].name().to_string();
+        let path = src.join("Data").join(&first);
+        let when = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, fake_mpq(files[0].size as usize, 0x77)).unwrap();
+        fs::File::options()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        let again = candidates(&list_folder(&src, MAX_DEPTH).files)
+            .remove(0)
+            .files;
+        assert_eq!(again, files, "the listing cannot tell");
+        let mut max_done = 0;
+        copy_in_chunked(
+            &open,
+            &files,
+            &dst,
+            |p| max_done = max_done.max(p.bytes_done),
+            &|| true,
+            64,
+        )
+        .unwrap();
+        assert_eq!(max_done, files.iter().map(|f| f.size).sum::<u64>());
+        assert_eq!(
+            fs::read(dst.join(&first)).unwrap(),
+            fs::read(&path).unwrap()
+        );
+    }
+
+    /// A download's `.part` (no record of a folder's file) is never resumed by the import, and is
+    /// gone once the archive is in place.
+    #[test]
+    fn a_download_part_is_not_resumed_by_the_import() {
+        let src = tmp("dlpart-src");
+        let files = candidates(&client(&src, "Data", 5000).files)
+            .remove(0)
+            .files;
+        let dst = tmp("dlpart-dst");
+        let first = files[0].name().to_string();
+        fs::write(data::part_path(&dst, &first), vec![0xEE; 3000]).unwrap();
+        let open = FolderOpen { root: src.clone() };
+        assert_eq!(
+            plan_chunked(&files, &dst, &open.origin(), 64)[0],
+            Step::Fetch { offset: 0 }
+        );
+        copy_in_chunked(&open, &files, &dst, |_| {}, &|| true, 64).unwrap();
+        assert_eq!(
+            fs::read(dst.join(&first)).unwrap(),
+            fs::read(src.join("Data").join(&first)).unwrap()
+        );
+        assert!(!data::part_path(&dst, &first).exists());
     }
 
     /// A provider whose files cannot seek (a pipe): every open starts at 0.
@@ -827,6 +1110,10 @@ mod tests {
             let _ = offset;
             Ok((r, 0))
         }
+
+        fn origin(&self) -> String {
+            self.0.origin()
+        }
     }
 
     #[test]
@@ -835,10 +1122,20 @@ mod tests {
         let listing = client(&src, "Data", 2000);
         let files = candidates(&listing.files).remove(0).files;
         let dst = tmp("noseek-dst");
-        // A part from an earlier attempt, holding junk.
-        let name = files[0].name();
-        fs::write(data::part_path(&dst, name), vec![0xEE; 700]).unwrap();
         let open = NoSeek(FolderOpen { root: src.clone() });
+        // A part from an earlier attempt at this very file, past a sync boundary.
+        let name = files[0].name();
+        let whole = fs::read(src.join("Data").join(name)).unwrap();
+        fs::write(copy_path(&dst, name), &whole[..1500]).unwrap();
+        fs::write(
+            source_path(&dst, name),
+            source_record(&open.origin(), &files[0]),
+        )
+        .unwrap();
+        assert_eq!(
+            plan_chunked(&files, &dst, &open.origin(), 64)[0],
+            Step::Fetch { offset: 1024 }
+        );
         let mut max_done = 0;
         copy_in_chunked(
             &open,
@@ -846,14 +1143,11 @@ mod tests {
             &dst,
             |p| max_done = max_done.max(p.bytes_done),
             &|| true,
-            512,
+            64,
         )
         .unwrap();
         assert_eq!(max_done, files.iter().map(|f| f.size).sum::<u64>());
-        assert_eq!(
-            fs::read(dst.join(name)).unwrap(),
-            fs::read(src.join("Data").join(name)).unwrap()
-        );
+        assert_eq!(fs::read(dst.join(name)).unwrap(), whole);
     }
 
     #[test]
@@ -867,7 +1161,7 @@ mod tests {
         files[0].size += 100;
         let err = copy_in_chunked(&open, &files, &dst, |_| {}, &|| true, 1024).unwrap_err();
         assert!(err.contains("still being copied"), "{err}");
-        assert!(data::part_path(&dst, files[0].name()).exists());
+        assert!(copy_path(&dst, files[0].name()).exists());
         // An archive whose tables lie past its end (the source itself cut short) is discarded.
         files[0].size -= 100;
         let name = files[0].name().to_string();
@@ -875,11 +1169,64 @@ mod tests {
         fs::write(src.join("Data").join(&name), &whole[..whole.len() - 40]).unwrap();
         let listing = list_folder(&src, MAX_DEPTH);
         let files = candidates(&listing.files).remove(0).files;
-        let _ = fs::remove_file(data::part_path(&dst, &name));
         let err = copy_in_chunked(&open, &files, &dst, |_| {}, &|| true, 1024).unwrap_err();
         assert!(err.contains("not a whole archive"), "{err}");
-        assert!(!data::part_path(&dst, &name).exists());
+        assert!(!copy_path(&dst, &name).exists());
+        assert!(!source_path(&dst, &name).exists());
         assert!(!dst.join(&name).exists());
+    }
+
+    /// A torrent client's file at full size, header and tables in place, the middle still zeros:
+    /// refused while it is fresh, and copied again (not kept) once it changed after its copy.
+    #[test]
+    fn a_folder_still_being_fetched_is_refused_then_recopied() {
+        let src = tmp("torrent-src");
+        let files = candidates(&client(&src, "Data", 5000).files)
+            .remove(0)
+            .files;
+        let first = files[0].name().to_string();
+        let path = src.join("Data").join(&first);
+        let whole = fs::read(&path).unwrap();
+        let mut sparse = whole.clone();
+        sparse[1024..whole.len() - 1024].fill(0);
+        fs::write(&path, &sparse).unwrap();
+        let listed = candidates(&list_folder(&src, MAX_DEPTH).files)
+            .remove(0)
+            .files;
+        let now = |f: &Listed| f.modified_ms + 1000;
+        let quiet = Duration::from_secs(15);
+        assert!(!listing_settled(&listed, now(&listed[0]), quiet));
+        // Long untouched, no time at all, or a clock far ahead: settled.
+        assert!(listing_settled(&listed, now(&listed[0]) + 60_000, quiet));
+        let mut unknown = listed.clone();
+        unknown.iter_mut().for_each(|f| f.modified_ms = 0);
+        assert!(listing_settled(&unknown, 1, quiet));
+        assert!(listing_settled(&listed, now(&listed[0]) - 3_600_000, quiet));
+        // Taken anyway (the guard skipped): the zeros pass the size and header checks...
+        let dst = tmp("torrent-dst");
+        let open = FolderOpen { root: src.clone() };
+        copy_in_chunked(&open, &listed, &dst, |_| {}, &|| true, 64).unwrap();
+        assert_eq!(fs::read(dst.join(&first)).unwrap(), sparse);
+        // ...but once the source is finished (written after the copy), it is copied again.
+        let old = SystemTime::now() - Duration::from_secs(3600);
+        fs::File::options()
+            .append(true)
+            .open(dst.join(&first))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        fs::write(&path, &whole).unwrap();
+        let done = candidates(&list_folder(&src, MAX_DEPTH).files)
+            .remove(0)
+            .files;
+        assert_eq!(
+            plan(&done, &dst, &open.origin())[0],
+            Step::Fetch { offset: 0 }
+        );
+        assert_eq!(plan(&done, &dst, &open.origin())[1], Step::Keep);
+        let again = copy_in_chunked(&open, &done, &dst, |_| {}, &|| true, 64).unwrap();
+        assert_eq!((again.copied, again.kept), (1, REQUIRED.len() - 1));
+        assert_eq!(fs::read(dst.join(&first)).unwrap(), whole);
     }
 
     #[test]
@@ -890,6 +1237,7 @@ mod tests {
             "Data/../evil.MPQ",
             "Data/realmlist.wtf",
             "Data/.dbc.MPQ.part",
+            "Data/.dbc.MPQ.copy",
         ] {
             let f = Listed {
                 path: path.into(),
