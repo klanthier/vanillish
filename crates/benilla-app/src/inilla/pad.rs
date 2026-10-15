@@ -1,6 +1,7 @@
-//! **Game controllers**, the Bevy half: poll the pad (Apple's GameController on iOS, gilrs on a
-//! desktop run with `$INILLA_PAD=1`), run [`PadMapper`], and hand its answer on — bindings to
-//! [`Synth`], look and the cursor to the [`VirtualMouse`], the radial and the HUD actions here.
+//! **Game controllers**, the Bevy half: poll the pad (Apple's GameController on iOS, Android's
+//! input devices on Vanillish, gilrs on a desktop run with `$INILLA_PAD=1`), run [`PadMapper`],
+//! and hand its answer on — bindings to [`Synth`], look and the cursor to the [`VirtualMouse`],
+//! the radial and the HUD actions here.
 //!
 //! **Look is the mouse's right-button look.** The right stick holds the virtual right button at
 //! the centre of the screen and moves it, so the camera turns and the character faces it exactly
@@ -76,7 +77,9 @@ pub(crate) struct PadPlugin;
 impl Plugin for PadPlugin {
     fn build(&self, app: &mut App) {
         // A desktop rehearsal reads pads through gilrs, which benilla's boot leaves out.
-        if !cfg!(target_os = "ios")
+        // Vanillish: never where the platform reports the pads itself (gilrs has no Android
+        // backend).
+        if !inilla_platform::gamepad::NATIVE
             && std::env::var("INILLA_PAD").as_deref() == Ok("1")
             && !app.is_plugin_added::<bevy::gilrs::GilrsPlugin>()
         {
@@ -145,7 +148,9 @@ fn poll(
     let ctl = &mut *ctl;
 
     // ── read the first connected controller ──
-    let (state, name) = if cfg!(target_os = "ios") {
+    // Vanillish: the platform's own list (GameController on iOS, the InputDevice bridge on
+    // Android, which puts the pad last used first).
+    let (state, name) = if inilla_platform::gamepad::NATIVE {
         inilla_platform::gamepad::poll(&mut ctl.pads);
         match ctl.pads.first() {
             Some(p) => (
