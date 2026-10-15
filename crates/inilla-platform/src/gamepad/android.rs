@@ -894,6 +894,62 @@ mod tests {
     }
 
     #[test]
+    fn analog_triggers_with_the_right_stick_on_rx_ry() {
+        let mut s = store_with(
+            1,
+            bits(&[
+                axis::X,
+                axis::Y,
+                axis::RX,
+                axis::RY,
+                axis::LTRIGGER,
+                axis::RTRIGGER,
+            ]),
+            bits(&[axis::X, axis::Y, axis::RX, axis::RY]),
+            0.0,
+        );
+        s.motion(
+            1,
+            axes(&[
+                (axis::RX, 0.75),
+                (axis::RY, 0.25), // pulled down
+                (axis::Z, 1.0),   // not this pad's: ignored
+                (axis::LTRIGGER, 0.5),
+            ]),
+        );
+        let st = poll1(&mut s).state;
+        assert_eq!(st.right, [0.75, -0.25]);
+        assert!(close(st.lt, 0.5));
+        assert_eq!(st.rt, 0.0);
+    }
+
+    #[test]
+    fn a_pad_without_a_right_stick_or_trigger_axes_reads_neither() {
+        let mut s = store_with(
+            1,
+            bits(&[axis::X, axis::Y, axis::HAT_X, axis::HAT_Y]),
+            bits(&[axis::X, axis::Y, axis::HAT_X, axis::HAT_Y]),
+            0.0,
+        );
+        s.motion(
+            1,
+            axes(&[
+                (axis::Z, 1.0),
+                (axis::RZ, 1.0),
+                (axis::RX, 1.0),
+                (axis::RY, 1.0),
+                (axis::LTRIGGER, 1.0),
+            ]),
+        );
+        let st = poll1(&mut s).state;
+        assert_eq!(st.right, [0.0, 0.0]);
+        assert_eq!((st.lt, st.rt), (0.0, 0.0));
+        // Its L2/R2 keys are the triggers.
+        s.key(1, 105, true);
+        assert_eq!(poll1(&mut s).state.rt, 1.0);
+    }
+
+    #[test]
     fn uncentered_z_rz_triggers_read_as_they_are() {
         let mut s = store_with(
             1,
@@ -1121,6 +1177,48 @@ mod tests {
         // A key that maps to nothing still says which pad is in hand.
         s.key(1, 130, true);
         assert_eq!(order(&mut s), [1, 2]);
+    }
+
+    #[test]
+    fn a_generic_pad_at_rest_never_takes_over() {
+        let mut s = Store::new();
+        s.connect(1, "DualSense".into(), 0x054C, 0x0CE6, DUALSENSE, 0, 0.0);
+        s.connect(2, "Generic".into(), 0, 0, GENERIC, GENERIC, 0.0);
+        let order = |s: &mut Store| {
+            let mut out = Vec::new();
+            s.poll(&mut out);
+            out.iter().map(|p| p.id).collect::<Vec<_>>()
+        };
+        s.key(1, 96, true);
+        assert_eq!(order(&mut s), [1, 2]);
+        // The generic pad on the table streams its rest: Z/RZ (its triggers) at -1, which reads
+        // as released, and a little stick drift.
+        s.motion(
+            2,
+            axes(&[(axis::Z, -1.0), (axis::RZ, -1.0), (axis::RX, 0.1)]),
+        );
+        assert_eq!(order(&mut s), [1, 2]);
+        // Its left trigger pulled past halfway (raw 0.2 → 0.6) is the player picking it up.
+        s.motion(2, axes(&[(axis::Z, 0.2), (axis::RZ, -1.0)]));
+        assert_eq!(order(&mut s), [2, 1]);
+    }
+
+    #[test]
+    fn a_new_layout_lets_go_of_the_hat() {
+        let mut s = store_with(1, DUALSENSE, DUALSENSE_CENTERED, 0.0);
+        s.motion(1, axes(&[(axis::HAT_X, 1.0)]));
+        assert!(poll1(&mut s).state.pressed(PadButton::Right));
+        // Android reports the pad again with other axes: the old hat value means nothing now.
+        s.connect(1, "Pad".into(), 0, 0, GENERIC, GENERIC, 0.0);
+        assert_eq!(poll1(&mut s).state.buttons, 0);
+        // The same layout again keeps it.
+        s.motion(
+            1,
+            axes(&[(axis::HAT_X, 1.0), (axis::Z, -1.0), (axis::RZ, -1.0)]),
+        );
+        s.connect(1, "Pad".into(), 0, 0, GENERIC, GENERIC, 0.0);
+        let _ = poll1(&mut s);
+        assert!(poll1(&mut s).state.pressed(PadButton::Right));
     }
 
     #[test]
