@@ -1,27 +1,35 @@
-# iNilla backend: a vmangos 1.12.1 realm and the game-data host for the iNilla iOS app.
+# Vanillish server: a vmangos 1.12.1 realm and the game-data host for the Vanillish Android app (and
+# iNilla on iOS). On a Mac, the setup script does everything below. By hand, anywhere:
 #
-#   cp .env.example .env      # set WOW_DATA_DIR, REALM_ADDRESS and the secrets
+#   cp .env.example .env      # set REALM_ADDRESS, the three secrets and WOW_DATA_DIR
 #   docker compose up -d
 #
-# The first `up` compiles vmangos (5–15 min), imports the world database and extracts the server's
-# map data from your client (a few minutes with vmaps). Every later `up` takes seconds.
+# The first `up` pulls the prebuilt images (linux/amd64 and linux/arm64, so an Apple-silicon Mac runs
+# them natively), imports the world database and extracts the server's map data from your client
+# (a few minutes with vmaps). Every later `up` takes seconds. An image the registry does not have (a
+# VMANGOS_COMMIT of your own) is built here instead: 5–15 minutes.
 #
 # Published on BIND_ADDR (all interfaces by default), for the phone:
-#   3724  realmd    — logon (the app's server profile: host + this port)
+#   3724  realmd    — logon
 #   8085  mangosd   — world (handed out by realmd as REALM_ADDRESS:MANGOSD_PORT)
-#   8099  datahost  — the client's Data folder, for the app's one-time download
+#   8099  datahost  — what the app reads first (/server.json), "Create account", and the game data
 # The database is never published.
 
-name: inilla
+name: vanillish
 
 x-vmangos: &vmangos
-  image: inilla-vmangos:${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}
+  # Pulled when the registry has this tag, built from docker/vmangos/ when it does not: compose does
+  # that by itself for a service with both image and build and no pull_policy. The -rN suffix moves
+  # whenever docker/vmangos/ changes (server-images.yml refuses to republish a tag with other inputs).
+  image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-vmangos:${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}-r1
   build:
     context: .
     dockerfile: docker/vmangos/Dockerfile
     args:
       VMANGOS_COMMIT: ${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}
       VMANGOS_DB_URL: ${VMANGOS_DB_URL:-}
+      VMANGOS_DB_SHA256: ${VMANGOS_DB_SHA256:-}
+      BUILD_JOBS: ${BUILD_JOBS:-}
   init: true
   environment: &db-env
     DB_HOST: db
@@ -53,7 +61,7 @@ services:
       start_period: 30s
 
   # One-shot, on every `up`: databases, the release dump (first run), the core's new migrations,
-  # and the realm row from .env. Exits 0 when the database is ready.
+  # the realm row from .env, and the data host's sign-up user. Exits 0 when the database is ready.
   db-init:
     <<: *vmangos
     restart: "no"
@@ -61,7 +69,8 @@ services:
     environment:
       <<: *db-env
       DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
-      REALM_NAME: ${REALM_NAME:-iNilla}
+      SIGNUP_DB_PASSWORD: ${SIGNUP_DB_PASSWORD:?set SIGNUP_DB_PASSWORD in .env}
+      REALM_NAME: ${REALM_NAME:-Vanillish}
       REALM_ADDRESS: ${REALM_ADDRESS:?set REALM_ADDRESS in .env to this machine's LAN address}
       REALM_PORT: ${MANGOSD_PORT:-8085}
     depends_on:
@@ -77,7 +86,8 @@ services:
       EXTRACT_VMAPS: ${EXTRACT_VMAPS:-1}
       EXTRACT_MMAPS: ${EXTRACT_MMAPS:-0}
     volumes:
-      - ${WOW_DATA_DIR:?set WOW_DATA_DIR in .env}:/client/Data:ro
+      # The archives: the volume the setup script imports them into, or a folder (WOW_DATA_DIR).
+      - ${WOW_DATA_DIR:-vanillish-wowdata}:/client/Data:ro
       - serverdata:/vmangos/data
 
   realmd:
@@ -127,11 +137,14 @@ services:
       # Loading the world takes a minute or two.
       start_period: 5m
 
-  # The game data and addons for the app. English from WOW_DATA_DIR; German too when
-  # WOW_DATA_DIR_DEDE points at a German 1.12.1 client (the empty default offers none). pfQuest
-  # comes built in for both languages; addons/ adds your own (see addons/README.md).
+  # What the app talks to first: /server.json (this realm, its ports, whether sign-up is open and
+  # which game data is here), POST /accounts (the app's "Create account"), then the game data and
+  # addons. English from WOW_DATA_DIR; German too when WOW_DATA_DIR_DEDE points at a German 1.12.1
+  # client (the empty default offers none). pfQuest comes built in for both languages; addons/ adds
+  # your own (see addons/README.md). It starts without any game data: server.json and sign-up work
+  # before the archives are imported.
   datahost:
-    image: inilla-datahost:local
+    image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-datahost:0.3.0
     build:
       context: datahost
     restart: unless-stopped
@@ -154,10 +167,38 @@ services:
       - --cache-dir
       - /state
     environment:
-      # Empty: open to everyone on the network, the easy way on a home LAN.
+      # Empty: open to everyone on the network, the easy way on a home LAN. Set, the game data and
+      # sign-up need it (the app asks for it); /server.json stays open.
       INILLA_DATA_TOKEN: ${INILLA_DATA_TOKEN:-}
+      # /server.json: what the app needs to log in after typing only this machine's address. No
+      # auth host: the app dials realmd and, with same_host, the world at the address it typed.
+      INILLA_SERVER_NAME: ${REALM_NAME:-Vanillish}
+      INILLA_CORE: vmangos
+      INILLA_AUTH_PORT: ${REALMD_PORT:-3724}
+      INILLA_REALM_NAME: ${REALM_NAME:-Vanillish}
+      INILLA_REALM_TYPE: ${REALM_TYPE:-pve}
+      INILLA_WORLD_ADDRESS: ${REALM_ADDRESS:?set REALM_ADDRESS in .env to this machine's LAN address}
+      INILLA_WORLD_PORT: ${MANGOSD_PORT:-8085}
+      INILLA_WORLD_SAME_HOST: "true"
+      # A sentence the app shows with the server; unset by default.
+      INILLA_MESSAGE:
+      # Create account: lan = phones on a private network only, open = anyone who reaches 8099,
+      # off = accounts only through vmangos-console. The app computes the SRP6 salt and verifier,
+      # so the password never leaves the phone; the data host inserts them as the sign-up user
+      # db-init made, which can add an account and nothing else (never a GM).
+      INILLA_SIGNUP: ${INILLA_SIGNUP:-lan}
+      INILLA_SIGNUP_DB_HOST: db
+      INILLA_SIGNUP_DB_PORT: "3306"
+      INILLA_SIGNUP_DB_USER: vanillish_signup
+      INILLA_SIGNUP_DB_PASSWORD: ${SIGNUP_DB_PASSWORD:?set SIGNUP_DB_PASSWORD in .env}
+      INILLA_SIGNUP_DB_NAME: realmd
+    depends_on:
+      # The sign-up user. Not extract or mangosd: no game data needed.
+      db-init:
+        condition: service_completed_successfully
     volumes:
-      - ${WOW_DATA_DIR:?set WOW_DATA_DIR in .env}:/client/Data:ro
+      # The archives: the volume the setup script imports them into, or a folder (WOW_DATA_DIR).
+      - ${WOW_DATA_DIR:-vanillish-wowdata}:/client/Data:ro
       - ${WOW_DATA_DIR_DEDE:-./docker/empty}:/client/deDE/Data:ro
       - ./addons:/addons:ro
       - datahost:/state
@@ -176,3 +217,9 @@ volumes:
   serverdata:
   logs:
   datahost:
+  # The player's own archives, imported once by the setup script (never in an image). External, so
+  # `docker compose down -v` (a fresh realm) keeps them; `docker volume rm vanillish-wowdata` removes
+  # them. Unused when WOW_DATA_DIR names a folder; without one, `up` needs the volume to exist, even
+  # empty (`docker volume create vanillish-wowdata`: realm and sign-up first, the data later).
+  vanillish-wowdata:
+    external: true

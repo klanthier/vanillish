@@ -1,0 +1,144 @@
+# Checks the Vanillish server (server/) without any game data, on linux/amd64 and linux/arm64, each
+# on its own architecture (ubuntu-24.04, ubuntu-24.04-arm: no QEMU):
+#
+# - lint: shellcheck over the images' scripts and server/ci, the Python tools compile and match
+#   benilla-srp's golden verifier, both compose files resolve, compose.yaml's pins agree (pins.sh),
+#   and image-state.sh and pins.sh give the right verdicts on made-up cases (test_ci_tools.sh);
+# - stack: compose.yaml's db, db-init, realmd and data host on an empty Data folder, then
+#   server/ci/check.sh: the sign-up user's grants (what it can and cannot do), GET /server.json,
+#   POST /accounts (created, replay, name taken, invalid bodies, the rate limit, a token, sign-up
+#   off) and an SRP6 logon to realmd with the account the data host made, the realm in its list.
+#
+# The images: the published tag when it holds exactly this checkout's files (image-state.sh), else
+# built here. Pushes to main and klanthier/** run the same check in server-images.yml, before it
+# publishes, so the stack job leaves those to it.
+name: server-check
+
+on:
+  push:
+    paths:
+      - "server/**"
+      - "!server/**/*.md"
+      - ".github/workflows/server-check.yml"
+  pull_request:
+    paths:
+      - "server/**"
+      - "!server/**/*.md"
+      - ".github/workflows/server-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Shell scripts
+        # -x: the roles source inilla-lib.sh (installed at /usr/local/bin, found beside them here).
+        run: |
+          shellcheck --version | sed -n 2p
+          shellcheck -x -P SCRIPTDIR -S warning \
+            server/docker/vmangos/bin/inilla-* server/docker/vmangos/bin/vmangos-console server/ci/*.sh
+
+      - name: Python tools (standard library only)
+        run: |
+          python3 -I -m py_compile server/ci/srp6.py server/ci/accounts_e2e.py
+          python3 server/ci/srp6.py golden
+
+      - name: Compose files resolve
+        working-directory: server
+        run: |
+          docker compose --env-file .env.example config --quiet
+          docker compose -f compose.datahost.yaml --env-file .env.example config --quiet
+
+      - name: Pins (compose.yaml against Cargo.toml)
+        run: server/ci/pins.sh
+
+      - name: What decides a publish (image-state.sh, pins.sh)
+        run: server/ci/test_ci_tools.sh
+
+  stack:
+    if: >-
+      github.event_name != 'push' ||
+      !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/klanthier/'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04, pair: linux-amd64 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm, pair: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: What the registry holds
+        id: images
+        run: |
+          set -euo pipefail
+          docker version --format 'docker {{.Server.Version}} ({{.Server.Arch}})'
+          docker compose version
+          while IFS='=' read -r key value; do printf -v "$key" '%s' "$value"; done < <(server/ci/pins.sh)
+          {
+            echo "vmangos_commit=$vmangos_commit"
+            echo "db_url=$db_url"
+            echo "db_sha256=$db_sha256"
+            echo "vmangos_ref=$registry/vanillish-vmangos:$vmangos_tag"
+            echo "vmangos=$(server/ci/image-state.sh "$registry/vanillish-vmangos:$vmangos_tag" "$vmangos_inputs")"
+            echo "datahost_ref=$registry/vanillish-datahost:$datahost_tag"
+            echo "datahost=$(server/ci/image-state.sh "$registry/vanillish-datahost:$datahost_tag" "$datahost_inputs")"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: vmangos (published with these files)
+        if: steps.images.outputs.vmangos == 'fresh'
+        run: docker pull "${{ steps.images.outputs.vmangos_ref }}"
+
+      - name: vmangos (build)
+        if: steps.images.outputs.vmangos != 'fresh'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          file: server/docker/vmangos/Dockerfile
+          platforms: ${{ matrix.platform }}
+          # compose.yaml's pins, as a local `up` builds it (empty dump pins: db_latest now).
+          build-args: |
+            VMANGOS_COMMIT=${{ steps.images.outputs.vmangos_commit }}
+            VMANGOS_DB_URL=${{ steps.images.outputs.db_url }}
+            VMANGOS_DB_SHA256=${{ steps.images.outputs.db_sha256 }}
+          provenance: false
+          load: true
+          tags: ${{ steps.images.outputs.vmangos_ref }}
+          cache-from: type=gha,scope=vmangos-${{ matrix.pair }}
+
+      - name: datahost (published with these files)
+        if: steps.images.outputs.datahost == 'fresh'
+        run: docker pull "${{ steps.images.outputs.datahost_ref }}"
+
+      - name: datahost (build)
+        if: steps.images.outputs.datahost != 'fresh'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server/datahost
+          file: server/datahost/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          load: true
+          tags: ${{ steps.images.outputs.datahost_ref }}
+          cache-from: type=gha,scope=datahost-${{ matrix.pair }}
+
+      - name: Check the stack with no game data (${{ matrix.platform }})
+        run: server/ci/check.sh

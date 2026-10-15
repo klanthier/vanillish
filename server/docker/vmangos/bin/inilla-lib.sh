@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034 # sourced: the roles read its variables
 # Shared helpers for the iNilla vmangos roles. Sourced, never run.
 
 log() { printf '[%s] %s\n' "${INILLA_ROLE:-inilla}" "$*" >&2; }
@@ -16,14 +17,17 @@ DB_WORLD=mangos
 DB_CHARACTERS=characters
 DB_LOGS=logs
 
-# The password ends up inside a `host;port;user;password;database` string in the vmangos configs
+# A password ends up inside a `host;port;user;password;database` string in the vmangos configs
 # and inside SQL in db-init, so it is held to characters neither of those can misread.
-check_db_password() {
-    [ -n "$DB_PASSWORD" ] || die "DB_PASSWORD is empty — set it in .env"
-    case "$DB_PASSWORD" in
-        *[!A-Za-z0-9._-]*) die "DB_PASSWORD may only use letters, digits, '.', '_' and '-'" ;;
+# check_secret NAME — the variable NAME holds such a password.
+check_secret() {
+    local value="${!1:-}"
+    [ -n "$value" ] || die "$1 is empty — set it in .env"
+    case "$value" in
+        *[!A-Za-z0-9._-]*) die "$1 may only use letters, digits, '.', '_' and '-'" ;;
     esac
 }
+check_db_password() { check_secret DB_PASSWORD; }
 
 # The quoted connection string vmangos expects for database $1.
 db_info() { printf '"%s;%s;%s;%s;%s"' "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_PASSWORD" "$1"; }

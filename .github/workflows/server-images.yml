@@ -1,0 +1,327 @@
+# Publishes the Vanillish server's two images, the ones server/compose.yaml pulls:
+#
+#   ghcr.io/<owner>/vanillish-vmangos:<VMANGOS_COMMIT>-r<N>
+#   ghcr.io/<owner>/vanillish-datahost:<server/datahost/Cargo.toml version>
+#
+# each one tag for linux/amd64 and linux/arm64, so an Apple-silicon Mac runs it natively. Each half
+# is built on its own architecture (ubuntu-24.04, ubuntu-24.04-arm: no QEMU), pushed by digest,
+# checked, and the halves are joined with `docker buildx imagetools create`. Both images also get
+# :sha-<commit> and :latest.
+#
+# A version tag holds one set of files. prepare reads the pins from compose.yaml (server/ci/pins.sh)
+# and asks the registry what the tag holds (server/ci/image-state.sh, by the inputs label):
+#   absent  build it;
+#   fresh   it already holds exactly these files: nothing to build, :sha- and :latest follow it;
+#   stale   fail: the files changed but compose.yaml still names the tag, and a Mac that has it would
+#           never pull the change. Move the tag (-rN for vmangos, the version for the datahost), or
+#           run this by hand with `republish` to overwrite it.
+# Either way, before anything is tagged, each platform runs server/ci/check.sh on its own images: the
+# stack with no game data, sign-up and an SRP6 logon (server-check.yml leaves these branches to this).
+#
+# Nothing from a WoW client is ever in a build context (server/.dockerignore).
+name: server-images
+
+on:
+  push:
+    branches: [main, "klanthier/**"]
+    paths:
+      - "server/**"
+      - "!server/**/*.md"
+      - ".github/workflows/server-images.yml"
+  workflow_dispatch:
+    inputs:
+      republish:
+        description: Overwrite a version tag that was published from other files
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One publish at a time, whichever branch: tags move in one place.
+concurrency:
+  group: server-images
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      prefix: ${{ steps.plan.outputs.prefix }}
+      vmangos_commit: ${{ steps.plan.outputs.vmangos_commit }}
+      vmangos_tag: ${{ steps.plan.outputs.vmangos_tag }}
+      vmangos_inputs: ${{ steps.plan.outputs.vmangos_inputs }}
+      vmangos: ${{ steps.plan.outputs.vmangos }}
+      datahost_tag: ${{ steps.plan.outputs.datahost_tag }}
+      datahost_inputs: ${{ steps.plan.outputs.datahost_inputs }}
+      datahost: ${{ steps.plan.outputs.datahost }}
+      db_url: ${{ steps.plan.outputs.db_url }}
+      db_sha256: ${{ steps.plan.outputs.db_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPUBLISH: ${{ inputs.republish || false }}
+        run: |
+          set -euo pipefail
+          pins="$(server/ci/pins.sh)"
+          while IFS='=' read -r key value; do printf -v "$key" '%s' "$value"; done <<<"$pins"
+          # GHCR names are lower-case; the owner's login may not be.
+          prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          if [ "$prefix" != "$registry" ]; then
+            echo "::warning::compose.yaml pulls from $registry; this run publishes to $prefix (set VANILLISH_REGISTRY=$prefix in .env to use these)"
+          fi
+
+          for image in vmangos datahost; do
+            tag_var="${image}_tag" inputs_var="${image}_inputs"
+            ref="$prefix/vanillish-$image:${!tag_var}"
+            state="$(server/ci/image-state.sh "$ref" "${!inputs_var}")"
+            case "$state" in
+              absent) action=build ;;
+              fresh) action=reuse ;;
+              stale)
+                if [ "$REPUBLISH" != true ]; then
+                  if [ "$image" = vmangos ]; then what="server/docker/ changed: move -r<N> in compose.yaml's vmangos image"
+                  else what="server/datahost/ changed: bump its version in datahost/Cargo.toml and both compose files"; fi
+                  echo "::error::$ref was published from other files. $what"
+                  exit 1
+                fi
+                echo "::warning::republishing $ref over a tag built from other files"
+                action=build
+                ;;
+            esac
+            echo "$ref: $state → $action"
+            printf -v "$image" '%s' "$action"
+          done
+
+          # The world database, resolved once so both halves bake the same dump: compose.yaml's pin,
+          # else what db_latest holds now (its asset is replaced, so its old URLs disappear).
+          if [ "$vmangos" = build ] && [ -z "$db_url" ]; then
+            asset='[.assets[] | select(.name | test("^db-[0-9a-f]+\\.zip$"))][0]'
+            release="$(gh api repos/vmangos/core/releases/tags/db_latest)"
+            db_url="$(jq -r "$asset.browser_download_url // empty" <<<"$release")"
+            [ -n "$db_sha256" ] || db_sha256="$(jq -r "$asset.digest // \"\" | sub(\"^sha256:\"; \"\")" <<<"$release")"
+            [ -n "$db_url" ] || { echo "::error::db_latest has no db-<commit>.zip"; exit 1; }
+          fi
+          # db-init imports the dump, then the core's migrations: the dump may not be newer than the core.
+          if [ "$vmangos" = build ]; then
+            dump="$(basename "$db_url" .zip)"
+            if [[ "$dump" =~ ^db-([0-9a-f]+)$ ]]; then
+              status="$(gh api "repos/vmangos/core/compare/${BASH_REMATCH[1]}...$vmangos_commit" --jq .status)" || status="unknown commit"
+              case "$status" in
+                ahead | identical) echo "world database $dump: no newer than vmangos ${vmangos_commit:0:9}" ;;
+                *) echo "::error::$dump is not in VMANGOS_COMMIT ${vmangos_commit:0:9}'s history ($status): move the core forward, or pin VMANGOS_DB_URL to an older dump"; exit 1 ;;
+              esac
+            else
+              echo "::warning::$db_url is not named db-<commit>.zip: its age against the core is not checked"
+            fi
+          fi
+
+          {
+            echo "prefix=$prefix"
+            echo "vmangos_commit=$vmangos_commit"
+            echo "vmangos_tag=$vmangos_tag"
+            echo "vmangos_inputs=$vmangos_inputs"
+            echo "vmangos=$vmangos"
+            echo "datahost_tag=$datahost_tag"
+            echo "datahost_inputs=$datahost_inputs"
+            echo "datahost=$datahost"
+            echo "db_url=$db_url"
+            echo "db_sha256=$db_sha256"
+          } >>"$GITHUB_OUTPUT"
+
+  # One job per architecture: build (or pull) both images, check them together, push what was built.
+  platform:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04, pair: linux-amd64 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm, pair: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VMANGOS: ${{ needs.prepare.outputs.prefix }}/vanillish-vmangos
+      DATAHOST: ${{ needs.prepare.outputs.prefix }}/vanillish-datahost
+      VMANGOS_TAG: ${{ needs.prepare.outputs.vmangos_tag }}
+      DATAHOST_TAG: ${{ needs.prepare.outputs.datahost_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: vmangos (build and push by digest)
+        id: vmangos
+        if: needs.prepare.outputs.vmangos == 'build'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          file: server/docker/vmangos/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VMANGOS_COMMIT=${{ needs.prepare.outputs.vmangos_commit }}
+            VMANGOS_DB_URL=${{ needs.prepare.outputs.db_url }}
+            VMANGOS_DB_SHA256=${{ needs.prepare.outputs.db_sha256 }}
+          # source names this repository (GHCR links the package to it); revision stays the vmangos
+          # commit the image packages, this repository's commit is vanillish.revision.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.vmangos_tag }}
+            io.github.klanthier.vanillish.revision=${{ github.sha }}
+            io.github.klanthier.vanillish.inputs=${{ needs.prepare.outputs.vmangos_inputs }}
+            io.github.vmangos.db-url=${{ needs.prepare.outputs.db_url }}
+            io.github.vmangos.db-sha256=${{ needs.prepare.outputs.db_sha256 }}
+          # A plain manifest per platform (no attestation manifest), so the joined tag lists exactly
+          # linux/amd64 and linux/arm64. Untagged until merge: a failed check publishes nothing.
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.VMANGOS }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          # max: the compile stage's layer too, so a change to the role scripts alone recompiles nothing.
+          cache-from: type=gha,scope=vmangos-${{ matrix.pair }}
+          cache-to: type=gha,scope=vmangos-${{ matrix.pair }},mode=max
+
+      - name: datahost (build and push by digest)
+        id: datahost
+        if: needs.prepare.outputs.datahost == 'build'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server/datahost
+          file: server/datahost/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=Vanillish data host
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.datahost_tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            io.github.klanthier.vanillish.inputs=${{ needs.prepare.outputs.datahost_inputs }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.DATAHOST }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          cache-from: type=gha,scope=datahost-${{ matrix.pair }}
+          cache-to: type=gha,scope=datahost-${{ matrix.pair }},mode=max
+
+      - name: Load the images under the names compose.yaml uses
+        env:
+          VMANGOS_DIGEST: ${{ steps.vmangos.outputs.digest }}
+          DATAHOST_DIGEST: ${{ steps.datahost.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Built: the digest just pushed. Reused: the published tag, which holds these same files.
+          src="$VMANGOS:$VMANGOS_TAG"; [ -z "$VMANGOS_DIGEST" ] || src="$VMANGOS@$VMANGOS_DIGEST"
+          docker pull --platform "${{ matrix.platform }}" "$src"
+          docker tag "$src" "$VMANGOS:$VMANGOS_TAG"
+          src="$DATAHOST:$DATAHOST_TAG"; [ -z "$DATAHOST_DIGEST" ] || src="$DATAHOST@$DATAHOST_DIGEST"
+          docker pull --platform "${{ matrix.platform }}" "$src"
+          docker tag "$src" "$DATAHOST:$DATAHOST_TAG"
+          docker image inspect --format '{{.RepoTags}} {{.Os}}/{{.Architecture}}' "$VMANGOS:$VMANGOS_TAG" "$DATAHOST:$DATAHOST_TAG"
+
+      - name: Check the stack with no game data (${{ matrix.platform }})
+        env:
+          VANILLISH_REGISTRY: ${{ needs.prepare.outputs.prefix }}
+        run: server/ci/check.sh
+
+      - name: Record the digests
+        env:
+          VMANGOS_DIGEST: ${{ steps.vmangos.outputs.digest }}
+          DATAHOST_DIGEST: ${{ steps.datahost.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests/vmangos" "$RUNNER_TEMP/digests/datahost"
+          [ -z "$VMANGOS_DIGEST" ] || touch "$RUNNER_TEMP/digests/vmangos/${VMANGOS_DIGEST#sha256:}"
+          [ -z "$DATAHOST_DIGEST" ] || touch "$RUNNER_TEMP/digests/datahost/${DATAHOST_DIGEST#sha256:}"
+          touch "$RUNNER_TEMP/digests/${{ matrix.pair }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.pair }}
+          path: ${{ runner.temp }}/digests/
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [prepare, platform]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image: [vmangos, datahost]
+    env:
+      IMAGE: ${{ needs.prepare.outputs.prefix }}/vanillish-${{ matrix.image }}
+      TAG: ${{ matrix.image == 'vmangos' && needs.prepare.outputs.vmangos_tag || needs.prepare.outputs.datahost_tag }}
+      ACTION: ${{ matrix.image == 'vmangos' && needs.prepare.outputs.vmangos || needs.prepare.outputs.datahost }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          [ -e "$RUNNER_TEMP/digests/linux-amd64" ] && [ -e "$RUNNER_TEMP/digests/linux-arm64" ] \
+            || { echo "::error::a platform did not finish"; exit 1; }
+          tags=(-t "$IMAGE:$TAG" -t "$IMAGE:sha-${GITHUB_SHA::7}" -t "$IMAGE:latest")
+          if [ "$ACTION" = build ]; then
+            sources=()
+            for d in "$RUNNER_TEMP/digests/${{ matrix.image }}"/*; do
+              [ -e "$d" ] && sources+=("$IMAGE@sha256:$(basename "$d")")
+            done
+            [ "${#sources[@]}" = 2 ] || { echo "::error::expected 2 digests of $IMAGE, got ${#sources[@]}"; exit 1; }
+          else
+            # The version tag already holds these files: only the moving tags follow it.
+            tags=("${tags[@]:2}")
+            sources=("$IMAGE:$TAG")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+
+      - name: Both platforms are there
+        run: |
+          docker buildx imagetools inspect --raw "$IMAGE:$TAG" \
+            | jq -e '[.manifests[].platform | .os + "/" + .architecture] | sort == ["linux/amd64", "linux/arm64"]'
+
+      - name: Anyone can pull it (a Mac pulls anonymously)
+        run: |
+          repo="${IMAGE#ghcr.io/}"
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:$repo:pull" | jq -r '.token // empty' || true)"
+          if [ -z "$token" ] || ! curl -fsS -o /dev/null -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" "https://ghcr.io/v2/$repo/manifests/$TAG"; then
+            echo "::warning::$IMAGE is not public: every Mac would build it instead. Set it to Public once (the package's settings, Danger Zone, Change visibility)."
+          fi

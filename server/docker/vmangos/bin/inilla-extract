@@ -8,6 +8,7 @@
 # the first. Delete a marker (or the whole serverdata volume) to redo a step.
 set -euo pipefail
 INILLA_ROLE=extract
+# shellcheck source=inilla-lib.sh
 . /usr/local/bin/inilla-lib.sh
 
 CLIENT=/client

@@ -5,6 +5,7 @@
 # from `docker compose exec` (account creation, GM levels, announcements) with no TTY attached.
 set -euo pipefail
 INILLA_ROLE=mangosd
+# shellcheck source=inilla-lib.sh
 . /usr/local/bin/inilla-lib.sh
 check_db_password
 
