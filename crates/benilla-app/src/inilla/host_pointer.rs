@@ -60,6 +60,8 @@ pub(crate) struct HostPointer {
     shown: Option<bool>,
     /// The cursor's image has to be sent again (it changed, or the mouse just appeared).
     icon_stale: bool,
+    /// The screen's density (the window's own scale factor) the image was last scaled for.
+    icon_density: Option<f32>,
 }
 
 impl HostPointer {
@@ -112,6 +114,8 @@ pub(crate) fn drain(
     if focus.read().any(|f| !f.focused) {
         host.mouse.release_all(&mut ops);
     }
+    // Those releases are made here, not by a button coming up: no Back key follows them.
+    let reported = ops.len();
     let events = pointer::drain();
     if let Ok(window) = windows.single() {
         let scale = window.resolution.scale_factor();
@@ -127,7 +131,9 @@ pub(crate) fn drain(
                 HostPointerEvent::Keyboard => host.last_keyboard = now,
                 HostPointerEvent::Mouse { .. } | HostPointerEvent::Relative { .. } => {
                     host.mouse.feed(ev, scale, size, &mut ops);
-                    host.last_mouse = now;
+                    if ev.is_use() {
+                        host.last_mouse = now;
+                    }
                     if !host.mouse_seen {
                         host.mouse_seen = true;
                         host.icon_stale = true;
@@ -138,7 +144,9 @@ pub(crate) fn drain(
     }
     // Android 16 hands the Back key of the back button to the back callback, which counts it with
     // the gesture's: taken out here, so the button is BUTTON5 alone, as on the desktop.
-    let back_releases = ops.iter().filter(|op| **op == MouseOp::Up(KButton::Back));
+    let back_releases = ops[reported..]
+        .iter()
+        .filter(|op| **op == MouseOp::Up(KButton::Back));
     for _ in back_releases {
         host.back_keys.released(now);
     }
@@ -158,6 +166,7 @@ fn follow_cursor(
     mut host: ResMut<HostPointer>,
     options: Query<Ref<CursorOptions>, With<PrimaryWindow>>,
     icons: Query<Ref<CursorIcon>, With<PrimaryWindow>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     images: Res<Assets<Image>>,
 ) {
     let Ok(opts) = options.single() else {
@@ -182,6 +191,16 @@ fn follow_cursor(
         pointer::set_pointer_visible(opts.visible);
     }
     if icon.as_ref().is_some_and(|i| i.is_changed()) {
+        host.icon_stale = true;
+    }
+    // The image is scaled to the screen's density when it is sent: another display (DeX's) or
+    // another panel may have another.
+    let density = windows
+        .single()
+        .ok()
+        .map(|w| w.resolution.base_scale_factor());
+    if density.is_some() && density != host.icon_density {
+        host.icon_density = density;
         host.icon_stale = true;
     }
     if !host.icon_stale {

@@ -88,6 +88,21 @@ pub enum HostPointerEvent {
     Keyboard,
 }
 
+impl HostPointerEvent {
+    /// The player used the mouse or the keyboard: what the touch HUD steps aside for. A cancel and
+    /// a hover's end are Android's own doing (a touch on the screen, pointer capture starting, a
+    /// button going down), not use; a pen above the screen is not a mouse.
+    pub fn is_use(&self) -> bool {
+        match *self {
+            HostPointerEvent::Mouse { action: a, .. } => {
+                a != action::CANCEL && a != action::HOVER_EXIT
+            }
+            HostPointerEvent::Relative { .. } | HostPointerEvent::Keyboard => true,
+            HostPointerEvent::PenHover(_) => false,
+        }
+    }
+}
+
 /// At most this many reports wait; past that, the oldest is dropped. A mouse report carries
 /// every button's state, so a lost one costs a step of motion, never a stuck button.
 pub const QUEUE_CAP: usize = 256;
@@ -223,20 +238,23 @@ impl HostMouse {
                     1.0
                 };
                 let p = [pos[0] / scale, pos[1] / scale];
-                if !(p[0].is_finite() && p[1].is_finite()) {
-                    return;
-                }
+                // A position that is no number moves nothing, but the buttons still count: a
+                // release lost here would leave its button held.
+                let placed = p[0].is_finite() && p[1].is_finite();
                 if action == action::HOVER_EXIT {
                     // Android also ends the hover when a button goes down, with the pointer where
                     // it was. Only an exit across the window's edge takes the cursor away: a DeX
                     // window left behind, or the pointer moved to another display.
-                    if self.at.is_some() && outside(p, size) {
+                    if placed && self.at.is_some() && outside(p, size) {
                         self.at = None;
                         out.push(MouseOp::Leave);
                     }
                     return;
                 }
-                if self.at != Some(p) {
+                // A cancel only says the stream went elsewhere. Its button state is not a
+                // release: a release that matters comes as one (or as the captured mouse's).
+                let clicks = action != action::CANCEL && (buttons & KNOWN_BUTTONS) != self.held;
+                if placed && self.at != Some(p) {
                     // The desktop's `MouseMotion` comes with every move, in the device's counts.
                     // The nearest thing here is the pointer's px.
                     if let Some(old) = self.at {
@@ -247,9 +265,13 @@ impl HostMouse {
                     }
                     out.push(MouseOp::MoveTo(p));
                     self.at = Some(p);
+                } else if placed && (clicks || turns(wheel)) {
+                    // The virtual cursor is shared: a finger, the pen or the controller may have
+                    // moved it, or taken it away, since this mouse last put it. A click and the
+                    // wheel act where this pointer is, so the cursor is put back first. Where it
+                    // already is, the move is nothing to the virtual mouse, and no frame waits.
+                    out.push(MouseOp::MoveTo(p));
                 }
-                // A cancel only says the stream went elsewhere. Its button state is not a
-                // release: a release that matters comes as one (or as the captured mouse's).
                 if action != action::CANCEL {
                     self.buttons(buttons, out);
                 }
@@ -332,8 +354,16 @@ impl MouseBackKeys {
     }
 }
 
+/// The [`BUTTONS`] bits together; the others (a stylus's buttons) are not the mouse's.
+const KNOWN_BUTTONS: u32 = 1 | 2 | 4 | 8 | 16;
+
+/// The wheel turned (by a number).
+fn turns(wheel: f32) -> bool {
+    wheel.is_finite() && wheel != 0.0
+}
+
 fn push_wheel(wheel: f32, out: &mut Vec<MouseOp>) {
-    if wheel.is_finite() && wheel != 0.0 {
+    if turns(wheel) {
         out.push(MouseOp::Wheel(wheel));
     }
 }
@@ -505,17 +535,66 @@ mod tests {
         );
         // Android's order: the hover ends where the pointer is, then the button goes down.
         assert!(feed(&mut m, mouse(action::HOVER_EXIT, 0, 200.0, 100.0)).is_empty());
+        // Each click puts the cursor where the pointer is first (nothing, where it already is).
         assert_eq!(
             feed(&mut m, mouse(action::DOWN, 1, 200.0, 100.0)),
-            vec![MouseOp::Down(MouseButton::Left)]
+            vec![
+                MouseOp::MoveTo([100.0, 50.0]),
+                MouseOp::Down(MouseButton::Left)
+            ]
         );
         assert!(feed(&mut m, mouse(action::BUTTON_PRESS, 1, 200.0, 100.0)).is_empty());
         assert!(m.holds_a_button());
         assert_eq!(
             feed(&mut m, mouse(action::UP, 0, 200.0, 100.0)),
+            vec![
+                MouseOp::MoveTo([100.0, 50.0]),
+                MouseOp::Up(MouseButton::Left)
+            ]
+        );
+        assert!(!m.holds_a_button());
+    }
+
+    #[test]
+    fn a_click_or_the_wheel_puts_the_shared_cursor_back_under_the_pointer() {
+        // A finger, the pen or the controller moved the virtual cursor (or took it away) while
+        // this mouse stood still: its click and its wheel still act under its pointer.
+        let mut m = HostMouse::default();
+        feed(&mut m, mouse(action::HOVER_MOVE, 0, 200.0, 100.0));
+        assert_eq!(
+            feed(&mut m, mouse(action::BUTTON_PRESS, 2, 200.0, 100.0)),
+            vec![
+                MouseOp::MoveTo([100.0, 50.0]),
+                MouseOp::Down(MouseButton::Right)
+            ]
+        );
+        assert_eq!(
+            feed(
+                &mut m,
+                HostPointerEvent::Mouse {
+                    action: action::SCROLL,
+                    buttons: 2,
+                    pos: [200.0, 100.0],
+                    wheel: -1.0,
+                }
+            ),
+            vec![MouseOp::MoveTo([100.0, 50.0]), MouseOp::Wheel(-1.0)]
+        );
+        // A bit that is no mouse button (a stylus's) changes nothing, so it puts nothing.
+        assert!(feed(&mut m, mouse(action::MOVE, 2 | 32, 200.0, 100.0)).is_empty());
+    }
+
+    #[test]
+    fn a_position_that_is_no_number_still_lets_go() {
+        let mut m = HostMouse::default();
+        feed(&mut m, mouse(action::DOWN, 1, 20.0, 20.0));
+        assert_eq!(
+            feed(&mut m, mouse(action::UP, 0, f32::NAN, 20.0)),
             vec![MouseOp::Up(MouseButton::Left)]
         );
         assert!(!m.holds_a_button());
+        // Nor does it take the cursor away.
+        assert!(feed(&mut m, mouse(action::HOVER_EXIT, 0, f32::NAN, f32::NAN)).is_empty());
     }
 
     #[test]
@@ -525,6 +604,7 @@ mod tests {
         assert_eq!(
             feed(&mut m, mouse(action::BUTTON_PRESS, 2 | 4, 10.0, 10.0)),
             vec![
+                MouseOp::MoveTo([5.0, 5.0]),
                 MouseOp::Down(MouseButton::Right),
                 MouseOp::Down(MouseButton::Middle)
             ]
@@ -532,10 +612,15 @@ mod tests {
         assert_eq!(
             feed(&mut m, mouse(action::BUTTON_PRESS, 4 | 8 | 16, 10.0, 10.0)),
             vec![
+                MouseOp::MoveTo([5.0, 5.0]),
                 MouseOp::Up(MouseButton::Right),
                 MouseOp::Down(MouseButton::Back),
                 MouseOp::Down(MouseButton::Forward)
             ]
+        );
+        assert_eq!(
+            BUTTONS.iter().fold(0, |all, (bit, _)| all | bit),
+            KNOWN_BUTTONS
         );
         let mut out = Vec::new();
         m.release_all(&mut out);
@@ -644,6 +729,23 @@ mod tests {
         // The pen and the keyboard are not the mouse's business.
         assert!(feed(&mut m, HostPointerEvent::PenHover(Some([1.0, 1.0]))).is_empty());
         assert!(feed(&mut m, HostPointerEvent::Keyboard).is_empty());
+    }
+
+    #[test]
+    fn what_android_does_on_its_own_is_not_the_player_using_the_mouse() {
+        assert!(mouse(action::HOVER_MOVE, 0, 1.0, 1.0).is_use());
+        assert!(mouse(action::DOWN, 1, 1.0, 1.0).is_use());
+        assert!(HostPointerEvent::Keyboard.is_use());
+        assert!(HostPointerEvent::Relative {
+            buttons: 0,
+            delta: [1.0, 0.0],
+            wheel: 0.0
+        }
+        .is_use());
+        // A touch on the screen or capture starting may end the mouse's hover or its stream.
+        assert!(!mouse(action::HOVER_EXIT, 0, 1.0, 1.0).is_use());
+        assert!(!mouse(action::CANCEL, 1, 1.0, 1.0).is_use());
+        assert!(!HostPointerEvent::PenHover(Some([1.0, 1.0])).is_use());
     }
 
     #[test]

@@ -121,12 +121,15 @@ final class PointerBridge {
      * its buttons (BUTTON5 and BUTTON4 in the game). The Back and Forward keys Android also makes
      * of them are dropped, so the side button is never Escape. With predictive back (Android 16)
      * the Back key goes to the back callback before it gets here; Rust then takes that press back
-     * (inilla-platform's MouseBackKeys). A hardware keyboard's key is noted.
+     * (inilla-platform's MouseBackKeys). The captured mouse's keys come from its relative source;
+     * they are dropped too (Rust counts a Back key's press, which comes with the button's, before
+     * the release it could be matched to). A hardware keyboard's key is noted.
      */
     static boolean onKey(KeyEvent e) {
         int code = e.getKeyCode();
         if ((code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_FORWARD)
-                && e.isFromSource(InputDevice.SOURCE_MOUSE)) {
+                && (e.isFromSource(InputDevice.SOURCE_MOUSE)
+                        || e.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE))) {
             return true;
         }
         if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0
