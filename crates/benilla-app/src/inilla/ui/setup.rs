@@ -102,33 +102,7 @@ pub(super) fn show(
             }
         }
 
-        if let Some((label, p)) = data.busy() {
-            ui.separator();
-            let frac = if p.bytes_total > 0 {
-                p.bytes_done as f32 / p.bytes_total as f32
-            } else if p.file_count > 0 {
-                p.file_index as f32 / p.file_count as f32
-            } else {
-                0.0
-            };
-            ui.label(format!("{label}: {} {}", p.state, p.file));
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .show_percentage()
-                    .desired_width(ui.available_width().min(560.0)),
-            );
-            if p.bytes_total > 0 {
-                ui.label(format!(
-                    "{:.2} of {:.2} GB",
-                    p.bytes_done as f64 / 1e9,
-                    p.bytes_total as f64 / 1e9
-                ));
-            }
-            // Vanillish: the folder copy pauses (and resumes) as the download does.
-            if matches!(label, "download" | "folder import") && ui.button("Pause").clicked() {
-                data.pause();
-            }
-            hint(ui, words::KEEP_OPEN);
+        if progress(ui, data) {
             return;
         }
 
@@ -311,6 +285,41 @@ pub(super) fn show(
             }
         }
     });
+}
+
+/// The running job, if any: what it is doing, the bar, the bytes, Pause. `true` while one runs.
+/// (Vanillish: the Connect screen shows its download with it too.)
+pub(super) fn progress(ui: &mut egui::Ui, data: &mut DataState) -> bool {
+    let Some((label, p)) = data.busy() else {
+        return false;
+    };
+    ui.separator();
+    let frac = if p.bytes_total > 0 {
+        p.bytes_done as f32 / p.bytes_total as f32
+    } else if p.file_count > 0 {
+        p.file_index as f32 / p.file_count as f32
+    } else {
+        0.0
+    };
+    ui.label(format!("{label}: {} {}", p.state, p.file));
+    ui.add(
+        egui::ProgressBar::new(frac)
+            .show_percentage()
+            .desired_width(ui.available_width().min(560.0)),
+    );
+    if p.bytes_total > 0 {
+        ui.label(format!(
+            "{:.2} of {:.2} GB",
+            p.bytes_done as f64 / 1e9,
+            p.bytes_total as f64 / 1e9
+        ));
+    }
+    // Vanillish: the folder copy pauses (and resumes) as the download does.
+    if matches!(label, "download" | "folder import") && ui.button("Pause").clicked() {
+        data.pause();
+    }
+    hint(ui, words::KEEP_OPEN);
+    true
 }
 
 /// Vanillish: **Import from folder…** — the picker, a copy left unfinished (Pause, a crash, the

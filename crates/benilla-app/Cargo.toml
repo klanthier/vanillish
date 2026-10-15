@@ -34,6 +34,9 @@ inilla-platform = { path = "../inilla-platform" }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 # iNilla's remote console speaks JSON (`inilla::console`); already in the tree.
 serde_json = "1"
+# Vanillish: quick connect's sign-up computes the account's SRP6 salt and verifier on the phone
+# (`inilla::connect`), so the password never leaves it; already in the tree via benilla-protocol.
+benilla-srp = { path = "../benilla-srp" }
 bevy.workspace = true
 wgpu.workspace = true
 # iNilla: not optional — iNilla's HUD and screens draw on the same egui lane in player builds

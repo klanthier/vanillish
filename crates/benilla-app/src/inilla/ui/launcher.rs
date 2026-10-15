@@ -5,6 +5,9 @@
 //!
 //! There is no registration here on purpose: 1.12's protocol has no way to create an account, and
 //! a server's own sign-up (its website, or `account create` on its console) is the place for it.
+//! Vanillish: a Vanillish server's own sign-up is its data host's `POST /accounts`, which the
+//! Connect screen uses (`ui::connect`); on Android the launcher leads there to add a server, and
+//! to create an account on a server that described itself.
 
 use bevy_egui::egui;
 
@@ -30,10 +33,16 @@ pub(crate) struct ServerForm {
     data_url: String,
     notes: String,
     errors: Vec<String>,
+    /// Vanillish: what the form does not show but an edit keeps — where the server described
+    /// itself, and the language picked for its data.
+    info: Option<String>,
+    locale: Option<String>,
+    /// Vanillish: a sentence over the form (why Connect opened it).
+    note: Option<String>,
 }
 
 impl ServerForm {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             port: "3724".into(),
             ..Default::default()
@@ -52,7 +61,35 @@ impl ServerForm {
             data_url: s.data.as_ref().map(|d| d.url.clone()).unwrap_or_default(),
             notes: s.notes.clone(),
             errors: Vec::new(),
+            info: s.info.clone(),
+            locale: s.data.as_ref().and_then(|d| d.locale.clone()),
+            note: None,
         }
+    }
+
+    /// Vanillish: a new server started from `p` (Connect found a plain realm there), with `note`
+    /// over the form.
+    pub(crate) fn prefilled(p: &ServerProfile, note: String) -> Self {
+        Self {
+            editing: None,
+            note: Some(note),
+            ..Self::from(p)
+        }
+    }
+
+    /// Vanillish: the edit form of `s`, a server the launcher has already, with `note` over it
+    /// (Connect found a plain realm at its address again).
+    pub(crate) fn edit_noted(s: &ServerProfile, note: String) -> Self {
+        Self {
+            note: Some(note),
+            ..Self::from(s)
+        }
+    }
+
+    /// The server the form edits; `None` for a new one.
+    #[cfg(test)]
+    pub(crate) fn editing(&self) -> Option<&str> {
+        self.editing.as_deref()
     }
 
     fn build(&self) -> Result<ServerProfile, Vec<String>> {
@@ -68,8 +105,13 @@ impl ServerForm {
         p.realm_override = opt(&self.realm_override);
         p.realm_name = opt(&self.realm_name);
         p.core = self.core;
-        p.data = opt(&self.data_url).map(|url| DataSource { url, token: None });
+        p.data = opt(&self.data_url).map(|url| DataSource {
+            url,
+            token: None,
+            locale: self.locale.clone(),
+        });
         p.notes = self.notes.trim().to_string();
+        p.info = self.info.clone();
         let errs = p.validate();
         if errs.is_empty() {
             Ok(p)
@@ -126,9 +168,7 @@ pub(super) fn show(
             ui,
             "Any 1.12.1 core works (vmangos, cMaNGOS). The server must have Warden turned off.",
         );
-        if ui.button("+ Add server").clicked() {
-            overlay.server_form = Some(ServerForm::new());
-        }
+        add_server(ui, overlay);
         return;
     }
 
@@ -165,9 +205,7 @@ pub(super) fn show(
                 }
             });
         ui.horizontal(|ui| {
-            if ui.button("+ Add server").clicked() {
-                overlay.server_form = Some(ServerForm::new());
-            }
+            add_server(ui, overlay);
             if let Some(s) = selected
                 .as_deref()
                 .and_then(|id| inilla.launcher.server(id))
@@ -277,6 +315,16 @@ pub(super) fn show(
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
+            // Vanillish: a server that described itself may take sign-ups: Connect asks it.
+            if words::quick_connect()
+                && server.info.is_some()
+                && ui.button(words::CREATE_ACCOUNT).clicked()
+            {
+                inilla.launcher.last_server = Some(server.id.clone());
+                inilla.launcher.last_account = None;
+                overlay.connect.create_another();
+                overlay.panel = Some(Panel::Connect);
+            }
             if ui.button("+ Add account").clicked() {
                 overlay.account_form = Some(AccountForm {
                     server: server.id.clone(),
@@ -299,11 +347,34 @@ pub(super) fn show(
     });
 }
 
+/// "+ Add server" — Vanillish: on Android "Connect to a server…", which asks the server itself and
+/// offers the manual form from there.
+fn add_server(ui: &mut egui::Ui, overlay: &mut Overlay) {
+    if !words::quick_connect() {
+        if ui.button("+ Add server").clicked() {
+            overlay.server_form = Some(ServerForm::new());
+        }
+        return;
+    }
+    if ui
+        .add(egui::Button::new(
+            egui::RichText::new(words::CONNECT_TO_SERVER).color(GOLD),
+        ))
+        .clicked()
+    {
+        overlay.panel = Some(Panel::Connect);
+    }
+}
+
 /// Returns `true` when the form is done (saved or cancelled).
 fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bool {
     let mut done = false;
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.label(egui::RichText::new(if f.editing.is_some() { "Edit server" } else { "Add server" }).strong());
+        // Vanillish: why Connect opened the form.
+        if let Some(note) = &f.note {
+            ui.colored_label(egui::Color32::YELLOW, note);
+        }
         row(ui, "Name", |ui| {
             ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("My vmangos").desired_width(320.0));
         });
@@ -379,6 +450,9 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
                     for account in inilla.launcher.remove_server(&id) {
                         inilla_platform::keychain::delete(&format!("account:{account}"));
                     }
+                    // Vanillish: and the access code Connect saved for its data, so no secret
+                    // outlives the server it was for.
+                    inilla_platform::keychain::delete(&DataSource::token_key(&id));
                     done = true;
                 }
             }

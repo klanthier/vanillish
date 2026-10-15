@@ -43,9 +43,22 @@ pub struct DataSource {
     /// `https://wow.example.com/data/`.
     pub url: String,
     /// Access token, sent as `Authorization: Bearer …`. Kept in the keychain when saved from the
-    /// app; a value here is honoured for hand-written files.
+    /// app (Vanillish: under [`DataSource::token_key`]); a value here is honoured for hand-written
+    /// files.
     #[serde(default)]
     pub token: Option<String>,
+    /// Vanillish: the language picked for this source (`enUS`, `deDE`, …; `None`: the host's
+    /// default), so a resumed download stays in it and never appends one language's bytes to
+    /// another's `.part`.
+    #[serde(default)]
+    pub locale: Option<String>,
+}
+
+impl DataSource {
+    /// Vanillish: the keychain key the access token of server `server_id`'s data is saved under.
+    pub fn token_key(server_id: &str) -> String {
+        format!("data-token:{server_id}")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +83,10 @@ pub struct ServerProfile {
     /// Free text for the player (who runs it, the website, …).
     #[serde(default)]
     pub notes: String,
+    /// Vanillish: where the server described itself (`server.json`'s base URL, `crate::connect`),
+    /// to ask it again after a relaunch or from the launcher. `None` for a server entered by hand.
+    #[serde(default)]
+    pub info: Option<String>,
 }
 
 fn default_auth_port() -> u16 {
@@ -88,6 +105,7 @@ impl ServerProfile {
             core: Core::default(),
             data: None,
             notes: String::new(),
+            info: None,
         }
     }
 
@@ -419,8 +437,37 @@ mod tests {
         let mut l = Launcher::default();
         let s = l.add_server(ServerProfile::new("home", "192.168.1.2"));
         l.add_account(Account::new(&s, "alice"));
-        l.last_server = Some(s);
+        l.last_server = Some(s.clone());
         let back: Launcher = toml::from_str(&toml::to_string(&l).unwrap()).unwrap();
         assert_eq!(l, back);
+        // Vanillish: what Connect adds.
+        let p = l.server_mut(&s).unwrap();
+        p.info = Some("http://192.168.1.2:8099/".into());
+        p.data = Some(DataSource {
+            url: "http://192.168.1.2:8099/".into(),
+            token: None,
+            locale: Some("deDE".into()),
+        });
+        let back: Launcher = toml::from_str(&toml::to_string(&l).unwrap()).unwrap();
+        assert_eq!(l, back);
+        assert_eq!(DataSource::token_key(&s), format!("data-token:{s}"));
+    }
+
+    /// Vanillish: a launcher file written before Connect existed still loads, with nothing set.
+    #[test]
+    fn an_older_launcher_file_loads() {
+        let old = r#"
+            last_server = "home-1"
+            [[servers]]
+            id = "home-1"
+            name = "home"
+            host = "192.168.1.2"
+            [servers.data]
+            url = "http://192.168.1.2:8099/"
+        "#;
+        let l: Launcher = toml::from_str(old).unwrap();
+        let s = l.current_server().unwrap();
+        assert_eq!((s.port, s.info.as_deref()), (DEFAULT_AUTH_PORT, None));
+        assert_eq!(s.data.as_ref().unwrap().locale, None);
     }
 }

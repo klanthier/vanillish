@@ -4,8 +4,11 @@
 //!
 //! Vanillish: every sentence that names the platform comes from [`words`]; on Android the screens
 //! also take the system Back first ([`back_to_screens`]) and tell the soft keyboard what the
-//! focused field holds ([`ime`]).
+//! focused field holds ([`ime`]). On Android the first screen is [`connect`]'s — the server's
+//! address, then its game files and an account — rather than the game-data setup.
 
+/// Vanillish: quick connect's screen (`Panel::Connect`).
+mod connect;
 mod editor;
 mod launcher;
 mod logs;
@@ -35,6 +38,8 @@ pub(crate) enum Panel {
     Settings,
     Editor,
     Logs,
+    /// Vanillish: quick connect.
+    Connect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -66,6 +71,11 @@ pub(crate) struct Overlay {
     /// The setup screen's download form.
     pub(crate) data_url: String,
     pub(crate) data_token: String,
+    /// Vanillish: the Connect screen's fields.
+    pub(crate) connect: connect::ConnectForm,
+    /// Vanillish: Connect, not the setup screen, is the screen without the game data (it was the
+    /// first one): the others lead back to it.
+    pub(crate) connect_home: bool,
     /// The one automatic login per launch has been spent.
     auto_login_done: bool,
     /// The clock the toasts are measured against (real time, updated every frame).
@@ -127,6 +137,11 @@ fn tick_clock(mut overlay: ResMut<Overlay>, time: Res<Time<Real>>) {
 
 /// What the player sees first: setup until the data is complete, then the launcher — unless the
 /// current account logs in on its own.
+///
+/// Vanillish: with quick connect (Android) Connect stands in for setup — unless the current
+/// server was entered by hand without a data source, whose player brings their own files — and
+/// opens over the login when there is no server yet, or the current one is a server it set up
+/// that has no account yet (the account was skipped before the relaunch).
 fn first_screen(
     mut overlay: ResMut<Overlay>,
     data: Res<DataState>,
@@ -139,8 +154,11 @@ fn first_screen(
         return;
     }
     *done = true;
+    let current = inilla.launcher.current_server();
     if !data.ready_at_boot {
-        overlay.panel = Some(Panel::Setup);
+        let quick = words::quick_connect() && current.is_none_or(|s| s.data.is_some());
+        overlay.connect_home = quick;
+        overlay.panel = Some(if quick { Panel::Connect } else { Panel::Setup });
         return;
     }
     if *client.get() != ClientState::Login {
@@ -154,6 +172,13 @@ fn first_screen(
                 return;
             }
         }
+    }
+    // No server yet (the files came another way), or one Connect set up with no account yet.
+    let unfinished = current
+        .is_none_or(|s| s.info.is_some() && inilla.launcher.accounts_for(&s.id).next().is_none());
+    if words::quick_connect() && unfinished {
+        overlay.panel = Some(Panel::Connect);
+        return;
     }
     // On a desktop the launcher waits for F10: benilla's own login screen (and `$WOW_USER`) is
     // the desktop workflow.
@@ -248,6 +273,7 @@ fn draw_panels(
     pad: Res<super::pad::PadHud>,
     build: Res<benilla_world::build_id::BuildId>,
     mut ime_purpose: ResMut<ImePurpose>,
+    mut quick: ResMut<super::connect::Connect>,
 ) -> Result {
     let Some(panel) = overlay.panel else {
         ime_purpose.set_if_neq(ImePurpose::Text);
@@ -282,6 +308,14 @@ fn draw_panels(
                         settings::show(ui, &mut overlay, &mut inilla, &data, &pad, &build)
                     }
                     Panel::Logs => logs::show(ui, &mut overlay),
+                    Panel::Connect => connect::show(
+                        ui,
+                        &mut overlay,
+                        &mut inilla,
+                        &mut data,
+                        &mut quick,
+                        &mut queue,
+                    ),
                     Panel::Editor => {}
                 }
             });
@@ -333,15 +367,25 @@ fn header(
             Panel::Settings => "Settings",
             Panel::Logs => "Session log",
             Panel::Editor => "Edit HUD",
+            Panel::Connect => words::CONNECT_TITLE,
         };
         ui.label(egui::RichText::new(title).size(20.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_close = panel != Panel::Setup || data_ready;
+            // Without the game data there is nothing behind the first screen to close it to.
+            let can_close = !matches!(panel, Panel::Setup | Panel::Connect) || data_ready;
             if can_close && ui.button("× Close").clicked() {
                 overlay.panel = None;
             }
             if panel != Panel::Settings && ui.button("⚙ Settings").clicked() {
                 overlay.panel = Some(Panel::Settings);
+            }
+            // Vanillish: back to Connect from the other ways to get the game files.
+            if panel == Panel::Setup
+                && !in_world
+                && words::quick_connect()
+                && ui.button(words::CONNECT_TITLE).clicked()
+            {
+                overlay.panel = Some(Panel::Connect);
             }
             if !in_world && panel != Panel::Launcher && data_ready && ui.button("Servers").clicked()
             {
@@ -426,9 +470,17 @@ fn take_back(overlay: &mut Overlay, data_ready: bool) -> bool {
             overlay.editor = EditorState::default();
         }
         Panel::Logs => overlay.panel = Some(Panel::Settings),
-        // Without the game data there is nothing behind the setup screen.
-        Panel::Setup if !data_ready => {}
-        _ if !data_ready => overlay.panel = Some(Panel::Setup),
+        // Without the game data there is nothing behind the first screen (Vanillish: Connect, when
+        // it was the first one), and the others lead back to it.
+        Panel::Connect if !data_ready => {}
+        Panel::Setup if !data_ready && !overlay.connect_home => {}
+        _ if !data_ready => {
+            overlay.panel = Some(if overlay.connect_home {
+                Panel::Connect
+            } else {
+                Panel::Setup
+            });
+        }
         _ => overlay.panel = None,
     }
     true
@@ -490,6 +542,27 @@ mod tests {
         assert_eq!(o.panel, Some(Panel::Setup));
         assert!(take_back(&mut o, false));
         assert_eq!(o.panel, Some(Panel::Setup));
+
+        // Vanillish: Connect first, it stays; the others — the setup screen too — lead back to it.
+        o.connect_home = true;
+        o.panel = Some(Panel::Connect);
+        assert!(take_back(&mut o, false));
+        assert_eq!(o.panel, Some(Panel::Connect));
+        for from in [Panel::Setup, Panel::Settings, Panel::Launcher] {
+            o.panel = Some(from);
+            assert!(take_back(&mut o, false));
+            assert_eq!(o.panel, Some(Panel::Connect), "from {from:?}");
+        }
+        // The manual form Connect opened closes first.
+        o.panel = Some(Panel::Launcher);
+        o.server_form = Some(super::ServerForm::new());
+        assert!(take_back(&mut o, false));
+        assert!(o.server_form.is_none());
+        assert_eq!(o.panel, Some(Panel::Launcher));
+        // With the game data, Connect closes like any screen.
+        o.panel = Some(Panel::Connect);
+        assert!(take_back(&mut o, true));
+        assert_eq!(o.panel, None);
     }
 
     /// Every symbol iNilla's HUD and screens print is in the font egui draws it with: a glyph the
@@ -509,6 +582,9 @@ mod tests {
             include_str!("settings.rs"),
             include_str!("setup.rs"),
             include_str!("words.rs"),
+            include_str!("connect.rs"),
+            include_str!("../connect.rs"),
+            include_str!("../../../../inilla-core/src/connect.rs"),
             include_str!("../console.rs"),
             include_str!("../../../../inilla-core/src/import.rs"),
             include_str!("../../../../inilla-platform/src/picker.rs"),

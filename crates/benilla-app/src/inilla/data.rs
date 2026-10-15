@@ -9,7 +9,8 @@
 //!
 //! Vanillish: a third way in, the **folder import** — a folder the player picks with the system's
 //! picker (Android's Storage Access Framework), copied in by `inilla_core::import` on the same
-//! job thread, with the same progress, Pause and resume as the download.
+//! job thread, with the same progress, Pause and resume as the download. Quick connect
+//! (`inilla::connect`) drives the same manifest and download jobs, and borrows the HTTP client.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use inilla_core::addons::{self as ka, AddonManifest, HostLocales, SyncReport};
+use inilla_core::connect;
 use inilla_core::data::{self as kd, DataStatus, Fetch, Manifest, Progress};
 use inilla_core::import as ki;
 use inilla_platform::picker::{self, Picked};
@@ -31,8 +33,9 @@ use super::ui::words;
 /// a PC still running into it must not be moved from under it.
 pub(crate) const SETTLE: Duration = Duration::from_secs(15);
 
-/// Room left beyond the archives themselves when a copy or download starts.
-const SPARE: u64 = 200_000_000;
+/// Room left beyond the archives themselves when a copy or download starts (Vanillish: quick
+/// connect's download checks the same).
+pub(crate) const SPARE: u64 = 200_000_000;
 
 /// What a finished job produced.
 enum Outcome {
@@ -406,25 +409,40 @@ fn free_space(_dir: &std::path::Path) -> Option<u64> {
     None
 }
 
-/// The HTTP half of the download, over `ureq` (rustls).
-struct Http {
+/// The HTTP half of the download, over `ureq` (rustls). Vanillish: quick connect's too
+/// (`inilla::connect`): its probe ([`Http::quick`]) and its sign-up ([`connect::Post`]).
+pub(crate) struct Http {
     agent: ureq::Agent,
     token: Option<String>,
 }
 
 impl Http {
-    fn new(token: Option<String>) -> Self {
+    pub(crate) fn new(token: Option<String>) -> Self {
+        Self::with_timeouts(token, 15, 60)
+    }
+
+    /// Vanillish: for a question, not a download — a host that does not answer within seconds
+    /// is not there (quick connect's probe and sign-up).
+    pub(crate) fn quick(token: Option<String>) -> Self {
+        Self::with_timeouts(token, 4, 10)
+    }
+
+    fn with_timeouts(token: Option<String>, connect: u64, read: u64) -> Self {
         Self {
             agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(15))
-                .timeout_read(Duration::from_secs(60))
+                .timeout_connect(Duration::from_secs(connect))
+                .timeout_read(Duration::from_secs(read))
                 .build(),
             token: token.filter(|t| !t.trim().is_empty()),
         }
     }
 
     fn get(&self, url: &str) -> ureq::Request {
-        let r = self.agent.get(url).set("User-Agent", words::APP);
+        self.signed(self.agent.get(url))
+    }
+
+    fn signed(&self, r: ureq::Request) -> ureq::Request {
+        let r = r.set("User-Agent", words::APP);
         match &self.token {
             Some(t) => r.set("Authorization", &format!("Bearer {}", t.trim())),
             None => r,
@@ -432,9 +450,31 @@ impl Http {
     }
 }
 
+/// Vanillish: what [`describe`] says when the data host refuses the token — how quick connect tells
+/// a wrong access code from any other failure, to ask for it again.
+pub(crate) const TOKEN_REFUSED: &str = "the server refused the token (401/403)";
+
+/// Vanillish: a sign-up's `POST`, JSON (the data host answers anything else with 415). A refusal's
+/// status still carries its JSON — why it refused — so a 4xx is an answer here; only no answer at
+/// all is an `Err`.
+impl connect::Post for Http {
+    fn post_json(&self, url: &str, json: &str) -> Result<(u16, String), String> {
+        let req = self
+            .signed(self.agent.post(url))
+            .set("Content-Type", "application/json");
+        match req.send_string(json) {
+            Ok(resp) | Err(ureq::Error::Status(_, resp)) => {
+                let status = resp.status();
+                Ok((status, resp.into_string().unwrap_or_default()))
+            }
+            Err(ureq::Error::Transport(t)) => Err(format!("could not reach the server: {t}")),
+        }
+    }
+}
+
 fn describe(e: ureq::Error) -> String {
     match e {
-        ureq::Error::Status(401 | 403, _) => "the server refused the token (401/403)".into(),
+        ureq::Error::Status(401 | 403, _) => TOKEN_REFUSED.into(),
         ureq::Error::Status(404, _) => "not found (404) — check the URL".into(),
         ureq::Error::Status(code, _) => format!("the server answered {code}"),
         ureq::Error::Transport(t) => format!("could not reach the server: {t}"),

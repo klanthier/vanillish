@@ -9,6 +9,8 @@
 //!   the HUD layout editor, the log viewer.
 //! - [`data`] — getting the game data onto the device: import from Documents, or a resumable,
 //!   verified download from a server the player runs.
+//! - [`connect`] — Vanillish: quick connect, Android's first screen: the server's address, then
+//!   its profile, its game files and an account, from what the server says about itself.
 //! - [`session`] — the launcher's account and server reaching benilla's login, the realm address
 //!   override, the automatic realm and character pick.
 //! - [`platform`] — the iOS host: window options, screen-awake, the audio session, the on-screen
@@ -25,6 +27,8 @@
 /// Vanillish: the Android host's Bevy side (soft keyboard, Back, the native window, lifecycle).
 mod android;
 pub(crate) mod boot;
+/// Vanillish: quick connect — the server's address to a profile, the game files and an account.
+mod connect;
 mod console;
 mod data;
 mod hints;
@@ -122,6 +126,7 @@ impl Plugin for InillaPlugin {
             android::AndroidPlugin,
             screen::ScreenPlugin,
             host_pointer::HostPointerPlugin,
+            connect::ConnectPlugin,
         ));
 
         // The seams. The mouse lands before Bevy's input systems so every reader sees it as a
