@@ -60,17 +60,17 @@ struct TerrainVsOut {
     @location(2) uv: vec2<f32>,
     @location(3) uv_b: vec2<f32>,
     @location(4) color: vec4<f32>,
-#ifdef VANILLISH_MODERN
-    // Vanillish: the modern look lights per pixel, so in place of the Gouraud terms the MCNR
-    // normal and the chunk's three point lights (indices + 1, 0 an empty slot).
-    @location(1) vm_normal: vec3<f32>,
-    @location(7) @interpolate(flat) vm_lights: vec3<u32>,
-#else
     @location(5) specular: vec3<f32>,
     // The Gouraud diffuse, summed and clamped per vertex as GL T&L does: an over-gamut light (a
     // carried torch is (1.4, 0.87, 0.40)) saturates one vertex and falls off linearly from it,
     // where clamping per pixel would pin a wide plateau at white.
     @location(6) primary: vec3<f32>,
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look keeps both Gouraud terms as its baseline (`primary` without the
+    // point lights, which it lights per pixel), and takes the MCNR normal the relief tilts and the
+    // chunk's three point lights (indices + 1, 0 an empty slot).
+    @location(1) vm_normal: vec3<f32>,
+    @location(7) @interpolate(flat) vm_lights: vec3<u32>,
 #endif
 }
 
@@ -170,15 +170,15 @@ fn vm_pick_lights(anchor: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(sel[0], sel[1], sel[2]);
 }
 
-// The picked lights at a pixel, on its relief normal.
-fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
+// The picked lights at a pixel, on its relief.
+fn vm_lights_at(P: vec3<f32>, r: vm::Relief, sel: vec3<u32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < 3u; s = s + 1u) {
         if (sel[s] == 0u) {
             break;
         }
         let i = sel[s] - 1u;
-        sum += vm::point_light(P, N, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
+        sum += vm::point_light(P, r, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
     }
     return sum;
 }
@@ -211,12 +211,6 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     out.uv_b = in.uv_b;
     out.color = in.color;
 
-#ifdef VANILLISH_MODERN
-    // Vanillish: the modern look lights per pixel; the vertex hands on the normal and the chunk's
-    // three lights, picked from the same anchor.
-    out.vm_normal = world_normal;
-    out.vm_lights = vm_pick_lights(mcnk_cell_anchor(out.world_position.xyz));
-#else
     // Sun specular per vertex: white material, row-9 colour, shininess `light_spec.w` (20), local
     // viewer; clamped here, then Gouraud-interpolated.
     let n = normalize(world_normal);
@@ -229,13 +223,20 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     // The whole diffuse sum on the MCNR normal, clamped per vertex: ambient, sun N·L, and the
     // chunk's three nearest point lights with their over-gamut colours raw.
     let ndotl = max(dot(n, l), 0.0);
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look keeps this sum as its baseline but lights the point lights per
+    // pixel, so the vertex hands on the normal and the chunk's three lights, from the same anchor.
+    out.vm_normal = world_normal;
+    out.vm_lights = vm_pick_lights(mcnk_cell_anchor(out.world_position.xyz));
+    let points = vec3<f32>(0.0);
+#else
     let points = point_light_sum(out.world_position.xyz, n, mcnk_cell_anchor(out.world_position.xyz));
+#endif
     out.primary = clamp(
         wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl + points,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
-#endif
     return out;
 }
 
@@ -291,8 +292,10 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // its splat weight (luma is linear, so this is the blended colour's luminance). It tilts the
     // MCNR normal along the tile's axes: u runs +X and v +Z (`benilla_formats::terrain`: columns
     // step east, rows south; Bevy x, z = −WoW y, −WoW x), each projected into the surface plane.
-    // The reference's terms are then lit per pixel on it: the diffuse sum clamped as before, and
-    // row 9's sheen, still masked by `_s`.
+    // The stock Gouraud terms stay the baseline and the relief moves the light around them: the
+    // sun's colour times its change to N·L inside the same clamp, the point lights per pixel on
+    // the relief, and row 9's glare scaled by the relief's tilt toward the highlight, plus a small
+    // per-pixel sheen, still masked by `_s`.
     let vm_tap = vm::taps(vm_d, vec2<f32>(textureDimensions(layer_array).xy), view.mip_bias);
     let vm_w = vec4<f32>(
         (1.0 - a.r) * (1.0 - a.g) * (1.0 - a.b),
@@ -326,16 +329,18 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     let vm_l = -normalize(wow_light.light_sun.xyz);
     let vm_v = normalize(view.world_position.xyz - in.world_position.xyz);
     let primary = clamp(
-        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * max(dot(vm_r.n, vm_l), 0.0)
-            + vm_lights_at(in.world_position.xyz, vm_r.n, in.vm_lights),
+        in.primary + wow_light.light_diffuse.rgb * vm::lambert(vm_r, vm_l)
+            + vm_lights_at(in.world_position.xyz, vm_r, in.vm_lights),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
-    let vm_spec = clamp(
-        wow_light.light_spec.rgb * vm::sheen(vm_r.n, vm_l, vm_v, wow_light.light_spec.w),
+    let vm_sheen = clamp(
+        wow_light.light_spec.rgb * vm::sheen(vm::tilted(vm_r), vm_l, vm_v, wow_light.light_spec.w),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
-    ) * (vm::TERRAIN_SHEEN * vm::SHEEN);
+    );
+    let vm_spec = in.specular * vm::glare(vm_r, normalize(vm_l + vm_v))
+        + vm_sheen * (vm::TERRAIN_SHEEN * vm::SHEEN);
 #else
     let primary = in.primary;
 #endif
@@ -355,7 +360,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     //   diffuse  = tex · primary · (0.3·shadow + 0.7)   (a flat −30% in shadow, no tint)
     //   specular = sheen · mask · shadow                 (none in shadow)
 #ifdef VANILLISH_MODERN
-    // Vanillish: the modern look's cavity darkens the diffuse term; its sheen replaces the
+    // Vanillish: the modern look's cavity on the diffuse term; its glare in place of the
     // vertex's, under the same mask and shadow.
     let diffuse_term = color * primary * (0.3 * shadow_lit + 0.7) * vm_r.cavity;
     let spec_term = vm_spec * specmask * shadow_lit;

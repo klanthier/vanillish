@@ -90,7 +90,7 @@ change that adds Android behaviour is.
 | `crates/benilla-assets/Cargo.toml` | dev-dependencies `naga` and `naga_oil`, for the world shaders' composition tests (`modern_light::compose_tests`); both already in the graph through Bevy, with no feature added |
 | `crates/benilla-assets/src/lib.rs` | `mod modern_light` and its exports: the opt-in modern lighting look, boot-latched like the texture filter |
 | `crates/benilla-assets/src/materials.rs` | `register_shaders` loads `vanillish_modern.wgsl` as an import library (embeds it only where there is no `Shader` asset); the terrain, model, WDL and liquid materials' `specialize` (new on terrain and WDL) push `modern_lighting()`'s defs |
-| `crates/benilla-assets/src/shaders/terrain.wgsl`, `wow_model.wgsl`, `liquid.wgsl`, `crates/benilla-world/src/shaders/static_gx.wgsl` | the modern lighting path, every line behind `#ifdef VANILLISH_MODERN` (with the def off, each file is today's token for token): the sun and the three picked point lights per pixel on a relief normal from four albedo taps, the cavity, the sheen; on water the sheen per pixel and the fresnel sky lift. A benilla change to these files' lighting may need its twin in the modern path: the composition tests prove only that it still compiles |
+| `crates/benilla-assets/src/shaders/terrain.wgsl`, `wow_model.wgsl`, `liquid.wgsl`, `crates/benilla-world/src/shaders/static_gx.wgsl` | the modern lighting path, every line behind `#ifdef VANILLISH_MODERN` (with the def off, each file is today's token for token): the stock lighting kept as the baseline and moved around it by a zero-mean relief from four albedo taps (each lane's own first-order change along the slope), the two-sided cavity, terrain's stock glare scaled by the relief, the sheen, the three picked point lights per pixel; on water the sheen per pixel and the fresnel sky lift. A benilla change to these files' lighting may need its twin in the modern path: the composition tests prove only that it still compiles |
 | `crates/benilla-world/src/static_gx/render.rs` | the four pipelines take `modern_lighting()`'s defs |
 | `crates/benilla-world/src/worldview.rs` | logs which lighting look the run renders (`$VANILLISH_MODERN`), so a before/after pair proves its variant |
 | `crates/benilla-app/src/lib.rs`, `crates/benilla-app/src/game_plugins.rs` | `mod modern_lighting` and its plugin (the `modernLighting` knob and boot latch), before `CvarPlugin` |
@@ -141,7 +141,7 @@ name: `inilla-core/src/{fold,import,connect}.rs`, `inilla-platform/src/{picker,p
 `inilla-platform/src/gamepad/android.rs`, `inilla-platform/src/android/`, and in
 `benilla-app/src/inilla/`: `android.rs`, `screen.rs`, `host_pointer.rs`, `connect.rs`,
 `ui/connect.rs`, `ui/words.rs`. In benilla's crates, the modern lighting look's:
-`benilla-assets/src/modern_light.rs`, `benilla-assets/src/modern_light/compose_tests.rs`,
+`benilla-assets/src/modern_light.rs`, `benilla-assets/src/modern_light/{compose,relief}_tests.rs`,
 `benilla-assets/src/shaders/vanillish_modern.wgsl` and `benilla-app/src/modern_lighting.rs`.
 
 Neither benilla nor iNilla builds for Android, so nothing there notices a change that breaks the

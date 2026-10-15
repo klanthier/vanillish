@@ -237,17 +237,23 @@ fn vm_pick_lights(anchor: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(sel[0], sel[1], sel[2]);
 }
 
-// The picked lights at a pixel, on its relief normal.
-fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
+// The picked lights at a pixel, on its relief.
+fn vm_lights_at(P: vec3<f32>, r: vm::Relief, sel: vec3<u32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < 3u; s = s + 1u) {
         if (sel[s] == 0u) {
             break;
         }
         let i = sel[s] - 1u;
-        sum += vm::point_light(P, N, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
+        sum += vm::point_light(P, r, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
     }
     return sum;
+}
+
+// An order-2 SH lobe's change along the relief: the coefficient rows of one channel (`lin` the
+// linear band, `quad` the four quadratic terms, `x2y2` the fifth) dotted with `vm::sh_delta`.
+fn vm_sh_change(lin: vec3<f32>, quad: vec4<f32>, x2y2: f32, d: vm::ShDelta) -> f32 {
+    return dot(lin, d.linear) + dot(quad, d.quad) + x2y2 * d.saddle;
 }
 
 // The M2 texture transform's linear part (the fragment's `uv'`, less its translation), for the UV
@@ -700,8 +706,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // Bevy negates `world_normal` on back faces of double-sided materials (foliage, every WMO
     // face); the reference never enables GL_LIGHT_MODEL_TWO_SIDE (`0x59ce30`), so undo it.
 #ifdef VANILLISH_MODERN
-    // Vanillish: the modern look tilts that normal by the relief, and every lane below reads the
-    // tilted one: the N·L, the SH lobe, the probes and the per-pixel point lights. Only lit,
+    // Vanillish: the modern look's relief on that normal. Every lane below lights the normal
+    // itself, as stock does; the relief moves the light sum around it, after the lanes. Only lit,
     // textured world batches take it: not an unlit (or M2 Mod/Mod2x) batch, an additive card, a
     // multiply blend, a depth-prime twin, an env-mapped stage, a UI model tile or a glue rig. The
     // gate is uniform data, so the branch is uniform too.
@@ -729,7 +735,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let vm_alpha = pbr_input.material.flags
             & pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
         vm_r = vm_model_relief(
-            vm_r.n,
+            vm_r.normal,
             vo.uv,
             vm_d,
             view.mip_bias + select(0.0, DETAIL_DOODAD_LOD_BIAS, is_clutter),
@@ -738,10 +744,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         );
     }
 #endif
-    let n_lit = vm_r.n;
-#else
-    let n_lit = select(-n_m2, n_m2, is_front);
 #endif
+    let n_lit = select(-n_m2, n_m2, is_front);
     let ndotl = max(dot(n_lit, L), 0.0);
     let lit_nl = clamp(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl, vec3<f32>(0.0), vec3<f32>(1.0));
     // The order-2 SH basis, shared by the exterior lobe and the interior probes.
@@ -858,8 +862,53 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     }
     let sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
 #ifdef VANILLISH_MODERN
-    // Vanillish: the vertex stage's three lights, per pixel on the relief normal.
-    let point_diffuse = vm_lights_at(in.world_position.xyz, n_lit, in.vm_lights);
+    // Vanillish: the relief's change to `lit`, each lane's own first-order response to the slope:
+    // the light's colour times the change to N·L on the FFP lanes (the sun, the WINDOW pair,
+    // weighted as the class weights its lit pass), the lobe's or the probe's derivative on the SH
+    // lanes. A bump and its mirror image cancel, so the batch keeps its stock brightness. It rides
+    // with the vertex stage's three lights, lit per pixel on the relief: both add to `lit` inside
+    // the combine's clamp. The glue rig takes no relief (`vm_on`), so no lane of its own here.
+    let vm_dl = vm::lambert(vm_r, L);
+    let vm_sh = vm::sh_delta(vm_r);
+    let vm_d_doodad = intensity * vec3<f32>(
+        vm_sh_change(wow_light.sh_c10_r.xyz, wow_light.sh_c13_r, wow_light.sh_c16.x, vm_sh),
+        vm_sh_change(wow_light.sh_c10_g.xyz, wow_light.sh_c13_g, wow_light.sh_c16.y, vm_sh),
+        vm_sh_change(wow_light.sh_c10_b.xyz, wow_light.sh_c13_b, wow_light.sh_c16.z, vm_sh),
+    );
+    let vm_d_nl = wow_light.light_diffuse.rgb * vm_dl;
+    let vm_d_int_base = select(vm_d_nl, window_mid * vm_dl, m.sidn.w > 0.5);
+    var vm_d_wmo_interior = vec3<f32>(0.0);
+    if (m.tint.w > 1.5) {
+        vm_d_wmo_interior = vm_d_int_base * trans_a;
+    } else if (m.tint.w < 0.5) {
+        vm_d_wmo_interior = vm_d_int_base;
+    }
+    let vm_d_m2_interior = vec3<f32>(
+        vm_sh_change(
+            wow_light.prop_probes[probe + 0u].xyz,
+            wow_light.prop_probes[probe + 3u],
+            wow_light.prop_probes[probe + 6u].x,
+            vm_sh,
+        ),
+        vm_sh_change(
+            wow_light.prop_probes[probe + 1u].xyz,
+            wow_light.prop_probes[probe + 4u],
+            wow_light.prop_probes[probe + 6u].y,
+            vm_sh,
+        ),
+        vm_sh_change(
+            wow_light.prop_probes[probe + 2u].xyz,
+            wow_light.prop_probes[probe + 5u],
+            wow_light.prop_probes[probe + 6u].z,
+            vm_sh,
+        ),
+    );
+    let vm_d_lit = select(
+        select(vm_d_nl, vm_d_doodad, use_doodad_shade),
+        select(vm_d_m2_interior, vm_d_wmo_interior, is_wmo),
+        is_interior,
+    );
+    let point_diffuse = vm_lights_at(in.world_position.xyz, vm_r, in.vm_lights) + vm_d_lit;
 #else
     let point_diffuse = in.point_lit;
 #endif
@@ -938,9 +987,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         rgb = base.rgb;
     }
 #ifdef VANILLISH_MODERN
-    // Vanillish: the relief's cavity on the lit colour, then the sun's sheen on exterior lit
-    // surfaces: none indoors, on clutter, or on a doodad or unit in MCSH shade, and a WMO's MOCV
-    // (its baked occlusion) dims it. The sum stays in the frame's [0, 1].
+    // Vanillish: the relief's cavity on the lit colour, then the sun's sheen on the relief's
+    // normal on exterior lit surfaces: none indoors, on clutter, or on a doodad or unit in MCSH
+    // shade, and a WMO's MOCV (its baked occlusion) dims it. The sum stays in the frame's [0, 1].
     if (vm_on) {
         var vm_sheen = vec3<f32>(0.0);
         if (!is_interior && !is_clutter) {
@@ -952,7 +1001,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
                 vm_occ = in.color.rgb;
             }
 #endif
-            let vm_s = vm::sheen(n_lit, L, vm_v, vm::MODEL_SHININESS) * vm::gloss(vm_lum) * vm_sun;
+            let vm_s = vm::sheen(vm::tilted(vm_r), L, vm_v, vm::MODEL_SHININESS)
+                * vm::gloss(vm_lum) * vm_sun;
             vm_sheen = vm_occ * vm::sheen_rgb(wow_light.light_diffuse.rgb, vm_tex, vm_s);
         }
         rgb = clamp(rgb * vm_r.cavity + vm_sheen, vec3<f32>(0.0), vec3<f32>(1.0));

@@ -3,20 +3,28 @@
 //! `VANILLISH_MODERN` (with its two strength values) is pushed into the terrain, model, WDL and
 //! liquid materials' `specialize` and into the static_gx pipelines, whose WGSL then:
 //!
-//! - lights the sun (the zone's `Light.dbc` direct and ambient colours, the same sun direction)
-//!   per pixel, terrain's Gouraud diffuse and row-9 specular included;
-//! - tilts the normal by a relief read from the albedo itself: four extra taps of the texture at
-//!   one texel of the main sample's mip, luminance as height, in a tangent frame built from
-//!   screen-space derivatives (Schüler's cotangent frame), so no mesh needs tangents or new assets;
-//! - darkens the cavities those taps find (cracks between bricks and planks);
-//! - adds a soft, warm Blinn-Phong sheen on exterior lit surfaces, gated by the texel's
-//!   luminance (terrain keeps its authored `_s` mask);
-//! - lights the three point lights each draw already picks per pixel, so a torch throws a round
-//!   pool instead of a vertex diamond;
+//! - keeps the stock lighting as its baseline, computed as stock computes it (terrain's Gouraud
+//!   diffuse and row-9 glare per vertex, the model lanes' N·L, SH lobes and probes per pixel);
+//! - reads a relief from the albedo itself: four extra taps of the texture at one texel of the
+//!   main sample's mip, luminance as height, in a tangent frame built from screen-space
+//!   derivatives (Schüler's cotangent frame), so no mesh needs tangents or new assets;
+//! - moves the light around the baseline by that relief, never its average: each lane's own
+//!   first-order change along the slope (the sun's colour times the change to N·L, an SH lobe's
+//!   derivative), so a bump and its mirror image cancel and the scene keeps its stock brightness;
+//! - scales terrain's stock glare by the relief's tilt toward the highlight, so it sparkles along
+//!   edges where it is, and adds a small per-pixel sheen beside it (under the `_s` mask);
+//! - shades the cavities and ridges those taps find, two-sided around one (cracks between bricks
+//!   and planks a little darker, their tops a little lighter);
+//! - adds a soft, warm Blinn-Phong sheen on exterior lit model surfaces, gated by the texel's
+//!   luminance;
+//! - lights the three point lights each draw already picks per pixel, on the relief, so a torch
+//!   throws a round pool instead of a vertex diamond;
 //! - on water, the sun sheen per pixel and a fresnel lift toward the sky colour at grazing views.
 //!
-//! The shared maths is `shaders/vanillish_modern.wgsl`. Everything stays in the gamma space the
-//! frame expects (the UI gamma contract, the FFX combine): no new pass, no new render target.
+//! The shared maths is `shaders/vanillish_modern.wgsl`, with a Rust twin in `relief_tests` that
+//! checks it averages to the baseline and reads at the tuned strengths. Everything stays in the
+//! gamma space the frame expects (the UI gamma contract, the FFX combine): no new pass, no new
+//! render target.
 //!
 //! A process global, as [`crate::tex_filter`] is, because a pipeline's defs are fixed when it is
 //! specialized, by render-world code that shares no resource with the CVar table. Latched at boot:
@@ -148,6 +156,8 @@ pub fn modern_lighting() -> ModernLighting {
 
 #[cfg(test)]
 mod compose_tests;
+#[cfg(test)]
+mod relief_tests;
 
 #[cfg(test)]
 mod tests {

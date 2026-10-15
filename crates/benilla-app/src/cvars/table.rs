@@ -721,9 +721,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — 1.12 has no player-side perf log; its nearest thing is the \
          Ctrl+R framerate label, a number with no file behind it",
     ),
-    // Vanillish: the opt-in modern lighting look (`benilla_assets::ModernLighting`): the sun and
-    // the point lights per pixel, relief and cavities read from the albedo, a soft sun sheen, the
-    // water's sky lift. Read once at boot (`crate::modern_lighting`), so a change applies at the
+    // Vanillish: the opt-in modern lighting look (`benilla_assets::ModernLighting`): the stock
+    // light with a zero-mean relief and cavities read from the albedo around it, the point lights
+    // per pixel, a soft sun sheen, the water's sky lift. Read once at boot (`crate::modern_lighting`), so a change applies at the
     // next launch; `$VANILLISH_MODERN` overrides it for the session.
     ours(
         "modernLighting",

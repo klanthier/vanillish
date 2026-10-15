@@ -312,15 +312,18 @@ Nothing steps the preset down by itself yet.
 Settings → General → **Modern lighting (restart)**, off by default, keeps the game's hand-painted
 textures and changes how they are lit. It applies at the next start. With it on:
 
-- **Sunlight per pixel.** The zone's own sun and ambient colours (`Light.dbc`) and the same sun
-  direction, evaluated per pixel instead of per vertex, so the ground no longer shades in 4-yard
-  steps.
-- **Relief from the textures.** Each texel's brightness is read as height: four extra texture
-  reads per pixel tilt the surface normal, so bricks, planks, bark and cobbles catch the light,
-  and the cracks between them darken a little. No new art, and no tangent data in the models.
+- **The stock light, plus relief.** The scene's lighting is the stock look's, computed the same
+  way: the same brightness, colours and sunlit glare on the ground. On top of it, each texel's
+  brightness is read as height (four extra texture reads per pixel), and the light moves around
+  the stock value by that relief: the side of a crack, a brick joint or a plank seam that faces
+  the sun brightens and the other darkens by as much, so the surface reads as 3D without getting
+  darker or lighter overall. The cracks themselves shade a little darker and the tops a little
+  lighter. No new art, and no tangent data in the models.
+- **A glinting glare.** The ground's sun glare stays where the stock look puts it and sparkles
+  along the relief's edges, with a small, sharp hot spot (terrain's own highlight masks, the `_s`
+  textures, still decide where it shows).
 - **A soft sheen.** A small, warm highlight from the sun on bright texels (painted metal, glazed
-  stone, leaves) of outdoor surfaces; terrain keeps its own highlight masks (the `_s` textures).
-  None indoors or in shade.
+  stone, leaves) of outdoor models and buildings. None indoors or in shade.
 - **Round torch pools.** The three point lights each surface already picks are lit per pixel, so a
   torch throws a round pool instead of a diamond on the ground.
 - **Water.** The sun's glint per pixel, and a grazing view lifts the water toward the sky's colour
@@ -334,8 +337,9 @@ watch **Show frame rate, memory and heat** (above) at 120.
 On a computer the same look is `/console modernLighting 1` (or the row in F10's Settings, which
 shows and writes that CVar) and a restart, or, for one session, `VANILLISH_MODERN=1` (which wins
 over the setting). `VANILLISH_RELIEF` and `VANILLISH_SHEEN` set
-the relief's and the sheen's strength in percent (100 by default, 0 to 400). The world viewer shows
-a before and after of one spot:
+the relief's and the sheen's strength in percent (100 by default, 0 to 400; at 0 each, land and
+buildings are lit as in the stock look, but for the round torch pools). The world viewer shows a
+before and after of one spot:
 
 ```sh
 WOW_MAP=1 WOW_WORLDVIEW_AT=-618.5,-4251.7,38.7 WOW_CLOCK=600 \
@@ -344,8 +348,9 @@ VANILLISH_MODERN=1 WOW_MAP=1 WOW_WORLDVIEW_AT=-618.5,-4251.7,38.7 WOW_CLOCK=600 
   WOW_WORLDVIEW_SHOT=/tmp/after.png cargo run -p benilla-worldview
 ```
 
-(the Valley of Trials, at ten in the morning; `cargo test -p benilla-assets --lib compose_tests`
-checks that every world shader still compiles both ways).
+(the Valley of Trials, at ten in the morning; `cargo test -p benilla-assets --lib modern_light`
+checks that every world shader still compiles both ways, and that the relief averages to the stock
+light at the tuned strengths).
 
 ## The soft keyboard and the chat bar
 

@@ -146,17 +146,22 @@ fn vm_pick_lights(anchor: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(sel[0], sel[1], sel[2]);
 }
 
-// The picked lights at a pixel, on its relief normal.
-fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
+// The picked lights at a pixel, on its relief.
+fn vm_lights_at(P: vec3<f32>, r: vm::Relief, sel: vec3<u32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < 3u; s = s + 1u) {
         if (sel[s] == 0u) {
             break;
         }
         let i = sel[s] - 1u;
-        sum += vm::point_light(P, N, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
+        sum += vm::point_light(P, r, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
     }
     return sum;
+}
+
+// An order-2 SH lobe's change along the relief (wow_model.wgsl's `vm_sh_change`).
+fn vm_sh_change(lin: vec3<f32>, quad: vec4<f32>, x2y2: f32, d: vm::ShDelta) -> f32 {
+    return dot(lin, d.linear) + dot(quad, d.quad) + x2y2 * d.saddle;
 }
 
 // One relief tap: the repeat sampler, a clamped axis held `inset` in, as `uv_mixed` is.
@@ -291,8 +296,9 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
 #ifdef VANILLISH_MODERN
-    // Vanillish: the modern look tilts that normal by the relief (wow_model.wgsl's), on textured,
-    // lit batches; every lane below reads the tilted one.
+    // Vanillish: the modern look's relief on that normal (wow_model.wgsl's), on textured, lit
+    // batches. Every lane below lights the normal itself, as stock does, and adds the relief's
+    // change to its light sum inside its clamp: its own first-order response to the slope.
     let vm_on = (in.word & (WORD_TEXTURED | WORD_UNLIT)) == WORD_TEXTURED;
     let vm_lum = vm::luma(base.rgb);
     var vm_r = vm::unrelieved(wow_normalize(in.world_normal));
@@ -313,13 +319,11 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
 #else
         let vm_h = vm::heights(vm_l, vm_rt, vm_dn, vm_up, vm_lum, false);
 #endif
-        let vm_f = vm::cotangent_frame(vm_r.n, vm_d);
-        vm_r = vm::relief(vm_r.n, vm_f.t, vm_f.b, vm_h, vm_lum);
+        let vm_f = vm::cotangent_frame(vm_r.normal, vm_d);
+        vm_r = vm::relief(vm_r.normal, vm_f.t, vm_f.b, vm_h, vm_lum);
     }
-    let n_lit = vm_r.n;
-#else
-    let n_lit = wow_normalize(in.world_normal);
 #endif
+    let n_lit = wow_normalize(in.world_normal);
     let L = -normalize(wow_light.light_sun.xyz);
     let ndotl = max(dot(n_lit, L), 0.0);
     let lit_nl = clamp(
@@ -379,11 +383,34 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         }
         let sidn_e = sidn_rgb * (wow_light.grade.x * sidn_w);
         // GL_COLOR_MATERIAL: MOCV multiplies the lit terms inside the clamp; emission adds beside.
+#ifdef VANILLISH_MODERN
+        // Vanillish: the relief's change to `lit_wmo`: the light's colour (the sun, or the
+        // WINDOW pair) times the change to N·L, weighted as the class weights its lit pass.
+        let vm_dl = vm::lambert(vm_r, L);
+        let vm_d_int_base = select(
+            wow_light.light_diffuse.rgb,
+            window_mid,
+            (in.word & WORD_WINDOW) != 0u,
+        ) * vm_dl;
+        var vm_d_int = vec3<f32>(0.0);
+        if (class_trans) {
+            vm_d_int = vm_d_int_base * trans_a;
+        } else if (!class_int) {
+            vm_d_int = vm_d_int_base;
+        }
+        let vm_d = select(wow_light.light_diffuse.rgb * vm_dl, vm_d_int, interior);
+        let primary = clamp(
+            vc.rgb * (lit_wmo + in.point_lit + vm_d) + sidn_e,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+#else
         let primary = clamp(
             vc.rgb * (lit_wmo + in.point_lit) + sidn_e,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
+#endif
         // The entity path's algebra: (tex×vc)/max(vc, 1/255) is not tex in floats; keep it.
         let tex_rgb = folded / max(vc.rgb, vec3<f32>(1.0 / 255.0));
         rgb = tex_rgb * primary;
@@ -417,7 +444,33 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
+#ifdef VANILLISH_MODERN
+        // Vanillish: the relief's change to the probe: its own derivative along the slope.
+        let vm_sh = vm::sh_delta(vm_r);
+        let vm_d = vec3<f32>(
+            vm_sh_change(
+                wow_light.prop_probes[probe + 0u].xyz,
+                wow_light.prop_probes[probe + 3u],
+                wow_light.prop_probes[probe + 6u].x,
+                vm_sh,
+            ),
+            vm_sh_change(
+                wow_light.prop_probes[probe + 1u].xyz,
+                wow_light.prop_probes[probe + 4u],
+                wow_light.prop_probes[probe + 6u].y,
+                vm_sh,
+            ),
+            vm_sh_change(
+                wow_light.prop_probes[probe + 2u].xyz,
+                wow_light.prop_probes[probe + 5u],
+                wow_light.prop_probes[probe + 6u].z,
+                vm_sh,
+            ),
+        );
+        let primary = clamp(lit_prop + in.point_lit + vm_d, vec3<f32>(0.0), vec3<f32>(1.0));
+#else
         let primary = clamp(lit_prop + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
+#endif
         rgb = folded * primary;
     } else {
         // ---- exterior ADT doodads and exterior MODD props ----
@@ -449,9 +502,22 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         let lit = select(lit_nl, lit_doodad, wow_light.light_sun.w > 0.5);
         // FFP combine: the light sum saturates first, then the texture modulates it.
 #ifdef VANILLISH_MODERN
-        // Vanillish: the vertex stage's three lights, per pixel on the relief normal.
-        let vm_points = vm_lights_at(in.world_position.xyz, n_lit, in.vm_lights);
-        let primary = clamp(lit + vm_points, vec3<f32>(0.0), vec3<f32>(1.0));
+        // Vanillish: the relief's change to `lit` (the lobe's derivative along the slope, or the
+        // sun's colour times the change to N·L on the matte fallback), and the vertex stage's
+        // three lights, per pixel on the relief.
+        let vm_sh = vm::sh_delta(vm_r);
+        let vm_d_doodad = intensity * vec3<f32>(
+            vm_sh_change(wow_light.sh_c10_r.xyz, wow_light.sh_c13_r, wow_light.sh_c16.x, vm_sh),
+            vm_sh_change(wow_light.sh_c10_g.xyz, wow_light.sh_c13_g, wow_light.sh_c16.y, vm_sh),
+            vm_sh_change(wow_light.sh_c10_b.xyz, wow_light.sh_c13_b, wow_light.sh_c16.z, vm_sh),
+        );
+        let vm_d = select(
+            wow_light.light_diffuse.rgb * vm::lambert(vm_r, L),
+            vm_d_doodad,
+            wow_light.light_sun.w > 0.5,
+        );
+        let vm_points = vm_lights_at(in.world_position.xyz, vm_r, in.vm_lights);
+        let primary = clamp(lit + vm_points + vm_d, vec3<f32>(0.0), vec3<f32>(1.0));
 #else
         let primary = clamp(lit + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
 #endif
@@ -462,8 +528,9 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         rgb = folded;
     }
 #ifdef VANILLISH_MODERN
-    // Vanillish: the relief's cavity, then the sun's sheen on exterior surfaces (none indoors or
-    // on a doodad in MCSH shade; a WMO's MOCV dims it), inside the frame's [0, 1].
+    // Vanillish: the relief's cavity, then the sun's sheen on the relief's normal on exterior
+    // surfaces (none indoors or on a doodad in MCSH shade; a WMO's MOCV dims it), inside the
+    // frame's [0, 1].
     if (vm_on) {
         var vm_sheen = vec3<f32>(0.0);
         if ((in.word & WORD_INTERIOR) == 0u) {
@@ -472,7 +539,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             let vm_sunlit = (in.word & (WORD_MATTE | WORD_SHADE_LIT)) != 0u;
             let vm_sun = select(0.0, 1.0, vm_wmo || vm_sunlit);
             let vm_occ = select(vec3<f32>(1.0), vc.rgb, vm_wmo);
-            let vm_s = vm::sheen(n_lit, L, vm_v, vm::MODEL_SHININESS) * vm::gloss(vm_lum) * vm_sun;
+            let vm_s = vm::sheen(vm::tilted(vm_r), L, vm_v, vm::MODEL_SHININESS)
+                * vm::gloss(vm_lum) * vm_sun;
             vm_sheen = vm_occ * vm::sheen_rgb(wow_light.light_diffuse.rgb, base.rgb, vm_s);
         }
         rgb = clamp(rgb * vm_r.cavity + vm_sheen, vec3<f32>(0.0), vec3<f32>(1.0));
