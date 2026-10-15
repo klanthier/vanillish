@@ -6,30 +6,66 @@ plugins {
     id("com.android.application")
 }
 
-// Release signing comes from the environment (CI secrets) or `android/keystore.properties`; without
-// either, a release build is signed with the debug key so it still installs.
+// The version pins (SDK levels, NDK, GameActivity) live in android/gradle.properties, where
+// build-rust.sh and the workflows read the same lines.
+fun pin(name: String): String = providers.gradleProperty("vanillish.$name").get()
+
+// Release signing comes from the environment (CI decodes its secret to a file and points
+// VANILLISH_KEYSTORE at it) or `android/keystore.properties`; without either, a release build is
+// signed with this machine's debug key so it still installs. One key, forever: Android refuses an
+// update signed with another one, and uninstalling to get past that deletes the app's data — the
+// game data, the settings, the SavedVariables (`Android/data/<package>/files`).
 val signing = Properties().apply {
     val f = rootProject.file("keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
-    System.getenv("VANILLISH_KEYSTORE")?.let { setProperty("storeFile", it) }
-    System.getenv("VANILLISH_KEYSTORE_PASSWORD")?.let { setProperty("storePassword", it) }
-    System.getenv("VANILLISH_KEY_ALIAS")?.let { setProperty("keyAlias", it) }
-    System.getenv("VANILLISH_KEY_PASSWORD")?.let { setProperty("keyPassword", it) }
+    System.getenv("VANILLISH_KEYSTORE")?.takeIf { it.isNotEmpty() }?.let { setProperty("storeFile", it) }
+    System.getenv("VANILLISH_KEYSTORE_PASSWORD")?.takeIf { it.isNotEmpty() }?.let { setProperty("storePassword", it) }
+    System.getenv("VANILLISH_KEY_ALIAS")?.takeIf { it.isNotEmpty() }?.let { setProperty("keyAlias", it) }
+    System.getenv("VANILLISH_KEY_PASSWORD")?.takeIf { it.isNotEmpty() }?.let { setProperty("keyPassword", it) }
+}
+val releaseKeystore: File? = signing.getProperty("storeFile")?.let { file(it) }
+if (releaseKeystore != null) {
+    // Said here, by name, rather than as AGP's "keystore password was incorrect" at the very end.
+    check(releaseKeystore.isFile) { "vanillish: the release keystore $releaseKeystore does not exist" }
+    val missing = listOf("storePassword", "keyAlias").filter { signing.getProperty(it).isNullOrEmpty() }
+    check(missing.isEmpty()) {
+        "vanillish: a release keystore is set but not ${missing.joinToString(" and ")} " +
+            "(VANILLISH_KEYSTORE_PASSWORD / VANILLISH_KEY_ALIAS, or keystore.properties)"
+    }
 }
 
-val versionNameProp = (findProperty("vanillish.versionName") as String?) ?: "0.2.0"
-val versionCodeProp = ((findProperty("vanillish.versionCode") as String?) ?: "1").toInt()
+// The version. build-apk.sh passes a release's own (-Pvanillish.versionName=0.3.0 from the tag);
+// otherwise it is the workspace version plus the commit, and the versionCode is the commit's time in
+// minutes: it only grows along history, and a local build and a CI build of one commit agree, so
+// any newer build installs over any older one without the uninstall that would delete the data.
+val workspaceVersion: String = rootProject.file("../Cargo.toml").takeIf { it.isFile }?.readLines()
+    ?.dropWhile { it.trim() != "[workspace.package]" }
+    ?.firstNotNullOfOrNull { Regex("""^version\s*=\s*"([^"]+)"""").find(it.trim())?.groupValues?.get(1) }
+    ?: "0.0.0"
+fun git(vararg args: String): String? = runCatching {
+    providers.exec {
+        commandLine("git", "-C", rootDir.path, *args)
+        isIgnoreExitValue = true
+    }.standardOutput.asText.get().trim().takeIf { it.isNotEmpty() }
+}.getOrNull()
+val versionNameProp: String = providers.gradleProperty("vanillish.versionName").orNull
+    ?: git("rev-parse", "--short", "HEAD")?.let { "$workspaceVersion+$it" }
+    ?: "$workspaceVersion+unknown"
+val versionCodeProp: Int = providers.gradleProperty("vanillish.versionCode").orNull?.toInt()
+    ?: git("log", "-1", "--format=%ct", "HEAD")?.toLongOrNull()?.let { (it / 60).toInt() }
+    ?: 1
 
 android {
     namespace = "io.github.klanthier.vanillish"
-    compileSdk = 36
-    ndkVersion = "28.2.13676358"
+    compileSdk = pin("compileSdk").toInt()
+    buildToolsVersion = pin("buildTools")
+    // AGP's strip and symbol tasks use this NDK; cargo-ndk builds the library with the same one.
+    ndkVersion = pin("ndkVersion")
 
     defaultConfig {
         applicationId = "io.github.klanthier.vanillish"
-        // Android 12: VibratorManager, AThermal headroom, the cutout mode the game draws under.
-        minSdk = 31
-        targetSdk = 36
+        minSdk = pin("minSdk").toInt()
+        targetSdk = pin("targetSdk").toInt()
         versionCode = versionCodeProp
         versionName = versionNameProp
         ndk {
@@ -39,12 +75,15 @@ android {
     }
 
     signingConfigs {
-        if (signing.getProperty("storeFile") != null) {
+        if (releaseKeystore != null) {
             create("release") {
-                storeFile = file(signing.getProperty("storeFile"))
+                storeFile = releaseKeystore
                 storePassword = signing.getProperty("storePassword")
                 keyAlias = signing.getProperty("keyAlias")
-                keyPassword = signing.getProperty("keyPassword")
+                // A PKCS12 keystore (keytool's default) has one password for the store and the key.
+                // An empty one (`keyPassword=` in keystore.properties) is unset, as in the env.
+                keyPassword = signing.getProperty("keyPassword")?.takeIf { it.isNotEmpty() }
+                    ?: signing.getProperty("storePassword")
             }
         }
     }
@@ -59,6 +98,9 @@ android {
             // The Rust library is the same release-optimized build either way; this only makes
             // the Java side debuggable (and lets intent extras set WOW_*/INILLA_* knobs).
             applicationIdSuffix = ".debug"
+            // With the release key when there is one, so one CI debug build updates the last
+            // (each CI runner would otherwise make up a debug key of its own).
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
 
@@ -70,7 +112,8 @@ android {
     packaging {
         jniLibs {
             // Keep the symbol tables: a panic's backtrace in logcat then names functions. The
-            // APK's zip compression takes most of the size back.
+            // APK's zip compression takes most of the size back. (build-rust.sh drops only the
+            // DWARF, and keeps a copy with it in target/vanillish-out/symbols/.)
             keepDebugSymbols += "**/libvanillish.so"
             // Extracted to disk at install, as the loader is fastest with it.
             useLegacyPackaging = true
@@ -83,10 +126,21 @@ android {
     }
 }
 
+// The Rust half is built outside Gradle: say so, rather than package an APK that dies at launch
+// with "dlopen failed: library libvanillish.so not found". Only the packaging path checks, so
+// compiling the Java and lint (vanillish-check.yml) need no library.
+val rustLib = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libvanillish.so").asFile
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
+    doFirst {
+        check(rustLib.isFile) { "vanillish: no $rustLib — run android/build-rust.sh (or android/build-apk.sh) first" }
+    }
+}
+
 dependencies {
-    // GameActivity: the Activity and the C glue android-activity 0.6.1 vendors (4.4.0 exactly;
-    // no prefab — the C side is compiled into libvanillish.so by android-activity's build.rs).
-    implementation("androidx.games:games-activity:4.4.0")
+    // GameActivity: the Activity and the C glue android-activity vendors — the exact release
+    // pinned beside it in gradle.properties (no prefab: the C side is compiled into
+    // libvanillish.so by android-activity's build.rs).
+    implementation("androidx.games:games-activity:${pin("gamesActivity")}")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.core:core:1.17.0")
     // The fold: FoldingFeature (tabletop / book postures), through the callback API for Java.

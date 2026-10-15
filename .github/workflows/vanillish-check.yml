@@ -1,0 +1,120 @@
+# Vanillish's gate: Linux only (1× Actions minutes), on every push and PR. It keeps the Android build
+# green without making an APK (vanillish-apk.yml does that, on demand and on tags):
+#
+# - every Java `native` has its Rust export (android/tools/test_jni_natives.py);
+# - rustfmt over our code; clippy on the iNilla crates (host) and on the Android entry and
+#   inilla-platform's Android half (for aarch64-linux-android);
+# - the engine-free crates' tests (touch/controller mapping, fold geometry, profiles, data);
+# - the desktop build of the app type-checks;
+# - the Android build type-checks with cargo-ndk and the pinned NDK — the analogue of
+#   inilla-check's iOS step, and what catches an upstream benilla change that breaks Android;
+# - the Java compiles; Android lint reports, and never blocks.
+#
+# inilla-check.yml stays as it is beside this: its iOS step guards the fork's mergeability back
+# into iNilla.
+name: vanillish-check
+
+on:
+  push:
+    paths-ignore: ["**.md", "docs/**", "ios/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vanillish-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debuginfo: it is most of target/, and a runner's disk is small (as upstream's ci.yml).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: JNI natives (Java ↔ jni_exports.rs)
+        # Seconds, and first: build-rust.sh checks the built library's exports, but only
+        # vanillish-apk builds one. This reads the same contract from the sources, and tests the
+        # scanner build-rust.sh uses.
+        run: python3 android/tools/test_jni_natives.py
+
+      - name: Free disk space
+        # Keeps /usr/local/lib/android: the SDK is what the Android steps use.
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+
+      - name: System packages
+        run: sudo apt-get update -q && sudo apt-get install -yq libasound2-dev libudev-dev
+
+      - name: Toolchain
+        # rust-toolchain.toml's release, with clippy and rustfmt.
+        run: rustup toolchain install && rustc -V
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: vanillish-check
+          cache-targets: true
+          cache-bin: true # ~/.cargo/bin: cargo-ndk, built once
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Android NDK, SDK pieces, cargo-ndk
+        run: android/tools/ci-setup.sh
+
+      - name: Format (iNilla and Vanillish code)
+        # Our crates, and our directory inside benilla-app (rustfmt follows its `mod`s). Upstream
+        # files are upstream's to format (their ci.yml): a sync that brings one in unformatted must
+        # not turn this gate red, and reformatting it here would be a carry.
+        run: |
+          cargo fmt -p inilla-core -p inilla-platform -p inilla-ios -p vanillish-android -- --check
+          rustfmt --edition 2021 --check crates/benilla-app/src/inilla/mod.rs
+
+      - name: Unit tests (engine-free)
+        run: cargo test -p inilla-core -p inilla-platform
+
+      - name: Clippy (iNilla crates, host)
+        run: cargo clippy -p inilla-core -p inilla-platform --all-targets -- -D warnings
+
+      - name: Desktop build type-checks
+        run: cargo check -p benilla-app --no-default-features
+
+      - name: Android build type-checks (cargo-ndk)
+        run: cargo ndk -t arm64-v8a -P "$VANILLISH_MIN_SDK" check -p vanillish-android
+
+      - name: Clippy (Android entry and platform layer, aarch64-linux-android)
+        # --no-deps: the two crates' own Android code, not the whole client's.
+        run: cargo ndk -t arm64-v8a -P "$VANILLISH_MIN_SDK" clippy -p inilla-platform -p vanillish-android --no-deps -- -D warnings
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic # the open-source GitHub Actions cache, not the commercial service
+
+      - name: Java compiles
+        working-directory: android
+        run: ./gradlew --no-daemon :app:compileReleaseJavaWithJavac
+
+      - name: Android lint (never blocks)
+        id: lint
+        continue-on-error: true
+        working-directory: android
+        run: ./gradlew --no-daemon :app:lintRelease
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.lint.outcome != 'skipped'
+        with:
+          name: vanillish-lint
+          path: android/app/build/reports/lint-results-release.*
+          retention-days: 7
+          if-no-files-found: ignore
