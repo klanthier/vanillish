@@ -683,11 +683,31 @@ fn is_minimal(e: &Element) -> bool {
         || e.id == "inilla"
 }
 
-/// A mouse button the engine drives.
+/// A mouse button the engine drives. The gestures and the controller press Left and Right;
+/// Vanillish: a hardware mouse (DeX, Bluetooth) has the other three too, which 1.12 binds as
+/// BUTTON3 to BUTTON5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
     Right,
+    /// Vanillish: the wheel's button (BUTTON3).
+    Middle,
+    /// Vanillish: the side button toward the wrist (BUTTON5; benilla reads it as winit's Back).
+    Back,
+    /// Vanillish: the side button toward the fingers (BUTTON4, the default autorun; winit's
+    /// Forward).
+    Forward,
+}
+
+impl MouseButton {
+    /// Every button, in 1.12's numbering (BUTTON1 to BUTTON5).
+    pub const ALL: [MouseButton; 5] = [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::Forward,
+        MouseButton::Back,
+    ];
 }
 
 /// One synthetic mouse operation, applied in order.
@@ -2477,6 +2497,57 @@ mod tests {
         assert_eq!(layout.elements[i].strip, None);
         let moved = layout.elements[i].rect(&s, 1.0).center();
         assert!((moved[0] - 300.0).abs() < 0.5 && (moved[1] - 200.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn every_mouse_button_is_listed_once_in_the_1_12_numbering() {
+        // A new button has to join `ALL`: without it this match stops compiling.
+        for (i, b) in MouseButton::ALL.iter().enumerate() {
+            let number = match b {
+                MouseButton::Left => 1,
+                MouseButton::Right => 2,
+                MouseButton::Middle => 3,
+                MouseButton::Forward => 4,
+                MouseButton::Back => 5,
+            };
+            assert_eq!(number, i + 1, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn the_gestures_press_only_left_and_right() {
+        // The host mouse's extra buttons never come out of a finger: a tap, a long press and a
+        // world look each click or hold only the two a touchscreen can mean.
+        let layout = default_layout();
+        let mut e = TouchEngine::default();
+        let ui_everywhere = |_: Vec2| true;
+        let mut ops = Vec::new();
+        for (id, (at, until)) in [(0.0, 0.1), (1.0, 1.9)].into_iter().enumerate() {
+            let p = [426.0, 200.0];
+            let id = id as u64 + 1;
+            e.input(
+                t(id, Phase::Started, p[0], p[1]),
+                &layout,
+                &screen(),
+                at,
+                &ui_everywhere,
+            );
+            ops.extend(e.frame(&layout, at).mouse);
+            e.input(
+                t(id, Phase::Ended, p[0], p[1]),
+                &layout,
+                &screen(),
+                until,
+                &ui_everywhere,
+            );
+            ops.extend(e.frame(&layout, until).mouse);
+        }
+        assert!(ops.iter().any(|m| matches!(m, MouseOp::Down(_))));
+        for op in ops {
+            if let MouseOp::Down(b) | MouseOp::Up(b) = op {
+                assert!(matches!(b, MouseButton::Left | MouseButton::Right), "{b:?}");
+            }
+        }
     }
 
     #[test]

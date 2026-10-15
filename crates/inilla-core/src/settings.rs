@@ -138,6 +138,9 @@ pub struct InillaSettings {
     /// what lets the preset follow a *change* of the mode ([`InillaSettings::follow_game_mode`])
     /// across launches — the mode outlives the process, which starts with no memory of it.
     pub last_game_mode: Option<GameMode>,
+    /// Vanillish: hide the touch HUD while a hardware mouse or keyboard is being used (Samsung
+    /// DeX, Bluetooth); the next touch brings it back.
+    pub hide_touch_with_mouse: bool,
 }
 
 /// Vanillish: the system's game mode, where it has one (Android's Game Dashboard) — the player
@@ -186,6 +189,7 @@ impl Default for InillaSettings {
             inner_any_orientation: false,
             stay_connected: true,
             last_game_mode: None,
+            hide_touch_with_mouse: true,
         }
     }
 }
@@ -255,6 +259,8 @@ mod tests {
         assert_eq!(partial.render_scale, 0.5);
         assert!(partial.keep_screen_on);
         assert_eq!(partial.last_game_mode, None);
+        // Vanillish: a settings file from before the host mouse steps the HUD aside too.
+        assert!(partial.hide_touch_with_mouse);
     }
 
     #[test]

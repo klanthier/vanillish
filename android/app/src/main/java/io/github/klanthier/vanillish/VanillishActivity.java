@@ -279,6 +279,8 @@ public class VanillishActivity extends GameActivity {
                     break;
             }
         }
+        // [pointer] a mouse's side buttons are its buttons, never Back; a hardware keyboard in use.
+        if (PointerBridge.onKey(event)) return true;
         return super.dispatchKeyEvent(event);
     }
 
@@ -286,6 +288,7 @@ public class VanillishActivity extends GameActivity {
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
         if (pads != null && pads.onMotion(event)) return true;
         // [pointer] a hardware mouse's hover/scroll and a pen's hover go here.
+        if (PointerBridge.onMotion(event)) return true;
         return super.dispatchGenericMotionEvent(event);
     }
 
@@ -305,6 +308,7 @@ public class VanillishActivity extends GameActivity {
             return true;
         }
         // [pointer] a hardware mouse's buttons go here.
+        if (PointerBridge.onMotion(event)) return true;
         return super.dispatchTouchEvent(event);
     }
 

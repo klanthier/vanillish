@@ -146,3 +146,64 @@ pub extern "system" fn Java_io_github_klanthier_vanillish_FolderImport_nativeFol
 }
 
 // ---- [pointer] the hardware mouse and the pen ---------------------------------------------------
+
+use inilla_platform::pointer::{self, HostPointerEvent};
+
+/// A hardware mouse's event (DeX, Bluetooth): px in the window, `BUTTON_*` bits, wheel notches.
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_PointerBridge_nativeMouse(
+    _env: JNIEnv,
+    _class: JClass,
+    action: jint,
+    buttons: jint,
+    x: jfloat,
+    y: jfloat,
+    wheel: jfloat,
+) {
+    pointer::push(HostPointerEvent::Mouse {
+        action,
+        buttons: buttons as u32,
+        pos: [x, y],
+        wheel,
+    });
+}
+
+/// The captured mouse (pointer capture): motion in the device's counts.
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_PointerBridge_nativeMouseRelative(
+    _env: JNIEnv,
+    _class: JClass,
+    buttons: jint,
+    dx: jfloat,
+    dy: jfloat,
+    wheel: jfloat,
+) {
+    pointer::push(HostPointerEvent::Relative {
+        buttons: buttons as u32,
+        delta: [dx, dy],
+        wheel,
+    });
+}
+
+/// A pen hovering above the screen (px in the window), or gone.
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_PointerBridge_nativePenHover(
+    _env: JNIEnv,
+    _class: JClass,
+    present: jboolean,
+    x: jfloat,
+    y: jfloat,
+) {
+    pointer::push(HostPointerEvent::PenHover(
+        (present == JNI_TRUE).then_some([x, y]),
+    ));
+}
+
+/// A hardware keyboard's key went down.
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_PointerBridge_nativeKeyboardUsed(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    pointer::push(HostPointerEvent::Keyboard);
+}

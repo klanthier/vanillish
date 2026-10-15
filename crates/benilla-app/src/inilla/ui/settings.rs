@@ -123,6 +123,11 @@ fn general(ui: &mut egui::Ui, k: &mut Inilla) {
         hint(ui, words::INNER_PORTRAIT_HINT);
         ui.checkbox(&mut s.stay_connected, words::STAY_CONNECTED_ROW);
         hint(ui, words::STAY_CONNECTED_HINT);
+        ui.checkbox(
+            &mut s.hide_touch_with_mouse,
+            "Hide the touch controls while a mouse or keyboard is in use",
+        );
+        hint(ui, "Samsung DeX, or a Bluetooth mouse or keyboard: the touch controls step aside while you play with them, and the next touch brings them back.");
     }
 }
 
