@@ -1,1 +1,7 @@
 target
+# Never a Blizzard file in a build context, nor a secret: the image is published.
+**/*.MPQ
+**/*.mpq
+**/Data/
+**/WTF/
+.env

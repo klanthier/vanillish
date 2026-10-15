@@ -1,13 +1,16 @@
-//! **inilla-datahost** — hand your own World of Warcraft 1.12.1 `Data` folder to your own iPhone,
-//! once, with the addons that go with it. The iNilla app's setup screen downloads both from here
-//! (resumable, SHA-256 verified).
+//! **inilla-datahost** (Vanillish's data host) — hand your own World of Warcraft 1.12.1 `Data`
+//! folder to your own phone, once, with the addons that go with it; tell the app what this server
+//! is; and create the player's account. The app's Connect screen (Vanillish) or setup screen
+//! (iNilla) downloads the data from here (resumable, SHA-256 verified).
 //!
 //! ```text
 //! inilla-datahost serve --data "/games/WoW 1.12.1/Data"
-//!     → http://<this machine>:8099/   (enter it in iNilla's setup)
+//!     → http://<this machine>:8099/   (type this machine's address in the app)
 //! inilla-datahost serve --data enUS=/games/enUS/Data --data deDE=/games/deDE/Data \
 //!                       --addons /addons/all --addons deDE=/addons/deDE --token s3cret
 //!     → the same, in two languages, with addons, behind a token
+//! inilla-datahost serve --realm-name Vanillish --world-same-host --signup lan
+//!     → no game data (yet): /server.json and sign-up only
 //! inilla-datahost manifest --data "/games/WoW 1.12.1/Data"
 //!     → prints the manifest (and caches it) without serving
 //! ```
@@ -17,6 +20,8 @@
 //!
 //! | request | answer |
 //! |---|---|
+//! | `GET\|HEAD /server.json` | what this server is: logon, realm, data, sign-up ([`info`]); never needs the token |
+//! | `POST /accounts` | a player account, from the salt and verifier the phone computed ([`accounts`]) |
 //! | `GET /locales.json` | the languages this host has game data for, the first one the default |
 //! | `GET [/<locale>]/manifest.json` | the archives: names, sizes, SHA-256 |
 //! | `GET\|HEAD [/<locale>]/files/<name>` | one archive, with `Range`, so a download resumes |
@@ -24,28 +29,34 @@
 //! | `GET\|HEAD [/<locale>]/addons/<path>` | one addon file |
 //!
 //! Without a `/<locale>` prefix a request means the first `--data`, so an app that knows only
-//! `/manifest.json` keeps working. Hashing 5 GB takes a minute or two; each manifest is cached
-//! (`.inilla-manifest-<locale>.json`, beside the data or in `--cache-dir`) and rebuilt when an
-//! archive's size or mtime changes.
+//! `/manifest.json` keeps working. With no `--data` folder holding archives the host still starts:
+//! `/server.json` leaves `data` out, sign-up works, and the data requests are 404s. Hashing 5 GB
+//! takes a minute or two; each manifest is cached (`.inilla-manifest-<locale>.json`, beside the
+//! data or in `--cache-dir`) and rebuilt when an archive's size or mtime changes.
 //!
 //! The files are Blizzard's. Serve them only to yourself and people who own the game, and prefer
-//! a LAN or a VPN (Tailscale, WireGuard) to the open internet — with a token there.
+//! a LAN or a VPN (Tailscale, WireGuard) to the open internet — with a token there, which sign-up
+//! then asks for too.
 
+mod accounts;
 mod addons;
 mod http;
+mod info;
 mod manifest;
 
 use std::fs;
 use std::io::{Seek, SeekFrom};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
+use clap::builder::FalseyValueParser;
 use clap::{Parser, Subcommand};
 
+use crate::accounts::{DbConfig, Mode, Signup};
 use crate::addons::AddonSet;
-use crate::http::{Head, Request};
+use crate::http::{Body, Head, Request};
 use crate::manifest::Manifest;
 
 #[derive(Parser)]
@@ -57,12 +68,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the Data folder(s) and addons.
+    /// Serve the Data folder(s) and addons, /server.json and sign-up.
     Serve {
         /// A client's `Data` folder, as `DIR` or `LOCALE=DIR` (e.g. `deDE=/games/de/Data`).
         /// Repeat for more languages; the first is the default. A folder without archives is
-        /// skipped, so an optional language can stay mounted empty.
-        #[arg(long = "data", required = true)]
+        /// skipped, so an optional language can stay mounted empty; with none at all the host
+        /// serves /server.json and sign-up only.
+        #[arg(long = "data")]
         data: Vec<String>,
         /// A folder of addons (`<Addon>/<Addon>.toc`), as `DIR` for every language or
         /// `LOCALE=DIR` for one. Repeatable; later folders replace an addon of the same name.
@@ -71,9 +83,10 @@ enum Cmd {
         /// Address to listen on.
         #[arg(long, env = "INILLA_DATA_BIND", default_value = "0.0.0.0:8099")]
         bind: String,
-        /// Require `Authorization: Bearer <token>` (or `?token=`). Without one the host is open
-        /// to everyone who can reach it: fine on a home LAN, not on the internet.
-        #[arg(long, env = "INILLA_DATA_TOKEN")]
+        /// Require `Authorization: Bearer <token>` (or `?token=`) for the data and sign-up.
+        /// Without one the host is open to everyone who can reach it: fine on a home LAN, not
+        /// on the internet.
+        #[arg(long, env = "INILLA_DATA_TOKEN", hide_env_values = true)]
         token: Option<String>,
         /// Accepted for compatibility: no token is now simply the default.
         #[arg(long, hide = true)]
@@ -84,6 +97,8 @@ enum Cmd {
         /// Where to cache the manifests, when the Data folders are read-only.
         #[arg(long, env = "INILLA_DATA_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
+        #[command(flatten)]
+        server: Box<ServerArgs>,
     },
     /// Build (or refresh) the manifest and print it.
     Manifest {
@@ -94,6 +109,125 @@ enum Cmd {
         #[arg(long, env = "INILLA_DATA_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
     },
+}
+
+/// What `/server.json` says about the server beside this host, and how sign-up reaches realmd's
+/// database. An empty value (compose's `${X:-}`) is the same as none.
+#[derive(clap::Args, Clone, Default)]
+struct ServerArgs {
+    /// The server's name in the app [default: the realm's, else Vanillish].
+    #[arg(long, env = "INILLA_SERVER_NAME")]
+    server_name: Option<String>,
+    /// The core, shown in the app: vmangos, cmangos, … [default: not said].
+    #[arg(long, env = "INILLA_CORE")]
+    core: Option<String>,
+    /// realmd's host, when it is not this machine [default: the address the app reached this
+    /// host at].
+    #[arg(long, env = "INILLA_AUTH_HOST")]
+    auth_host: Option<String>,
+    /// realmd's published port [default: 3724, said when a realm or a logon host is given].
+    #[arg(long, env = "INILLA_AUTH_PORT")]
+    auth_port: Option<String>,
+    /// The realm's name, as realmd lists it.
+    #[arg(long, env = "INILLA_REALM_NAME")]
+    realm_name: Option<String>,
+    /// The realm's type: pve, pvp, rp or rppvp.
+    #[arg(long, env = "INILLA_REALM_TYPE")]
+    realm_type: Option<String>,
+    /// The world server's address as the realm list hands it out (REALM_ADDRESS).
+    #[arg(long, env = "INILLA_WORLD_ADDRESS")]
+    world_address: Option<String>,
+    /// The world server's port [default: 8085].
+    #[arg(long, env = "INILLA_WORLD_PORT")]
+    world_port: Option<String>,
+    /// The world server runs on this machine: the app then reaches it at the address it typed.
+    #[arg(long, env = "INILLA_WORLD_SAME_HOST", value_parser = FalseyValueParser::new())]
+    world_same_host: bool,
+    /// A sentence for the players, kept in the app's notes for the server.
+    #[arg(long, env = "INILLA_MESSAGE")]
+    message: Option<String>,
+    /// Account sign-up: off, lan (from private addresses only) or open.
+    #[arg(long, env = "INILLA_SIGNUP", default_value = "off", value_parser = Mode::parse)]
+    signup: Mode,
+    /// Sign-up's database host [default: db].
+    #[arg(long, env = "INILLA_SIGNUP_DB_HOST")]
+    signup_db_host: Option<String>,
+    /// Sign-up's database port [default: 3306].
+    #[arg(long, env = "INILLA_SIGNUP_DB_PORT")]
+    signup_db_port: Option<String>,
+    /// Sign-up's database user, made by db-init with insert-only rights [default:
+    /// vanillish_signup].
+    #[arg(long, env = "INILLA_SIGNUP_DB_USER")]
+    signup_db_user: Option<String>,
+    /// That user's password (SIGNUP_DB_PASSWORD). Without one sign-up stays off.
+    #[arg(long, env = "INILLA_SIGNUP_DB_PASSWORD", hide_env_values = true)]
+    signup_db_password: Option<String>,
+    /// realmd's database [default: realmd].
+    #[arg(long, env = "INILLA_SIGNUP_DB_NAME")]
+    signup_db_name: Option<String>,
+}
+
+/// A setting that was given: neither absent nor empty.
+fn given(v: &Option<String>) -> Option<String> {
+    v.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn port(flag: &str, v: &Option<String>) -> Result<Option<u16>, String> {
+    given(v)
+        .map(|p| {
+            p.parse::<u16>()
+                .ok()
+                .filter(|p| *p != 0)
+                .ok_or_else(|| format!("{flag} {p:?} is not a port"))
+        })
+        .transpose()
+}
+
+impl ServerArgs {
+    fn realm(&self) -> Result<info::Realm, String> {
+        Ok(info::Realm {
+            server_name: given(&self.server_name),
+            core: given(&self.core),
+            auth_host: given(&self.auth_host),
+            auth_port: port("--auth-port", &self.auth_port)?,
+            realm_name: given(&self.realm_name),
+            realm_type: given(&self.realm_type),
+            world_address: given(&self.world_address),
+            world_port: port("--world-port", &self.world_port)?,
+            world_same_host: self.world_same_host,
+            message: given(&self.message),
+        })
+    }
+
+    /// Sign-up as configured; `token` whether the host has one (sign-up then asks for it too).
+    fn signup(&self, token: bool) -> Result<Signup, String> {
+        if self.signup == Mode::Off {
+            return Ok(Signup::off());
+        }
+        let Some(password) = self.signup_db_password.clone().filter(|p| !p.is_empty()) else {
+            eprintln!(
+                "inilla-datahost: sign-up stays off: INILLA_SIGNUP={} needs \
+                 INILLA_SIGNUP_DB_PASSWORD, the sign-up user's database password",
+                self.signup.as_str()
+            );
+            return Ok(Signup::off());
+        };
+        let db = DbConfig {
+            host: given(&self.signup_db_host).unwrap_or_else(|| "db".into()),
+            port: port("--signup-db-port", &self.signup_db_port)?.unwrap_or(3306),
+            user: given(&self.signup_db_user).unwrap_or_else(|| "vanillish_signup".into()),
+            password,
+            name: given(&self.signup_db_name).unwrap_or_else(|| "realmd".into()),
+        };
+        Ok(Signup::new(
+            self.signup,
+            token,
+            Box::new(accounts::Database::new(&db)),
+        ))
+    }
 }
 
 fn main() {
@@ -107,7 +241,16 @@ fn main() {
             no_token: _,
             locale,
             cache_dir,
-        } => serve(&data, &addons, &bind, token, &locale, cache_dir.as_deref()),
+            server,
+        } => serve(
+            &data,
+            &addons,
+            &bind,
+            token,
+            &locale,
+            cache_dir.as_deref(),
+            &server,
+        ),
         Cmd::Manifest {
             data,
             locale,
@@ -224,15 +367,40 @@ struct DataSet {
 }
 
 struct Host {
-    /// The first is the default: what a request without a `/<locale>` prefix gets.
+    /// The first is the default: what a request without a `/<locale>` prefix gets. Empty: this
+    /// host serves no game data (yet).
     sets: Vec<DataSet>,
-    locales_json: String,
+    /// `/locales.json`, when there is game data.
+    locales_json: Option<String>,
     token: Option<String>,
+    /// `/server.json` for a requester at a private address, and for any other: they differ only
+    /// in whether sign-up is open to it.
+    server_json_private: String,
+    server_json_public: String,
+    signup: Signup,
 }
 
 impl Host {
+    fn new(sets: Vec<DataSet>, token: Option<String>, realm: &info::Realm, signup: Signup) -> Self {
+        let locales = locales(&sets);
+        let server_json = |private: bool| {
+            let registration = signup.registration(private);
+            info::server_json(realm, &locales, token.is_some(), registration.as_ref())
+        };
+        let (server_json_private, server_json_public) = (server_json(true), server_json(false));
+        Host {
+            locales_json: info::Locales::of(&locales).and_then(|l| serde_json::to_string(&l).ok()),
+            sets,
+            token,
+            server_json_private,
+            server_json_public,
+            signup,
+        }
+    }
+
     /// The data set a path names, and the rest of the path: `/deDE/files/x` → (deDE, `/files/x`).
-    fn route<'a>(&self, path: &'a str) -> (&DataSet, &'a str) {
+    /// `None` without game data.
+    fn route<'a>(&self, path: &'a str) -> Option<(&DataSet, &'a str)> {
         if let Some(rest) = path.strip_prefix('/') {
             let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
             if let Some(set) = self
@@ -240,17 +408,17 @@ impl Host {
                 .iter()
                 .find(|s| s.locale.eq_ignore_ascii_case(first))
             {
-                return (
+                return Some((
                     set,
                     if tail.is_empty() {
                         "/"
                     } else {
                         &path[first.len() + 1..]
                     },
-                );
+                ));
             }
         }
-        (&self.sets[0], path)
+        self.sets.first().map(|set| (set, path))
     }
 }
 
@@ -298,24 +466,19 @@ fn load(
             addons,
         });
     }
-    if sets.is_empty() {
-        return Err("no --data folder holds 1.12.1 archives".into());
-    }
     Ok(sets)
 }
 
-fn locales_json(sets: &[DataSet]) -> String {
-    serde_json::json!({
-        "format": 1,
-        "default": sets[0].locale,
-        "locales": sets.iter().map(|s| serde_json::json!({
-            "locale": s.locale,
-            "path": format!("{}/", s.locale),
-            "bytes": s.manifest.total_bytes(),
-            "addons": s.addons.count,
-        })).collect::<Vec<_>>(),
-    })
-    .to_string()
+/// The languages, as `/locales.json` and `server.json` list them.
+fn locales(sets: &[DataSet]) -> Vec<info::Locale> {
+    sets.iter()
+        .map(|s| info::Locale {
+            locale: s.locale.clone(),
+            path: format!("{}/", s.locale),
+            bytes: s.manifest.total_bytes(),
+            addons: s.addons.count,
+        })
+        .collect()
 }
 
 fn serve(
@@ -325,15 +488,20 @@ fn serve(
     token: Option<String>,
     locale: &str,
     cache_dir: Option<&Path>,
+    server: &ServerArgs,
 ) -> Result<(), String> {
     let token = token.filter(|t| !t.trim().is_empty());
+    let realm = server.realm()?;
+    let signup = server.signup(token.is_some())?;
     let sets = load(data, addons, locale, cache_dir)?;
-    let host = Arc::new(Host {
-        locales_json: locales_json(&sets),
-        sets,
-        token,
-    });
+    let host = Arc::new(Host::new(sets, token, &realm, signup));
     let listener = TcpListener::bind(bind).map_err(|e| format!("cannot listen on {bind}: {e}"))?;
+    if host.sets.is_empty() {
+        eprintln!(
+            "inilla-datahost: no game data here (no --data folder holds 1.12.1 archives): \
+             /server.json says so, and sign-up works when it is on"
+        );
+    }
     for s in &host.sets {
         eprintln!(
             "inilla-datahost: {} — {} archives ({:.1} GB) from {}, {} addon(s)",
@@ -352,6 +520,7 @@ fn serve(
             "(open: anyone who can reach this port can download)"
         }
     );
+    eprintln!("inilla-datahost: {}", host.signup.describe());
     http::serve(listener, move |req, stream| handle(&host, req, stream));
     Ok(())
 }
@@ -361,16 +530,36 @@ fn handle(host: &Host, req: Request, w: &mut TcpStream) {
         None => true,
         Some(t) => req.token().is_some_and(|given| http::token_eq(given, t)),
     };
+    let peer = req.peer.parse::<SocketAddr>().ok().map(|a| a.ip());
+    if req.path == "/accounts" {
+        accounts(host, &req, peer, authorized, w);
+        return;
+    }
     let head_only = req.method == "HEAD";
     if req.method != "GET" && !head_only {
         let _ = http::respond_text(w, 405, "GET or HEAD", false);
+        if matches!(req.body, Body::TooLarge(_) | Body::Unreadable) {
+            http::drain(w, 1 << 20);
+        }
+        return;
+    }
+    if req.path == "/server.json" {
+        eprintln!("{} server.json", req.peer);
+        let doc = if peer.is_some_and(accounts::is_private) {
+            &host.server_json_private
+        } else {
+            &host.server_json_public
+        };
+        let _ = http::respond(w, 200, "application/json", doc.as_bytes(), head_only);
         return;
     }
     if req.path == "/" {
+        // Apps that predate /server.json know a data host by this line's first word.
         let _ = http::respond_text(
             w,
             200,
-            "inilla-datahost: enter this address in iNilla → Game data.\n",
+            "inilla-datahost: type this machine's address in Vanillish, or this address in \
+             iNilla → Game data.\n",
             head_only,
         );
         return;
@@ -379,17 +568,18 @@ fn handle(host: &Host, req: Request, w: &mut TcpStream) {
         let _ = http::respond_text(w, 401, "token required", head_only);
         return;
     }
+    let no_data = "this host serves no game data";
     if req.path == "/locales.json" {
-        let _ = http::respond(
-            w,
-            200,
-            "application/json",
-            host.locales_json.as_bytes(),
-            head_only,
-        );
+        let _ = match &host.locales_json {
+            Some(json) => http::respond(w, 200, "application/json", json.as_bytes(), head_only),
+            None => http::respond_text(w, 404, no_data, head_only),
+        };
         return;
     }
-    let (set, path) = host.route(&req.path);
+    let Some((set, path)) = host.route(&req.path) else {
+        let _ = http::respond_text(w, 404, no_data, head_only);
+        return;
+    };
     match path {
         "/manifest.json" => {
             eprintln!("{} {} manifest", req.peer, set.locale);
@@ -431,6 +621,41 @@ fn handle(host: &Host, req: Request, w: &mut TcpStream) {
         _ => {
             let _ = http::respond_text(w, 404, "not found", head_only);
         }
+    }
+}
+
+/// `/accounts`: a sign-up when `POST`ed, JSON whatever the answer.
+fn accounts(host: &Host, req: &Request, peer: Option<IpAddr>, authorized: bool, w: &mut TcpStream) {
+    let reply = if req.method == "POST" {
+        let ask = accounts::Request {
+            peer,
+            authorized,
+            content_type: req.header("content-type"),
+            body: &req.body,
+        };
+        host.signup.handle(&ask, Instant::now())
+    } else {
+        accounts::Reply::refuse(405, "bad_request", "POST a new account here.")
+    };
+    // The name and the outcome only: never a salt, a verifier or the token.
+    eprintln!("{} accounts {} {}", req.peer, reply.status, reply.note);
+    let mut extra = Vec::new();
+    if let Some(secs) = reply.retry_after {
+        extra.push(("Retry-After", secs.to_string()));
+    }
+    if reply.status == 405 {
+        extra.push(("Allow", "POST".to_string()));
+    }
+    let _ = http::respond_with(
+        w,
+        reply.status,
+        "application/json",
+        reply.body.as_bytes(),
+        req.method == "HEAD",
+        &extra,
+    );
+    if matches!(req.body, Body::TooLarge(_) | Body::Unreadable) {
+        http::drain(w, 1 << 20);
     }
 }
 
@@ -505,8 +730,10 @@ fn send_file(path: &Path, size: u64, req: &Request, head_only: bool, w: &mut Tcp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::tests::SALT;
     use crate::manifest::tests::{fill, tmp};
     use crate::manifest::REQUIRED;
+    use serde_json::Value;
     use std::io::{Read, Write};
 
     fn data_dir(name: &str) -> PathBuf {
@@ -517,34 +744,221 @@ mod tests {
     }
 
     /// A live host on an ephemeral port.
-    fn host_with(data: &[String], addons: &[String], token: Option<&str>) -> std::net::SocketAddr {
+    fn host_with(data: &[String], addons: &[String], token: Option<&str>) -> SocketAddr {
+        host_full(data, addons, token, &info::Realm::default(), Signup::off())
+    }
+
+    fn host_full(
+        data: &[String],
+        addons: &[String],
+        token: Option<&str>,
+        realm: &info::Realm,
+        signup: Signup,
+    ) -> SocketAddr {
         let sets = load(data, addons, "enUS", None).unwrap();
-        let host = Arc::new(Host {
-            locales_json: locales_json(&sets),
-            sets,
-            token: token.map(str::to_string),
-        });
+        let host = Arc::new(Host::new(sets, token.map(str::to_string), realm, signup));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || http::serve(listener, move |r, s| handle(&host, r, s)));
         addr
     }
 
-    fn host(name: &str, token: Option<&str>) -> (std::net::SocketAddr, PathBuf) {
+    fn host(name: &str, token: Option<&str>) -> (SocketAddr, PathBuf) {
         let dir = data_dir(name);
         (host_with(&[dir.display().to_string()], &[], token), dir)
     }
 
-    /// One raw request → (status, headers, body).
-    fn get(addr: std::net::SocketAddr, head: &str) -> (u16, String, Vec<u8>) {
+    /// Raw bytes out → (status, headers, body).
+    fn send(addr: SocketAddr, raw: &[u8]) -> (u16, String, Vec<u8>) {
         let mut s = TcpStream::connect(addr).unwrap();
-        s.write_all(format!("{head}\r\n\r\n").as_bytes()).unwrap();
+        s.write_all(raw).unwrap();
         let mut raw = Vec::new();
         s.read_to_end(&mut raw).unwrap();
         let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
         let headers = String::from_utf8_lossy(&raw[..split]).into_owned();
         let status = headers[9..12].parse().unwrap();
         (status, headers, raw[split + 4..].to_vec())
+    }
+
+    /// One raw request without a body → (status, headers, body).
+    fn get(addr: SocketAddr, head: &str) -> (u16, String, Vec<u8>) {
+        send(addr, format!("{head}\r\n\r\n").as_bytes())
+    }
+
+    /// `POST /accounts` with `headers` (each ending in CRLF) and `body`.
+    fn post_account(addr: SocketAddr, headers: &str, body: &[u8]) -> (u16, String, Value) {
+        let mut raw = format!(
+            "POST /accounts HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(body);
+        let (status, headers, body) = send(addr, &raw);
+        (status, headers, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn account_json(username: &str, salt: &str) -> Vec<u8> {
+        match accounts::tests::body(username, salt) {
+            Body::Read(bytes) => bytes,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn stack_realm() -> info::Realm {
+        info::Realm {
+            core: Some("vmangos".into()),
+            auth_port: Some(3724),
+            realm_name: Some("Vanillish".into()),
+            realm_type: Some("pve".into()),
+            world_address: Some("192.168.1.20".into()),
+            world_port: Some(8085),
+            world_same_host: true,
+            ..info::Realm::default()
+        }
+    }
+
+    const JSON: &str = "Content-Type: application/json\r\n";
+
+    #[test]
+    fn server_json_is_open_and_describes_the_server() {
+        let dir = data_dir("info");
+        let fake = accounts::tests::Fake::default();
+        let addr = host_full(
+            &[dir.display().to_string()],
+            &[],
+            Some("s3cret"),
+            &stack_realm(),
+            Signup::new(Mode::Lan, true, Box::new(fake)),
+        );
+        let (status, headers, body) = get(addr, "GET /server.json HTTP/1.1");
+        assert_eq!(status, 200, "open even with a token");
+        assert!(headers.contains("Content-Type: application/json"));
+        assert!(headers.contains("Cache-Control: no-store"));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["format"], 1);
+        assert_eq!(v["name"], "Vanillish");
+        assert_eq!(v["software"], "vanillish-datahost 0.3.0");
+        assert_eq!(v["auth"]["port"], 3724);
+        assert_eq!(v["realms"][0]["world"]["same_host"], true);
+        assert_eq!(v["data"]["url"], "");
+        assert_eq!(v["data"]["token"], true);
+        assert_eq!(v["data"]["locales"][0]["locale"], "enUS");
+        assert_eq!(v["data"]["locales"][0]["path"], "enUS/");
+        assert_eq!(v["registration"]["open"], true, "127.0.0.1 is private");
+        assert_eq!(v["registration"]["token"], true);
+        assert_eq!(v["registration"]["url"], "accounts");
+        let (status, headers, body) = get(addr, "HEAD /server.json HTTP/1.1");
+        assert_eq!(status, 200);
+        assert!(headers.contains("Content-Length: "));
+        assert!(body.is_empty());
+        // A data host alone, sign-up off: no logon, no realm, no sign-up.
+        let (alone, _) = host("info-alone", None);
+        let (_, _, body) = get(alone, "GET /server.json HTTP/1.1");
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        for absent in ["auth", "realms", "registration", "core"] {
+            assert!(v.get(absent).is_none(), "{absent}: {v}");
+        }
+        assert_eq!(v["data"]["token"], false);
+    }
+
+    #[test]
+    fn without_game_data_the_host_serves_server_json_and_sign_up() {
+        let empty = tmp("no-data");
+        assert!(load(&[], &[], "enUS", None).unwrap().is_empty());
+        let fake = accounts::tests::Fake::default();
+        let addr = host_full(
+            &[empty.display().to_string()],
+            &[],
+            None,
+            &stack_realm(),
+            Signup::new(Mode::Lan, false, Box::new(fake.clone())),
+        );
+        let (status, _, body) = get(addr, "GET /server.json HTTP/1.1");
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(v.get("data").is_none(), "{v}");
+        assert_eq!(v["registration"]["open"], true);
+        for path in [
+            "/locales.json",
+            "/manifest.json",
+            "/addons.json",
+            "/files/dbc.MPQ",
+            "/enUS/manifest.json",
+        ] {
+            assert_eq!(get(addr, &format!("GET {path} HTTP/1.1")).0, 404, "{path}");
+        }
+        let (status, _, body) = get(addr, "GET / HTTP/1.1");
+        assert_eq!(status, 200);
+        assert!(body.starts_with(b"inilla-datahost"));
+        let (status, _, reply) = post_account(addr, JSON, &account_json("first", SALT));
+        assert_eq!((status, &reply["username"]), (201, &Value::from("FIRST")));
+        assert!(fake.accounts.lock().unwrap().contains_key("FIRST"));
+    }
+
+    #[test]
+    fn sign_up_over_http() {
+        let dir = data_dir("signup");
+        let fake = accounts::tests::Fake::default();
+        let addr = host_full(
+            &[dir.display().to_string()],
+            &[],
+            Some("s3cret"),
+            &stack_realm(),
+            Signup::new(Mode::Lan, true, Box::new(fake.clone())),
+        );
+        let alice = account_json("alice", SALT);
+        let (status, headers, reply) = post_account(addr, JSON, &alice);
+        assert_eq!(status, 401);
+        assert!(headers.contains("Content-Type: application/json"));
+        assert_eq!(reply["error"], "token_required");
+        let auth = format!("{JSON}Authorization: Bearer s3cret\r\n");
+        let (status, _, reply) = post_account(addr, &auth, &alice);
+        assert_eq!(
+            (status, reply),
+            (
+                201,
+                serde_json::json!({"ok": true, "username": "ALICE", "message": "Account ALICE created."})
+            )
+        );
+        let (status, _, reply) = post_account(addr, &auth, &alice);
+        assert_eq!((status, &reply["ok"]), (200, &Value::Bool(true)));
+        let mallory = account_json("Alice", &format!("9{}", &SALT[1..]));
+        let (status, _, reply) = post_account(addr, &auth, &mallory);
+        assert_eq!((status, &reply["error"]), (409, &Value::from("name_taken")));
+        let (status, _, reply) = post_account(
+            addr,
+            "Content-Type: text/plain\r\nAuthorization: Bearer s3cret\r\n",
+            &alice,
+        );
+        assert_eq!(
+            (status, &reply["error"]),
+            (415, &Value::from("unsupported_media_type"))
+        );
+        let (status, _, reply) = post_account(addr, &auth, &account_json("x", SALT));
+        assert_eq!(
+            (status, &reply["error"]),
+            (400, &Value::from("invalid_name"))
+        );
+        // A body over 4 KiB: refused unread, and the answer still reaches the client.
+        let big = vec![b' '; 200_000];
+        let (status, _, reply) = post_account(addr, &auth, &big);
+        assert_eq!((status, &reply["error"]), (413, &Value::from("too_large")));
+        let (status, headers, body) = get(addr, "GET /accounts HTTP/1.1");
+        assert_eq!(status, 405);
+        assert!(headers.contains("Allow: POST"));
+        assert!(serde_json::from_slice::<Value>(&body).is_ok());
+        // Three attempts reached the database; two more, then the limit, with Retry-After.
+        for name in ["bob", "carol"] {
+            assert_eq!(post_account(addr, &auth, &account_json(name, SALT)).0, 201);
+        }
+        let (status, headers, reply) = post_account(addr, &auth, &account_json("dave", SALT));
+        assert_eq!(
+            (status, &reply["error"]),
+            (429, &Value::from("rate_limited"))
+        );
+        assert!(headers.contains("Retry-After: 600"), "{headers}");
+        assert_eq!(reply["retry_after"], 600);
+        assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 5);
     }
 
     #[test]
