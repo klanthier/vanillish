@@ -140,6 +140,12 @@ impl DataState {
         if self.job.is_some() {
             return;
         }
+        // Vanillish: without shared storage the folders are a private stand-in, which the next
+        // launch does not use: nothing is written there (`paths::storage_unavailable`).
+        if label != "manifest" && inilla_platform::paths::storage_unavailable() {
+            self.message = Some((false, words::STORAGE_UNAVAILABLE.into()));
+            return;
+        }
         let progress = Arc::new(Mutex::new(Progress::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (p, s) = (progress.clone(), stop.clone());

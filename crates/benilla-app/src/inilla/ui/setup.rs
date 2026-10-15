@@ -31,6 +31,22 @@ pub(super) fn show(
     data: &mut DataState,
 ) {
     egui::ScrollArea::vertical().show(ui, |ui| {
+        // Vanillish: shared storage did not answer at launch. What is in the folders is not there
+        // this time, and nothing set up now would be found the next (no download, no import).
+        if inilla_platform::paths::storage_unavailable() {
+            ui.label(
+                egui::RichText::new(words::STORAGE_UNAVAILABLE)
+                    .color(egui::Color32::LIGHT_RED)
+                    .size(18.0),
+            );
+            hint(
+                ui,
+                "Your game data, settings and saved interface live in the app's folder on this \
+                 phone's shared storage, which Android did not open this time (it happens briefly \
+                 after a system update). Nothing has been lost.",
+            );
+            return;
+        }
         let st = &data.status;
         if st.complete() {
             ui.label(

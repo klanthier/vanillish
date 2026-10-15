@@ -19,11 +19,15 @@
 //! transfer). benilla's state folder lives there, and it is the drop box for a copied `Data`
 //! folder. The game data sits beside it in `.vanillish/Data` — the same mount, so the import is a
 //! rename (instant) and not a 5 GB copy, while the dot keeps it out of the way. Caches go to the
-//! private cache dir. If shared storage is not mounted, everything falls back to private storage.
+//! private cache dir. Shared storage is asked for again for a few seconds when it does not answer
+//! at launch; if it still does not, [`storage_unavailable`] says so, and the app asks the player
+//! to open it again rather than set up (or download 5 GB) in a private stand-in that the next
+//! launch would not use. The stand-in (`files/Documents`) only keeps the app running meanwhile.
 
 use std::path::PathBuf;
 
-/// Vanillish: the Android roots, `(documents, app_support, caches)`.
+/// Vanillish: the Android roots, `(documents, app_support, caches)`. Without shared storage, a
+/// private stand-in, flagged by [`storage_unavailable`].
 #[cfg(target_os = "android")]
 fn android_roots() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let dirs = crate::android::paths::dirs();
@@ -50,6 +54,22 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("INILLA_CONTAINER")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+/// Vanillish: Android's shared storage did not answer at launch (asked again for a few seconds),
+/// so the folders are a private stand-in this time: the settings, the saved variables and the game
+/// data are not where they were, and nothing written there would be found next time. The setup
+/// screen says so and starts no download or import. Always false elsewhere.
+pub fn storage_unavailable() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let dirs = crate::android::paths::dirs();
+        dirs.external.is_none() && dirs.internal.is_some()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
 }
 
 /// Whether paths resolve into an (emulated or real) app container.
