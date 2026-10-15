@@ -1,4 +1,83 @@
 <div align="center">
+  <h1>Vanillish</h1>
+  <p><b>iNilla — benilla, the from-scratch World of Warcraft 1.12.1 client in Rust — on Android, made for the Galaxy Z Fold8 Ultra</b></p>
+</div>
+
+**Vanillish** is [iNilla](https://github.com/Martze96/iNilla) built for Android: the same client,
+the same touch controls, controller mapping, launcher and remote console, with what an Android
+phone needs around them. It is sideloaded as an APK, for Android 12 or later on an arm64 phone with
+Vulkan 1.1, and tuned for the **Samsung Galaxy Z Fold8 Ultra**:
+
+- **The cover screen** plays iNilla's phone layout as it is — a 21:9 screen about an iPhone Pro
+  Max's size, with the camera hole where the Dynamic Island would be.
+- **The inner screen** has a layout of its own for two hands on the side edges: the stick under
+  the left thumb, jump and twelve action slots around the right one, and an interface sized so the
+  main action bar still fits. Fold or unfold and the right layout comes up by itself; each screen
+  keeps its own edits.
+- **Tabletop (Flex mode)**: half fold the phone and stand it on a table, and the world and the
+  game's windows move above the hinge while the half below becomes a control deck — the stick, the
+  action buttons, a pad to look around.
+- **120 Hz**: the graphics presets ask the panel for 30, 60 or its full 120 Hz, and Game
+  Dashboard's Performance and Battery modes pick the preset.
+- **Samsung DeX, a mouse, a keyboard**: the mouse works as on the desktop — five buttons, the
+  wheel, mouse-look with the pointer captured, the game's own cursors — and the touch controls step
+  aside while it is in use.
+- **Controllers**: Xbox, DualSense, DualShock 4, Switch Pro, the Backbone One and other USB or
+  Bluetooth pads, in iNilla's WoW Forever layout with the pad's own button symbols; a USB-C clip on
+  the folded phone makes the cover screen a handheld.
+- **Staying connected**: a look at another app or folding the phone shut does not drop you from
+  the server.
+- And Android's own: the system keyboard with its suggestions, Back as the game's Escape, passwords
+  sealed with an Android Keystore key, logcat and the share sheet for logs.
+
+Other arm64 phones and tablets get the phone or the inner-screen layout by their screen's shape.
+Vanillish has been built and checked on Linux only so far; [docs/ANDROID.md](docs/ANDROID.md#what-needs-a-device)
+lists what the first device runs must confirm.
+
+## Download & install
+
+1. **Get the APK**:
+   - a release, `Vanillish-<version>.apk`, from [**Releases**](https://github.com/klanthier/vanillish/releases)
+     (the `vanillish-v*` tags); or
+   - a test build: [**Actions → vanillish-apk**](https://github.com/klanthier/vanillish/actions/workflows/vanillish-apk.yml)
+     → a run → its artifact `Vanillish-<commit>.apk` (the APK itself, not a zip; kept 14 days).
+2. **Sideload it**: open the APK on the phone. Android asks once to let the browser (or My Files)
+   install unknown apps: allow it. If Play Protect warns about an unknown app: *More details →
+   Install anyway*. From a computer: `adb install -r Vanillish-….apk`.
+3. **Updates: install the new APK over the old one — never uninstall first.** Uninstalling deletes
+   Vanillish's folder: the game data, the settings, the SavedVariables. And Android installs an
+   update only when it is signed with the same key as the installed app: releases carry the
+   Vanillish release key, while a build made without it (a fork with no signing secrets, a local
+   build with no key set) is signed with a debug key and belongs on a phone without Vanillish
+   ([docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md#signing)).
+4. **Game data (once)**: the first launch asks for the 1.12.1 game files — the app contains no
+   Blizzard files. Copy your client's `Data` folder in from a PC over USB (into Internal storage →
+   Android → data → io.github.klanthier.vanillish → files), use **Import from folder…** for a copy
+   already on the phone or a USB-C stick, or download it over Wi-Fi from an
+   [**iNilla server**](https://github.com/Martze96/iNilla-server). See
+   [docs/ANDROID-DATA.md](docs/ANDROID-DATA.md).
+
+The whole APK builds on Linux or macOS, and on CI on a single Linux runner — see
+[docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md).
+
+| read | for |
+|---|---|
+| [docs/ANDROID.md](docs/ANDROID.md) | what Vanillish adds on Android: the Fold8 Ultra's screens and tabletop, input, the frame rate, the settings that differ, where the files are, known limits |
+| [docs/ANDROID-DATA.md](docs/ANDROID-DATA.md) | getting the game data onto the phone |
+| [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md) | building, signing and installing the APK, CI, debugging on Android |
+| [docs/INILLA.md](docs/INILLA.md) | the touch controls, the controller, the launcher and the settings, which Vanillish shares |
+| [docs/DEBUGGING.md](docs/DEBUGGING.md) | the remote console, logs, the desktop rehearsal |
+| [docs/UPSTREAM.md](docs/UPSTREAM.md) | syncing iNilla and benilla, and every file of theirs Vanillish changes |
+
+Servers and clients are iNilla's: a 1.12.1 core benilla supports (vmangos, cMaNGOS) with **Warden
+disabled**, and an English (enUS) 1.12.1 client, build 5875. Vanillish is an independent fan
+project, not affiliated with or endorsed by Blizzard Entertainment.
+
+---
+
+*Everything below is iNilla's README, unchanged (with upstream benilla's below it).*
+
+<div align="center">
   <h1>iNilla</h1>
   <p><b>benilla — the from-scratch World of Warcraft 1.12.1 client in Rust — on the iPhone iOS 17.0+</b></p>
   <img src="ios/icons/AppIcon1024.png" width="120" alt="iNilla icon">
