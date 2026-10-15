@@ -98,6 +98,10 @@ pub(crate) struct DataState {
     /// Vanillish: a picked folder whose copy has not finished, `(tree, label)` — asked of the
     /// platform at start and after each folder import, not every frame.
     pub(crate) pending_folder: Option<(String, String)>,
+    /// Vanillish: the archives as the app was built (`status.present` then), and whether a job
+    /// has put one in place since — what [`Self::needs_restart`] compares against.
+    boot_present: Vec<(String, u64)>,
+    replaced: bool,
     job: Option<Job>,
 }
 
@@ -111,9 +115,13 @@ impl DataState {
         })
     }
 
-    /// Data is complete now but benilla did not have it at boot: a relaunch is needed.
+    /// Data is complete now but benilla does not have it as it is: a relaunch is needed. It did
+    /// not have it at boot, or (Vanillish) an archive was added, removed or replaced since:
+    /// benilla holds every archive's tables from boot and reopens the files by path, so reads
+    /// from a replaced one would take the old offsets into the new file.
     pub(crate) fn needs_restart(&self) -> bool {
-        self.status.complete() && !self.ready_at_boot
+        self.status.complete()
+            && (!self.ready_at_boot || self.replaced || self.status.present != self.boot_present)
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -463,6 +471,7 @@ impl Plugin for DataPlugin {
         let ready = status.complete() && std::env::var_os("WOW_DATA").is_none_or(|v| !v.is_empty());
         app.insert_resource(DataState {
             dir,
+            boot_present: status.present.clone(),
             status,
             ready_at_boot: ready,
             manifest: None,
@@ -472,6 +481,7 @@ impl Plugin for DataPlugin {
             base: None,
             message: None,
             pending_folder: picker::pending(),
+            replaced: false,
             job: None,
         })
         .add_systems(Update, (poll_job, poll_picker));
@@ -497,6 +507,18 @@ fn poll_picker(mut state: ResMut<DataState>) {
     }
 }
 
+/// Vanillish: a finished job put archives in place: imported or copied some. A download, or a job
+/// that stopped part-way (earlier archives may be in by then), shows in the archives' list itself
+/// ([`DataState::needs_restart`] compares it with the boot's); a copy also replaces an archive of
+/// the same size when its source is newer, which the list cannot show.
+fn puts_archives_in_place(result: &Result<Outcome, String>) -> bool {
+    match result {
+        Ok(Outcome::Imported(n)) => *n > 0,
+        Ok(Outcome::Copied { done, .. }) => done.copied > 0,
+        _ => false,
+    }
+}
+
 fn poll_job(mut state: ResMut<DataState>) {
     let done = state
         .job
@@ -516,6 +538,9 @@ fn poll_job(mut state: ResMut<DataState>) {
     state.refresh();
     if job.label == "folder import" {
         state.pending_folder = picker::pending();
+    }
+    if puts_archives_in_place(&result) {
+        state.replaced = true;
     }
     state.message = Some(match result {
         Ok(Outcome::Manifest(offer)) => {
@@ -632,5 +657,71 @@ fn sync_text(r: &SyncReport) -> String {
         "This server offers no addons.".to_string()
     } else {
         parts.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(ready_at_boot: bool, present: Vec<(String, u64)>) -> DataState {
+        DataState {
+            dir: None,
+            boot_present: present.clone(),
+            status: DataStatus {
+                present,
+                ..Default::default()
+            },
+            ready_at_boot,
+            manifest: None,
+            addons: None,
+            locales: None,
+            locale: None,
+            base: None,
+            message: None,
+            pending_folder: None,
+            replaced: false,
+            job: None,
+        }
+    }
+
+    /// Vanillish: benilla holds the boot's archive tables, so data that was complete at boot
+    /// needs a relaunch once an archive is added, removed or replaced.
+    #[test]
+    fn an_archive_changed_since_boot_needs_a_relaunch() {
+        let whole: Vec<(String, u64)> = kd::REQUIRED.iter().map(|n| (n.to_string(), 10)).collect();
+        let mut s = state(true, whole.clone());
+        assert!(!s.needs_restart());
+        // Replaced at another size, or one more.
+        s.status.present[0].1 = 11;
+        assert!(s.needs_restart());
+        s.status.present = whole.clone();
+        s.status.present.push(("patch-3.MPQ".into(), 5));
+        assert!(s.needs_restart());
+        // Replaced at the same size (a copy of a newer source): the job says so.
+        s.status.present = whole.clone();
+        assert!(!s.needs_restart());
+        let copied = |n| {
+            Ok(Outcome::Copied {
+                label: "WoW".into(),
+                done: ki::Copied {
+                    copied: n,
+                    ..Default::default()
+                },
+                original_bytes: 0,
+                missing: Vec::new(),
+            })
+        };
+        assert!(!puts_archives_in_place(&copied(0)));
+        assert!(puts_archives_in_place(&copied(1)));
+        assert!(puts_archives_in_place(&Ok(Outcome::Imported(2))));
+        assert!(!puts_archives_in_place(&Err("paused".into())));
+        s.replaced = true;
+        assert!(s.needs_restart());
+        // Not complete at boot: complete now needs one, as before; incomplete never.
+        let mut s = state(false, whole.clone());
+        assert!(s.needs_restart());
+        s.status.present.clear();
+        assert!(!s.needs_restart());
     }
 }
