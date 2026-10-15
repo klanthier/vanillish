@@ -98,24 +98,27 @@ pub(crate) fn new_token() -> String {
 /// - `0` Wi-Fi: `en0` on iOS, `wlan0` on Android;
 /// - `1` the phone's own network for others: its hotspot (`swlan0`, `ap0`), USB tethering
 ///   (`rndis0`, `ncm0`);
-/// - `2` a VPN (`tun0`, `wg0`): reachable from the VPN's other ends only;
-/// - `3` anything else, in the system's order;
-/// - dropped: Android's cellular data (`rmnet*`, `ccmni*` — the carrier's NAT, never reachable)
-///   and dummy interfaces.
+/// - `2` anything else, in the system's order: a desktop's `eth0`, `enp*`, `wlp*`; Android's USB
+///   Ethernet under DeX, Wi-Fi Direct, Bluetooth tethering;
+/// - `3` a VPN (`tun0`, `wg0`): last, as only the VPN's other ends can reach it;
+/// - dropped: Android's cellular data (`rmnet*`, `ccmni*` — the carrier's NAT, never reachable),
+///   the 464XLAT stand-in of an IPv6-only network (`v4-*`, 192.0.0.4, reachable from nowhere) and
+///   dummy interfaces.
 ///
-/// Vanillish: iOS only ever needed `en0` first; Android names its interfaces differently.
+/// Vanillish: iOS only ever needed `en0` first; Android names its interfaces differently. The
+/// sort is stable, so within a rank the system's order holds, as it did for all but `en0`.
 pub(crate) fn iface_rank(name: &str) -> Option<u8> {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|p| name.starts_with(p));
-    if starts(&["rmnet", "ccmni", "dummy"]) {
+    if starts(&["rmnet", "ccmni", "v4-", "dummy"]) {
         None
     } else if name == "en0" || name.starts_with("wlan") {
         Some(0)
     } else if starts(&["swlan", "ap", "rndis", "ncm"]) {
         Some(1)
     } else if starts(&["tun", "wg"]) {
-        Some(2)
-    } else {
         Some(3)
+    } else {
+        Some(2)
     }
 }
 
@@ -511,11 +514,15 @@ mod tests {
         assert_eq!(iface_rank("ap0"), Some(1));
         assert_eq!(iface_rank("rndis0"), Some(1));
         assert_eq!(iface_rank("ncm0"), Some(1));
-        assert_eq!(iface_rank("tun0"), Some(2));
-        assert_eq!(iface_rank("wg0"), Some(2));
-        assert_eq!(iface_rank("eth0"), Some(3));
-        assert_eq!(iface_rank("pdp_ip0"), Some(3));
+        assert_eq!(iface_rank("tun0"), Some(3));
+        assert_eq!(iface_rank("wg0"), Some(3));
+        assert_eq!(iface_rank("eth0"), Some(2));
+        assert_eq!(iface_rank("pdp_ip0"), Some(2));
+        // A desktop's wired LAN before its VPN; iOS's VPN (`utun`) is no `tun`.
+        assert!(iface_rank("enp3s0") < iface_rank("wg0"));
+        assert_eq!(iface_rank("utun3"), Some(2));
         assert_eq!(iface_rank("rmnet_data0"), None);
+        assert_eq!(iface_rank("v4-rmnet_data0"), None);
         assert_eq!(iface_rank("rmnet0"), None);
         assert_eq!(iface_rank("ccmni1"), None);
         assert_eq!(iface_rank("dummy0"), None);
