@@ -16,7 +16,8 @@
 //!   before it takes its final name — so an interrupted copy (Pause, a crash, the process killed in
 //!   the background) never leaves a half archive benilla would open;
 //! - [`mpq_looks_whole`], [`settled`] and [`rename_works`] are the guards the boot-time import of a
-//!   folder copied in over USB applies before it moves anything (`boot::import_from_documents`):
+//!   folder copied in over USB applies before it moves anything ([`launch_guard`], from
+//!   `boot::import_from_documents`):
 //!   that move runs before the app exists, where a copy or a folder a PC is still writing into must
 //!   never be taken.
 //!
@@ -496,6 +497,32 @@ pub fn rename_works(from: &Path, to: &Path) -> bool {
     ok
 }
 
+/// Why the folder of `status` must not be moved into `to` before the app exists, if it must not
+/// (the launch's import, `boot::import_from_documents`, where a copy or a half-written archive
+/// must never be taken):
+///
+/// 1. it changed within `quiet` ([`settled`]: a copy from a PC still running into it — the move
+///    would take a half-written archive and pull the folder from under the next file);
+/// 2. an archive's MPQ header places its tables past its end ([`cut_short`]);
+/// 3. moving it would not be a rename ([`rename_works`]: another mount, so the move would fall
+///    back to a copy).
+///
+/// The rename is probed last: its scratch file comes and goes in the folder, which makes the
+/// folder itself "just changed" to [`settled`].
+pub fn launch_guard(status: &DataStatus, to: &Path, quiet: Duration) -> Result<(), String> {
+    if !settled(status, quiet) {
+        return Err("it is still changing (a copy still running?)".into());
+    }
+    let cut = cut_short(status);
+    if !cut.is_empty() {
+        return Err(format!("{} look cut short", cut.join(", ")));
+    }
+    if !rename_works(&status.dir, to) {
+        return Err("moving it would be a copy, not a rename".into());
+    }
+    Ok(())
+}
+
 /// The desktop's listing of a real folder, walked by the Java side's rules (`FolderImport.java`):
 /// breadth first to `max_depth`, names starting with `.` skipped, [`SKIP_DIRS`] not entered, at
 /// most [`MAX_FOLDERS`] folders, only `*.mpq` files listed. Ids are paths relative to `root`.
@@ -613,6 +640,12 @@ mod tests {
             "primary:Download/WoW/World of Warcraft/Data/dbc.MPQ"
         );
         assert_eq!(l.files[0].modified_ms, 1_131_667_200_000);
+        // org.json escapes every `/` (and writes what it was given, field order aside).
+        let java = r#"{"truncated":true,"files":[{"modified":0,"doc":"primary:Download\/WoW\/Data\/dbc.MPQ","size":7,"path":"Data\/dbc.MPQ"}],"label":"WoW"}"#;
+        let l = Listing::parse(java).unwrap();
+        assert!(l.truncated);
+        assert_eq!(l.files[0].path, "Data/dbc.MPQ");
+        assert_eq!(l.files[0].id, "primary:Download/WoW/Data/dbc.MPQ");
         assert!(Listing::parse("not json").is_err());
         assert_eq!(
             parse_pending(r#"{"tree":"content://x/tree/primary%3AWoW","label":"WoW"}"#),
@@ -679,6 +712,23 @@ mod tests {
             listing2.label,
             root.file_name().unwrap().to_string_lossy().as_ref()
         );
+    }
+
+    /// A picked folder that is not a client (a whole Download, say) is not walked forever: the
+    /// listing stops after [`MAX_FOLDERS`] folders and says so.
+    #[test]
+    fn a_huge_folder_is_listed_in_part_and_says_so() {
+        let root = tmp("huge");
+        fs::write(root.join("dbc.MPQ"), fake_mpq(100, 1)).unwrap();
+        for i in 0..MAX_FOLDERS {
+            fs::create_dir(root.join(format!("f{i:03}"))).unwrap();
+        }
+        let listing = list_folder(&root, MAX_DEPTH);
+        assert!(listing.truncated);
+        assert_eq!(listing.files.len(), 1, "the top folder was read first");
+        // Exactly the limit (the picked folder and one less below it) is a whole listing.
+        fs::remove_dir(root.join("f000")).unwrap();
+        assert!(!list_folder(&root, MAX_DEPTH).truncated);
     }
 
     #[test]
@@ -927,6 +977,47 @@ mod tests {
         assert!(!rename_works(&a.join("missing"), &b));
         assert_eq!(fs::read_dir(&a).unwrap().count(), 0);
         assert_eq!(fs::read_dir(&b).unwrap().count(), 0);
+    }
+
+    /// The launch's guard takes a folder left alone and whole — and its rename probe, which
+    /// touches the folder, must not be what makes it look "still changing".
+    #[test]
+    fn the_launch_guard_takes_a_settled_whole_folder() {
+        let root = tmp("guard");
+        client(&root, "Data", 300);
+        let to = tmp("guard-to");
+        let st = data::status(&root.join("Data"));
+        let quiet = Duration::from_secs(15);
+        let age = |p: &Path| {
+            let old = SystemTime::now() - Duration::from_secs(3600);
+            fs::File::open(p).unwrap().set_modified(old).unwrap();
+        };
+        let age_all = || {
+            for (n, _) in &st.present {
+                age(&st.dir.join(n));
+            }
+            age(&st.dir);
+        };
+        let err = launch_guard(&st, &to, quiet).unwrap_err();
+        assert!(err.contains("still changing"), "{err}");
+        age_all();
+        assert_eq!(launch_guard(&st, &to, quiet), Ok(()));
+        assert_eq!(fs::read_dir(&to).unwrap().count(), 0);
+        assert_eq!(data::status(&st.dir).present, st.present);
+        // Moving into a folder elsewhere (here: one that is not there) is not a rename.
+        age_all();
+        let err = launch_guard(&st, &to.join("missing"), quiet).unwrap_err();
+        assert!(err.contains("not a rename"), "{err}");
+        // An archive cut short, however long ago.
+        let first = st.dir.join(&st.present[0].0);
+        let whole = fs::read(&first).unwrap();
+        fs::write(&first, &whole[..whole.len() - 40]).unwrap();
+        age_all();
+        let err = launch_guard(&st, &to, quiet).unwrap_err();
+        assert!(
+            err.contains(&st.present[0].0) && err.contains("cut short"),
+            "{err}"
+        );
     }
 
     #[test]
