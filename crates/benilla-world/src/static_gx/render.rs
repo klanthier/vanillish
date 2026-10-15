@@ -310,6 +310,8 @@ fn prepare_static_gx(
                 if cutout {
                     defs.push(ShaderDefVal::from("GX_CUTOUT"));
                 }
+                // Vanillish: the modern lighting look's defs, when the boot latched it on.
+                defs.extend(benilla_assets::modern_lighting().shader_defs());
                 let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(
                         format!("static_gx c{} t{}", u8::from(cutout), u8::from(two_sided)).into(),

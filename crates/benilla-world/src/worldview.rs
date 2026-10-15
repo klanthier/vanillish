@@ -132,6 +132,18 @@ pub fn run(build: BuildId) -> AppExit {
     // After `AssetPlugin`: the loaders go into the live `AssetServer`, as in the client.
     benilla_assets::register_asset_loaders(&mut app);
 
+    // Vanillish: which lighting look this run renders, from `$VANILLISH_MODERN` alone (the viewer
+    // has no CVar table), so a before/after pair proves its own variant.
+    let look = benilla_assets::modern_lighting();
+    if look.on {
+        info!(
+            "worldview: modern lighting (relief {} %, sheen {} %)",
+            look.relief, look.sheen
+        );
+    } else {
+        info!("worldview: the reference's lighting");
+    }
+
     let exit = app.run();
     match check {
         Some(_) => report_check(exit),

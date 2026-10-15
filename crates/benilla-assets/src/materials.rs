@@ -24,6 +24,18 @@ pub fn register_shaders(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/wow_model.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wdl.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid.wgsl");
+    // Vanillish: the modern lighting look's shared WGSL (`crate::modern_light`), an import library
+    // the shaders above and static_gx pull in behind `VANILLISH_MODERN`. Loaded, not only embedded,
+    // so the shader cache knows its import path; an app with no `Shader` asset (a loader test)
+    // compiles no pipeline and only embeds it.
+    if app
+        .world()
+        .contains_resource::<Assets<bevy::shader::Shader>>()
+    {
+        bevy::shader::load_shader_library!(app, "shaders/vanillish_modern.wgsl");
+    } else {
+        bevy::asset::embedded_asset!(app, "shaders/vanillish_modern.wgsl");
+    }
 }
 
 /// The WDL far-band shader's source, for the tests that live beside the renderer (`wdl.rs`).
@@ -139,6 +151,8 @@ impl MaterialExtension for WowModelExt {
         layout: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // Vanillish: the modern lighting look's defs, when the boot latched it on.
+        crate::modern_lighting().specialize(descriptor);
         // `WOW_RIG_SKIN` skins from the shared buffer's palette. The base layout lacks our joint
         // attributes: rebuild it with Bevy's conditionals (mesh.rs, locations 0-5) plus 10/11.
         if layout.0.contains(crate::ATTRIBUTE_WOW_JOINT_INDEX) {
@@ -330,6 +344,18 @@ impl MaterialExtension for WdlExt {
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/wdl.wgsl".into()
     }
+
+    /// Vanillish: the modern lighting look's defs, as on every world material. The band is the
+    /// flat fog colour with no light term, so `wdl.wgsl` has nothing to change under them.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        crate::modern_lighting().specialize(descriptor);
+        Ok(())
+    }
 }
 
 /// Liquid surfaces, one `liquid.wgsl` arm per reference liquid renderer: ADT MCLQ (the
@@ -385,6 +411,8 @@ impl MaterialExtension for LiquidExt {
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             ds.bias.constant = 0;
         }
+        // Vanillish: the modern lighting look's defs, when the boot latched it on.
+        crate::modern_lighting().specialize(descriptor);
         Ok(())
     }
 }
@@ -422,6 +450,18 @@ impl MaterialExtension for TerrainExtension {
     }
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/terrain.wgsl".into()
+    }
+
+    /// Vanillish: the modern lighting look's defs, when the boot latched it on; the base
+    /// `StandardMaterial` specialization is untouched.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        crate::modern_lighting().specialize(descriptor);
+        Ok(())
     }
 }
 

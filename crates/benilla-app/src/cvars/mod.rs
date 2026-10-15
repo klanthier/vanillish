@@ -594,6 +594,11 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
         let v = world.get_resource::<crate::world_backdrop::RenderScale>();
         out.push(("renderScale", v.map(|r| r.0.to_string())));
     }
+    // Vanillish: `$VANILLISH_MODERN` owns the modern lighting switch, so an A/B never sticks.
+    if benilla_assets::ModernLighting::env_owned() {
+        let v = world.get_resource::<benilla_assets::ModernLighting>();
+        out.push(("modernLighting", v.map(|m| flag(m.on))));
+    }
     // `$WOW_HOST` is the session's realmlist, which a test run must never write into the file.
     if set("WOW_HOST") {
         let v = world.get_resource::<crate::realmlist::Realmlist>();
@@ -1134,6 +1139,11 @@ mod tests {
         assert_eq!(d["boothHalfRate"] != 0.0, PaneRate::default().half);
         // Every visual golden assumes a 1:1 backdrop.
         assert_eq!(d["renderScale"], 1.0);
+        // Vanillish: the modern lighting look ships off, the reference's look.
+        assert_eq!(
+            d["modernLighting"] != 0.0,
+            benilla_assets::ModernLighting::STOCK.on
+        );
     }
 
     /// The FFX pass's three switches reach it one by one (`ffx`, `ffxGlow`, `ffxDeath`).
@@ -1273,6 +1283,12 @@ mod tests {
         assert!(res::<crate::perf::FpsJournalSetting>(&app).0);
         apply(&mut app, "fpsjournal", "0");
         assert!(!res::<crate::perf::FpsJournalSetting>(&app).0);
+        // Vanillish: the modern lighting switch ships off, so the flip to 1 proves the arm.
+        assert!(!res::<benilla_assets::ModernLighting>(&app).on);
+        apply(&mut app, "modernLighting", "1");
+        assert!(res::<benilla_assets::ModernLighting>(&app).on);
+        apply(&mut app, "modernlighting", "0");
+        assert!(!res::<benilla_assets::ModernLighting>(&app).on);
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         apply(&mut app, "EnableMusic", "0");
         assert!(!res::<SoundConfig>(&app).music_enabled);
@@ -1711,6 +1727,8 @@ mod tests {
             .init_resource::<crate::perf::FpsJournalSetting>()
             .init_resource::<crate::text_filter::TextFilterSwitches>()
             .init_resource::<crate::game_tip::GameTipSetting>()
+            // Vanillish: literal, as `ModernLighting::default()` reads `$VANILLISH_MODERN`.
+            .insert_resource(benilla_assets::ModernLighting::STOCK)
             .add_plugins(CvarPlugin);
         for observer in ALL_OBSERVERS {
             observer(&mut app);
@@ -1787,6 +1805,10 @@ mod tests {
         },
         |app| {
             app.add_observer(crate::world_backdrop::on_cvar);
+        },
+        // Vanillish: the modern lighting switch.
+        |app| {
+            app.add_observer(crate::modern_lighting::on_cvar);
         },
     ];
 

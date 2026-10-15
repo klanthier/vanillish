@@ -46,6 +46,9 @@ mod gpu_blp;
 pub use gpu_blp::{bc_supported, for_upload, publish_bc_support, BlpGpuSupportPlugin, UploadChain};
 mod tex_filter;
 pub use tex_filter::{publish_tex_filter, tex_filter, TexFilterSetting, ANISO_RANGE};
+// Vanillish: the opt-in modern lighting look, boot-latched like the filter policy.
+mod modern_light;
+pub use modern_light::{modern_lighting, publish_modern_lighting, ModernLighting};
 mod m2;
 pub use m2::{
     EmitterBillboard, M2Model, M2ModelLoader, M2SequenceInfo, ModelEmitter, ModelLight,

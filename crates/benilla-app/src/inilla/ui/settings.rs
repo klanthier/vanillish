@@ -96,6 +96,11 @@ fn general(ui: &mut egui::Ui, k: &mut Inilla) {
         );
     });
     hint(ui, words::RENDER_HINT);
+    // Vanillish: the modern lighting look, read at launch (iOS keeps iNilla's rows).
+    if !cfg!(target_os = "ios") {
+        ui.checkbox(&mut s.modern_lighting, words::MODERN_LIGHTING_ROW);
+        hint(ui, words::MODERN_LIGHTING_HINT);
+    }
     let mut auto = s.ui_scale == 0.0;
     row(ui, "Interface size", |ui| {
         if ui.checkbox(&mut auto, "Automatic").changed() {

@@ -17,6 +17,12 @@
     mesh_view_bindings::view,
     mesh_functions,
 }
+#ifdef VANILLISH_MODERN
+// Vanillish: the modern lighting look's shared maths (`benilla_assets::modern_light`), and the
+// alpha-mode flags its relief reads.
+#import benilla_assets::vanillish_modern as vm
+#import bevy_pbr::pbr_types
+#endif
 
 // bevy_pbr 0.18.1's `forward_io::FragmentOutput`. No depth output: a fragment depth write costs
 // the pipeline early-Z, so the sky lane pins its depth in the vertex stage.
@@ -131,6 +137,14 @@ struct WowVsOut {
 #ifdef WOW_MERGED_SLOT
     @location(10) @interpolate(flat) merged_slot: u32,
 #endif
+#ifdef VANILLISH_MODERN
+    // Vanillish: the camera-relative position, for the relief's screen-space frame (the absolute
+    // `world_position` interpolates ~9 k yd values, whose f32 steps would quantise its
+    // derivatives), and the three point lights picked per vertex (indices + 1, 0 an empty slot),
+    // lit per pixel in place of `point_lit`, which stays zero.
+    @location(11) vm_rel: vec3<f32>,
+    @location(12) @interpolate(flat) vm_lights: vec3<u32>,
+#endif
 }
 
 // Zero-safe normalize. M2s author `(0,0,0)` normals (`Creature\QuirajProphet`) and the reference
@@ -194,6 +208,100 @@ fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
     let iz = floor((half + P.z) / cell);
     return vec3<f32>((ix + 0.5) * cell - half, P.y, (iz + 0.5) * cell - half);
 }
+
+#ifdef VANILLISH_MODERN
+// Vanillish: `point_light_sum`'s selection alone, the same three lights as indices + 1 (0 an
+// empty slot), for the fragment stage to light per pixel.
+fn vm_pick_lights(anchor: vec3<f32>) -> vec3<u32> {
+    let count = u32(wow_light.point_count.x);
+    var sel = array<u32, 3>(0u, 0u, 0u);
+    var sd = array<f32, 3>(1e30, 1e30, 1e30);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = wow_light.points[2u * i];
+        let dv = pos_range.xyz - anchor;
+        let d2 = dot(dv, dv);
+        if (d2 > pos_range.w * pos_range.w) {
+            continue;
+        }
+        if (d2 < sd[0]) {
+            sd[2] = sd[1]; sel[2] = sel[1];
+            sd[1] = sd[0]; sel[1] = sel[0];
+            sd[0] = d2; sel[0] = i + 1u;
+        } else if (d2 < sd[1]) {
+            sd[2] = sd[1]; sel[2] = sel[1];
+            sd[1] = d2; sel[1] = i + 1u;
+        } else if (d2 < sd[2]) {
+            sd[2] = d2; sel[2] = i + 1u;
+        }
+    }
+    return vec3<u32>(sel[0], sel[1], sel[2]);
+}
+
+// The picked lights at a pixel, on its relief normal.
+fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        if (sel[s] == 0u) {
+            break;
+        }
+        let i = sel[s] - 1u;
+        sum += vm::point_light(P, N, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
+    }
+    return sum;
+}
+
+// The M2 texture transform's linear part (the fragment's `uv'`, less its translation), for the UV
+// derivatives the relief takes.
+fn vm_uv_linear(affine: vec4<f32>, d: vec2<f32>) -> vec2<f32> {
+    let s = d * vec2<f32>(1.0 + affine.z, 1.0 + affine.w);
+    let c = 1.0 + affine.x;
+    return vec2<f32>(s.x * c - s.y * affine.y, s.x * affine.y + s.y * c);
+}
+
+// The model lane's relief: four taps of the base colour texture around `uv` on the main sample's
+// mip, against the centre texel's height `hc`; `coverage` when the batch's alpha is coverage.
+fn vm_model_relief(
+    n: vec3<f32>,
+    uv: vec2<f32>,
+    d: vm::Derivs,
+    mip_bias: f32,
+    hc: f32,
+    coverage: bool,
+) -> vm::Relief {
+    let dims = vec2<f32>(textureDimensions(pbr_bindings::base_color_texture));
+    let g = vm::taps(d, dims, mip_bias);
+    let l = textureSampleGrad(
+        pbr_bindings::base_color_texture,
+        pbr_bindings::base_color_sampler,
+        uv - vec2<f32>(g.off.x, 0.0),
+        g.ddx,
+        g.ddy,
+    );
+    let r = textureSampleGrad(
+        pbr_bindings::base_color_texture,
+        pbr_bindings::base_color_sampler,
+        uv + vec2<f32>(g.off.x, 0.0),
+        g.ddx,
+        g.ddy,
+    );
+    let dn = textureSampleGrad(
+        pbr_bindings::base_color_texture,
+        pbr_bindings::base_color_sampler,
+        uv - vec2<f32>(0.0, g.off.y),
+        g.ddx,
+        g.ddy,
+    );
+    let up = textureSampleGrad(
+        pbr_bindings::base_color_texture,
+        pbr_bindings::base_color_sampler,
+        uv + vec2<f32>(0.0, g.off.y),
+        g.ddx,
+        g.ddy,
+    );
+    let f = vm::cotangent_frame(n, d);
+    return vm::relief(n, f.t, f.b, vm::heights(l, r, dn, up, hc, coverage), hc);
+}
+#endif
 
 #ifdef WOW_MERGED_FADE
 // The doodad fade curve (`0x683f80`, in sync with `model_fade::doodad_fade_alpha`): alpha =
@@ -344,6 +452,9 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     let p_cam = (frame_from_local * vec4<f32>(vertex.position, 1.0)).xyz
         + (frame_origin - view.world_position);
     out.world_position = vec4<f32>(p_cam + view.world_position, 1.0);
+#ifdef VANILLISH_MODERN
+    out.vm_rel = p_cam;
+#endif
     let view_rot = mat3x3<f32>(
         view.view_from_world[0].xyz,
         view.view_from_world[1].xyz,
@@ -411,13 +522,26 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         if (m.clutter_fade.w > 0.5) {
             anchor = mcnk_cell_anchor(out.world_position.xyz);
         }
+#ifdef VANILLISH_MODERN
+        // Vanillish: the same three lights, lit per pixel by the fragment stage.
+        out.vm_lights = vm_pick_lights(anchor);
+#else
         out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
+#endif
     }
     return out;
 }
 
 @fragment
 fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
+#ifdef VANILLISH_MODERN
+    // Vanillish: the relief's derivatives, before the first discard.
+#ifdef VERTEX_UVS_A
+    var vm_d = vm::derivs(in.vm_rel, in.uv);
+#else
+    var vm_d = vm::derivs(in.vm_rel, vec2<f32>(0.0));
+#endif
+#endif
     // The UI model tile's cell clip: the reference gives each `<Model>` pane its widget rect as the
     // viewport; our panes share an atlas, so the tile passes its cell as a mat-anim row
     // (`anim_slots.w`, `[min.x, min.y, max.x, max.y]` in atlas texels) and this is the scissor.
@@ -575,7 +699,49 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let n_m2 = wow_normalize(pbr_input.world_normal);
     // Bevy negates `world_normal` on back faces of double-sided materials (foliage, every WMO
     // face); the reference never enables GL_LIGHT_MODEL_TWO_SIDE (`0x59ce30`), so undo it.
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look tilts that normal by the relief, and every lane below reads the
+    // tilted one: the N·L, the SH lobe, the probes and the per-pixel point lights. Only lit,
+    // textured world batches take it: not an unlit (or M2 Mod/Mod2x) batch, an additive card, a
+    // multiply blend, a depth-prime twin, an env-mapped stage, a UI model tile or a glue rig. The
+    // gate is uniform data, so the branch is uniform too.
+    let vm_markers = u32(m.clutter_fade.z);
+    let vm_on = m.model_flags.w < 0.5
+        && (vm_markers & (4u | 128u | 256u | 512u | 4096u)) == 0u
+        && m.anim_slots.w < 0.5
+        && m.sun_scale.x < 1.5
+        && (pbr_input.material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u;
+    // The centre texel: Bevy's vertex-colour fold divided back out, as the WMO branch below does.
+#ifdef VERTEX_COLORS
+    let vm_tex = base.rgb / max(in.color.rgb, vec3<f32>(1.0 / 255.0));
+#else
+    let vm_tex = base.rgb;
+#endif
+    let vm_lum = vm::luma(vm_tex);
+    var vm_r = vm::unrelieved(select(-n_m2, n_m2, is_front));
+#ifdef VERTEX_UVS_A
+    if (vm_on) {
+        // The taps' derivatives through the texture transform; their mip is the main sample's,
+        // clutter's detail-doodad bias included.
+        let vm_aff = wow_light.matanim[u32(m.anim_slots.z)];
+        vm_d.duv_dx = vm_uv_linear(vm_aff, vm_d.duv_dx);
+        vm_d.duv_dy = vm_uv_linear(vm_aff, vm_d.duv_dy);
+        let vm_alpha = pbr_input.material.flags
+            & pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
+        vm_r = vm_model_relief(
+            vm_r.n,
+            vo.uv,
+            vm_d,
+            view.mip_bias + select(0.0, DETAIL_DOODAD_LOD_BIAS, is_clutter),
+            vm_lum,
+            vm_alpha != pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_OPAQUE,
+        );
+    }
+#endif
+    let n_lit = vm_r.n;
+#else
     let n_lit = select(-n_m2, n_m2, is_front);
+#endif
     let ndotl = max(dot(n_lit, L), 0.0);
     let lit_nl = clamp(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl, vec3<f32>(0.0), vec3<f32>(1.0));
     // The order-2 SH basis, shared by the exterior lobe and the interior probes.
@@ -691,7 +857,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         }
     }
     let sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
+#ifdef VANILLISH_MODERN
+    // Vanillish: the vertex stage's three lights, per pixel on the relief normal.
+    let point_diffuse = vm_lights_at(in.world_position.xyz, n_lit, in.vm_lights);
+#else
     let point_diffuse = in.point_lit;
+#endif
 
     // The hover/target highlight (tag bit 31): the scene's committed ambient
     // (`0x614576`-`0x6145bd`), added to the batch colour inside the final clamp, lit or unlit
@@ -766,6 +937,27 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     if ((is_mod || is_mod2x) && !is_wmo) {
         rgb = base.rgb;
     }
+#ifdef VANILLISH_MODERN
+    // Vanillish: the relief's cavity on the lit colour, then the sun's sheen on exterior lit
+    // surfaces: none indoors, on clutter, or on a doodad or unit in MCSH shade, and a WMO's MOCV
+    // (its baked occlusion) dims it. The sum stays in the frame's [0, 1].
+    if (vm_on) {
+        var vm_sheen = vec3<f32>(0.0);
+        if (!is_interior && !is_clutter) {
+            let vm_v = -in.vm_rel * inverseSqrt(max(dot(in.vm_rel, in.vm_rel), 1e-12));
+            let vm_sun = select(1.0, select(1.0 - shade_t, 1.0, mid_band), use_doodad_shade);
+            var vm_occ = vec3<f32>(1.0);
+#ifdef VERTEX_COLORS
+            if (is_wmo) {
+                vm_occ = in.color.rgb;
+            }
+#endif
+            let vm_s = vm::sheen(n_lit, L, vm_v, vm::MODEL_SHININESS) * vm::gloss(vm_lum) * vm_sun;
+            vm_sheen = vm_occ * vm::sheen_rgb(wow_light.light_diffuse.rgb, vm_tex, vm_s);
+        }
+        rgb = clamp(rgb * vm_r.cavity + vm_sheen, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+#endif
 
     // Linear fog by planar eye depth, as in terrain.wgsl. Per-batch colour policy (`clutter_fade.z`
     // bits 4-6, the M2 state setter `0x70baf0`): 0 scene, 1 black (additive), 2 white (Mod),

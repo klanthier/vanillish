@@ -28,6 +28,10 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::{view, globals},
 }
+#ifdef VANILLISH_MODERN
+// Vanillish: the modern lighting look's shared maths (`benilla_assets::modern_light`).
+#import benilla_assets::vanillish_modern as vm
+#endif
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var frames: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var frames_samp: sampler;
@@ -128,6 +132,22 @@ fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>, room_fog: u32) -> vec3<f32> {
     let factor = clamp((fog_span.y - eye_z) / denom, 0.0, 1.0);
     return mix(fog_color.xyz, rgb, factor);
 }
+
+#ifdef VANILLISH_MODERN
+// Vanillish: the modern look's water at a pixel: the sun sheen per pixel (the vertex's, at the
+// pixel's own view), and how much of the sky a grazing view sees in it, by fresnel. The sky is
+// the scene fog's colour, `Light.dbc`'s horizon haze, the one sky colour this buffer carries.
+fn vm_sheen_px(in: LiquidVsOut) -> vec3<f32> {
+    return sun_sheen(in.world_normal, in.world_position.xyz);
+}
+
+fn vm_sky_share(in: LiquidVsOut) -> f32 {
+    let v = normalize(view.world_position.xyz - in.world_position.xyz);
+    // Liquids are drawn two-sided: the side facing the eye reflects.
+    let n = normalize(in.world_normal);
+    return vm::fresnel(select(-n, n, dot(n, v) >= 0.0), v) * vm::WATER_LIFT;
+}
+#endif
 
 @vertex
 fn vertex(in: Vertex) -> LiquidVsOut {
@@ -252,10 +272,25 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         ) * deep.rgb;
+#ifdef VANILLISH_MODERN
+        // Vanillish: the modern look's sheen per pixel, and a grazing view's sky lift on the
+        // colour and the opacity.
+        let vm_f = vm_sky_share(in);
+        let rgb_ext = mix(
+            primary_ext + detail.rgb + vm_sheen_px(in) * detail.a,
+            wow_light.fog_color.xyz,
+            vm_f,
+        );
+        return vec4<f32>(
+            apply_fog(rgb_ext, in.world_position.xyz, in.room_fog),
+            mix(vtx_alpha, 1.0, vm_f),
+        );
+#else
         let rgb_ext = primary_ext + detail.rgb + in.secondary_vtx * detail.a;
         // Alpha is `fragment.color.primary` alone: the bound program bypasses the texture
         // environment, so the interior arm's `+ At` does not apply.
         return vec4<f32>(apply_fog(rgb_ext, in.world_position.xyz, in.room_fog), vtx_alpha);
+#endif
     }
 
     // The ADT arm. `primary`: the lit white vertex.
@@ -268,7 +303,12 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         vec3<f32>(1.0),
     );
 
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look's sun sheen, per pixel.
+    let secondary = vm_sheen_px(in);
+#else
     let secondary = in.secondary_vtx;
+#endif
 
     // colorTex: the stage-0 depth swatch.
     let swatch = swatch_at(shallow, deep, depth, w.kind.y > 0.5);
@@ -276,8 +316,16 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // The `ocean0_s.bls` combine.
     var rgb = primary * swatch.rgb + detail.rgb + (secondary + vec3<f32>(0.25)) * detail.a;
 
+#ifdef VANILLISH_MODERN
+    // Vanillish: a grazing view sees the sky in the water, so its colour and its opacity lift
+    // toward it.
+    let vm_f = vm_sky_share(in);
+    rgb = mix(rgb, wow_light.fog_color.xyz, vm_f);
+    let alpha = mix(swatch.w, 1.0, vm_f);
+#else
     // `colorTex.a`, over the same V as the colour: deeper water is more opaque.
     let alpha = swatch.w;
+#endif
 
     rgb = apply_fog(rgb, in.world_position.xyz, in.room_fog);
 

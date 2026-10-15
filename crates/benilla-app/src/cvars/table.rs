@@ -721,6 +721,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — 1.12 has no player-side perf log; its nearest thing is the \
          Ctrl+R framerate label, a number with no file behind it",
     ),
+    // Vanillish: the opt-in modern lighting look (`benilla_assets::ModernLighting`): the sun and
+    // the point lights per pixel, relief and cavities read from the albedo, a soft sun sheen, the
+    // water's sky lift. Read once at boot (`crate::modern_lighting`), so a change applies at the
+    // next launch; `$VANILLISH_MODERN` overrides it for the session.
+    ours(
+        "modernLighting",
+        "0",
+        "Vanillish's own — the reference lights per vertex in gamma space and has no other \
+         path; \"0\" is that look, and \"1\" a deliberate, opt-in deviation from it",
+    ),
     // `lastCharacterIndex` (`0x402d93`, "0" `0x82e570`, category 4, handle `[0x882674]`), help
     // "Last character selected": a 0-based row (the selection cell `[0x83856c]` under `"%d"`), so
     // "0" is the first character. It mirrors [`crate::char_select::Roster::pending_index`].

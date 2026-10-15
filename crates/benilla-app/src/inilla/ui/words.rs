@@ -214,6 +214,15 @@ pub(crate) const RENDER_HINT: &str = if ANDROID {
     "The 3D world renders at this fraction of the screen; the interface stays sharp. 80 % is a good phone default."
 };
 
+/// Vanillish: the modern lighting switch (`modern_lighting`), read when the app starts.
+pub(crate) const MODERN_LIGHTING_ROW: &str = "Modern lighting (restart)";
+pub(crate) const MODERN_LIGHTING_HINT: &str = concat!(
+    "Sunlight and torchlight per pixel, relief and soft highlights drawn from the game's own \
+     textures, and water that catches the sky. The art stays the same. Applies the next time ",
+    app!(),
+    " starts, and costs some battery."
+);
+
 pub(crate) const UI_SCALE_HINT: &str = if ANDROID {
     "Automatic keeps a stock action button about a fingertip wide: 1.25 on the cover screen, \
      smaller on the inner screen, which has room for more."

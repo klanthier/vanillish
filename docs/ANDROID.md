@@ -307,6 +307,45 @@ system's thermal service. The Fold8 Ultra cools with graphite sheets, without a 
 a long session at High is likely to throttle; Balanced, the default, is the preset for long play.
 Nothing steps the preset down by itself yet.
 
+## Modern lighting
+
+Settings → General → **Modern lighting (restart)**, off by default, keeps the game's hand-painted
+textures and changes how they are lit. It applies at the next start. With it on:
+
+- **Sunlight per pixel.** The zone's own sun and ambient colours (`Light.dbc`) and the same sun
+  direction, evaluated per pixel instead of per vertex, so the ground no longer shades in 4-yard
+  steps.
+- **Relief from the textures.** Each texel's brightness is read as height: four extra texture
+  reads per pixel tilt the surface normal, so bricks, planks, bark and cobbles catch the light,
+  and the cracks between them darken a little. No new art, and no tangent data in the models.
+- **A soft sheen.** A small, warm highlight from the sun on bright texels (painted metal, glazed
+  stone, leaves) of outdoor surfaces; terrain keeps its own highlight masks (the `_s` textures).
+  None indoors or in shade.
+- **Round torch pools.** The three point lights each surface already picks are lit per pixel, so a
+  torch throws a round pool instead of a diamond on the ground.
+- **Water.** The sun's glint per pixel, and a grazing view lifts the water toward the sky's colour
+  and opacity.
+
+Nothing else changes: the same passes, the colours written in the same form, the interface and the
+glow untouched. The cost is shader work: four texture reads and a few dozen operations per lit
+pixel (terrain: four per texture layer it blends, mostly one or two). Try it at 60 fps first, and
+watch **Show frame rate, memory and heat** (above) at 120.
+
+On a computer the same look is `/console modernLighting 1` and a restart, or, for one session,
+`VANILLISH_MODERN=1` (which wins over the setting). `VANILLISH_RELIEF` and `VANILLISH_SHEEN` set
+the relief's and the sheen's strength in percent (100 by default, 0 to 400). The world viewer shows
+a before and after of one spot:
+
+```sh
+WOW_MAP=1 WOW_WORLDVIEW_AT=-618.5,-4251.7,38.7 WOW_CLOCK=600 \
+  WOW_WORLDVIEW_SHOT=/tmp/before.png cargo run -p benilla-worldview
+VANILLISH_MODERN=1 WOW_MAP=1 WOW_WORLDVIEW_AT=-618.5,-4251.7,38.7 WOW_CLOCK=600 \
+  WOW_WORLDVIEW_SHOT=/tmp/after.png cargo run -p benilla-worldview
+```
+
+(the Valley of Trials, at ten in the morning; `cargo test -p benilla-assets --lib compose_tests`
+checks that every world shader still compiles both ways).
+
 ## The soft keyboard and the chat bar
 
 Vanillish types with the system keyboard (Gboard, Samsung Keyboard), suggestions and autocorrect
@@ -427,7 +466,7 @@ Everything else is iNilla's ([INILLA.md](INILLA.md#settings)).
 
 | tab | on Android |
 |---|---|
-| General | Graphics shows each preset's frame rate (Battery saver 30 fps, Balanced 60 fps, High at the panel's rate), and its hint says High is best on a charger. Interface size: automatic per screen (above). **Keep windows clear of the camera cutout** in place of the Dynamic Island row. Three rows only Android has: **Inner screen: follow the device into portrait** (off), **Stay connected in the background** (on), **Hide the touch controls while a mouse or keyboard is in use** (on). |
+| General | Graphics shows each preset's frame rate (Battery saver 30 fps, Balanced 60 fps, High at the panel's rate), and its hint says High is best on a charger. Interface size: automatic per screen (above). **Keep windows clear of the camera cutout** in place of the Dynamic Island row. **Modern lighting (restart)** (off; [above](#modern-lighting)), also on a desktop. Three rows only Android has: **Inner screen: follow the device into portrait** (off), **Stay connected in the background** (on), **Hide the touch controls while a mouse or keyboard is in use** (on). |
 | Touch | **This screen** (the screen class), **Copy the phone layout here**, **Tabletop: the game above the hinge, the controls below it** (on). **Reset layout** puts back this screen's own layout. |
 | Controller | the pairing hint names Android's Bluetooth settings and USB-C clips. |
 | Audio | no silent-switch row: Android has no switch, and Mute or Vibrate mode does not silence the game (the volume keys set its volume). **Let music and podcasts from other apps keep playing** off asks Android for the audio focus, which pauses them. |
@@ -436,7 +475,8 @@ Everything else is iNilla's ([INILLA.md](INILLA.md#settings)).
 
 In `benilla-config/inilla/settings.toml` the Android-only settings are `tabletop_split`,
 `inner_any_orientation`, `stay_connected` and `hide_touch_with_mouse`, and `last_game_mode` is
-the memory behind Game Dashboard (not a switch).
+the memory behind Game Dashboard (not a switch). `modern_lighting` is the modern lighting switch,
+which writes benilla's `modernLighting` in `benilla-config/config.toml`.
 
 ## Where the files are
 

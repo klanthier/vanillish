@@ -54,6 +54,12 @@ What a sync can break without a conflict, and the build alone will not show:
   updated together ([ANDROID-BUILD.md](ANDROID-BUILD.md#toolchain)).
 - **A new dependency with no Android backend** (as `arboard` has none): the Android type-check
   catches it; gate it like `arboard` in `crates/benilla-app/Cargo.toml`.
+- **A lighting change in a world shader.** `terrain.wgsl`, `wow_model.wgsl`, `liquid.wgsl` and
+  `static_gx.wgsl` carry the modern lighting path behind `#ifdef VANILLISH_MODERN`, which reads
+  the stock code around it. A benilla change there merges cleanly and the stock look stays right,
+  but the modern path may need the same change; `cargo test -p benilla-assets --lib compose_tests`
+  composes every shader with and without the look, and the eye judges the rest
+  (`docs/ANDROID.md`, "Modern lighting").
 
 ## The carries
 
@@ -81,6 +87,16 @@ change that adds Android behaviour is.
 | `crates/benilla-world/src/boot.rs` | `unpipelined_on_android`: no pipelined rendering on Android, where a surface taken mid-present is lost and Bevy panics; `VANILLISH_PIPELINED=1` keeps it, to measure |
 | `crates/benilla-world/src/interact/pick.rs` | `cursor_over_view`: a cursor outside what the camera draws (a tabletop's deck) casts no ray, as `viewport_to_world` would cast one below the drawn frustum; `pick_at_cursor` and `pick_object_at_cursor` apply it; a camera whose target is not measured yet refuses nothing |
 | `crates/benilla-world/src/interact/mod.rs` | `pub use pick::cursor_over_view`, for the app's other cursor rays (the hovers, the camera) |
+| `crates/benilla-assets/Cargo.toml` | dev-dependencies `naga` and `naga_oil`, for the world shaders' composition tests (`modern_light::compose_tests`); both already in the graph through Bevy, with no feature added |
+| `crates/benilla-assets/src/lib.rs` | `mod modern_light` and its exports: the opt-in modern lighting look, boot-latched like the texture filter |
+| `crates/benilla-assets/src/materials.rs` | `register_shaders` loads `vanillish_modern.wgsl` as an import library (embeds it only where there is no `Shader` asset); the terrain, model, WDL and liquid materials' `specialize` (new on terrain and WDL) push `modern_lighting()`'s defs |
+| `crates/benilla-assets/src/shaders/terrain.wgsl`, `wow_model.wgsl`, `liquid.wgsl`, `crates/benilla-world/src/shaders/static_gx.wgsl` | the modern lighting path, every line behind `#ifdef VANILLISH_MODERN` (with the def off, each file is today's token for token): the sun and the three picked point lights per pixel on a relief normal from four albedo taps, the cavity, the sheen; on water the sheen per pixel and the fresnel sky lift. A benilla change to these files' lighting may need its twin in the modern path: the composition tests prove only that it still compiles |
+| `crates/benilla-world/src/static_gx/render.rs` | the four pipelines take `modern_lighting()`'s defs |
+| `crates/benilla-world/src/worldview.rs` | logs which lighting look the run renders (`$VANILLISH_MODERN`), so a before/after pair proves its variant |
+| `crates/benilla-app/src/lib.rs`, `crates/benilla-app/src/game_plugins.rs` | `mod modern_lighting` and its plugin (the `modernLighting` knob and boot latch), before `CvarPlugin` |
+| `crates/benilla-app/src/cvars/table.rs` | the `modernLighting` row, `ours`, default `"0"` (the reference's look) |
+| `crates/benilla-app/src/cvars/mod.rs` | `$VANILLISH_MODERN` owns `modernLighting` for the session; the tests' knob, observer and arm |
+| `crates/benilla-app/src/pipe_warm/mod.rs` | a paragraph: the modern look is one def set latched at boot, so the warm set needs no axis for it |
 
 **In iNilla's files:**
 
@@ -89,7 +105,7 @@ change that adds Android behaviour is.
 | `README.md`, `AGENTS.md`, `docs/UPSTREAM.md` | a Vanillish section on top; iNilla's text below it unchanged |
 | `.github/workflows/inilla-ipa.yml` | tags `v*` but not `vanillish-v*`, which `vanillish-apk.yml` builds |
 | `crates/inilla-core/src/lib.rs` | `mod fold`, `mod import`, `mod connect` |
-| `crates/inilla-core/src/settings.rs` | `tabletop_split`, `inner_any_orientation`, `stay_connected`, `last_game_mode`, `hide_touch_with_mouse`; `GameMode` and `follow_game_mode` (Game Dashboard picks the preset), tested |
+| `crates/inilla-core/src/settings.rs` | `tabletop_split`, `inner_any_orientation`, `stay_connected`, `last_game_mode`, `hide_touch_with_mouse`, `modern_lighting` (and `modern_lighting_cvar`, the CVar it writes); `GameMode` and `follow_game_mode` (Game Dashboard picks the preset), tested |
 | `crates/inilla-core/src/touch.rs` | the screen split at a hinge (the world above, the deck below) and the deck's look pad (`park`, public for the controller's look); pen hover, with no cursor over the deck; mouse buttons 3–5; the layout's screen class; the hub's radii; on the inner screen and the tabletop the radial at the thumb and capped at 170 pt (a phone class, so every iOS device, keeps iNilla's size) |
 | `crates/inilla-core/src/data.rs` | the build-mismatch message says "this client", not "iNilla" |
 | `crates/inilla-core/src/profiles.rs` | `ServerProfile::info` (where the server described itself, for quick connect to ask again), `DataSource::locale` (the language picked, so a resumed download stays in it), `DataSource::token_key` (the access code's keychain key); both fields default, so an older `servers.toml` loads (tested) |
@@ -110,11 +126,11 @@ change that adds Android behaviour is.
 | `crates/benilla-app/src/inilla/icons.rs` | button tooltips anchored over the world's rect (above the hinge on a tabletop), offset by `UIParent`'s edges, in its own units |
 | `crates/benilla-app/src/inilla/mouse.rs` | the middle, back and forward buttons |
 | `crates/benilla-app/src/inilla/pad.rs` | `gamepad::NATIVE` in place of `cfg!(target_os = "ios")`; on a tabletop the cursor kept to the world above the hinge, and the look pressed where the touch look parks |
-| `crates/benilla-app/src/inilla/platform.rs` | `ImePurpose`, `BackPresses`; Android's safe area, re-read after a screen change; the screen kept on during a data job; iNilla's own fields raise the keyboard; the interface scale per screen class; the preset's CVars only when the preset changes; `Pacing` (the frame cap stands down when the display paces); `clear_the_island` for a top cut-out and the hinge, and while it insets, the stock open-bag stack (`updateContainerFrameAnchors`) measuring `UIParent` instead of the screen (`island_chunk`, tested) |
+| `crates/benilla-app/src/inilla/platform.rs` | `ImePurpose`, `BackPresses`; Android's safe area, re-read after a screen change; the screen kept on during a data job; iNilla's own fields raise the keyboard; the interface scale per screen class; the preset's CVars only when the preset changes; the modern lighting switch written to `modernLighting` (off iOS); `Pacing` (the frame cap stands down when the display paces); `clear_the_island` for a top cut-out and the hinge, and while it insets, the stock open-bag stack (`updateContainerFrameAnchors`) measuring `UIParent` instead of the screen (`island_chunk`, tested) |
 | `crates/benilla-app/src/inilla/store.rs` | a layout file per screen class; `remove_layout` |
 | `crates/benilla-app/src/inilla/touch.rs` | `HudScreen`; the HUD steps aside for a hardware mouse or keyboard; pen hover |
 | `crates/benilla-app/src/inilla/ui/mod.rs` | the words from `words.rs`; `restart()` relaunches; Back closes iNilla's screens first; each field's `ImePurpose`; the layout editor handed the layout's own screen (`HudScreen.layout_screen`); `Panel::Connect` and `Overlay::{connect, connect_home}`: with quick connect the first screen is Connect (`first_screen`), the setup screen's header leads back to it and so does Back; the font test reads the connect files |
-| `crates/benilla-app/src/inilla/ui/settings.rs` | the Android rows, the frame rates, the Touch tab's screen class and tabletop switch, no silent-switch row, Share session log, Reset all resets every screen's layout |
+| `crates/benilla-app/src/inilla/ui/settings.rs` | the Android rows, Modern lighting (restart) off iOS, the frame rates, the Touch tab's screen class and tabletop switch, no silent-switch row, Share session log, Reset all resets every screen's layout |
 | `crates/benilla-app/src/inilla/ui/setup.rs` | Import from folder…, Resume, the free space, Pause for the copy; the notice in place of the setup when shared storage did not answer at launch; the words; the running job's progress split out (`progress`), for Connect's download |
 | `crates/benilla-app/src/inilla/ui/launcher.rs` | the words; password and address fields; with quick connect, **Connect to a server…** for **+ Add server** and **Create account** on a server that described itself; `ServerForm::{prefilled, edit_noted}` (the form Connect opens on a plain realm, with its note), an edit keeping `info` and the data's `locale`; deleting a server deletes its access code |
 | `crates/benilla-app/src/inilla/ui/logs.rs` | Android's copy capped to the last lines; Share… |
@@ -124,7 +140,9 @@ Vanillish's new files in iNilla's crates conflict with nothing unless iNilla add
 name: `inilla-core/src/{fold,import,connect}.rs`, `inilla-platform/src/{picker,pointer}.rs`,
 `inilla-platform/src/gamepad/android.rs`, `inilla-platform/src/android/`, and in
 `benilla-app/src/inilla/`: `android.rs`, `screen.rs`, `host_pointer.rs`, `connect.rs`,
-`ui/connect.rs`, `ui/words.rs`.
+`ui/connect.rs`, `ui/words.rs`. In benilla's crates, the modern lighting look's:
+`benilla-assets/src/modern_light.rs`, `benilla-assets/src/modern_light/compose_tests.rs`,
+`benilla-assets/src/shaders/vanillish_modern.wgsl` and `benilla-app/src/modern_lighting.rs`.
 
 Neither benilla nor iNilla builds for Android, so nothing there notices a change that breaks the
 Android build; `vanillish-check`'s Android type-check is what catches it.

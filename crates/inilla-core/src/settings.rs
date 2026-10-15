@@ -141,6 +141,10 @@ pub struct InillaSettings {
     /// Vanillish: hide the touch HUD while a hardware mouse or keyboard is being used (Samsung
     /// DeX, Bluetooth); the next touch brings it back.
     pub hide_touch_with_mouse: bool,
+    /// Vanillish: the modern lighting look (benilla's `modernLighting` CVar, read at launch):
+    /// per-pixel sun and torch light, relief and a soft sheen from the game's own textures. Off by
+    /// default, the reference's look.
+    pub modern_lighting: bool,
 }
 
 /// Vanillish: the system's game mode, where it has one (Android's Game Dashboard) — the player
@@ -190,6 +194,7 @@ impl Default for InillaSettings {
             stay_connected: true,
             last_game_mode: None,
             hide_touch_with_mouse: true,
+            modern_lighting: false,
         }
     }
 }
@@ -229,6 +234,15 @@ impl InillaSettings {
         self.quality = preset;
         Some(preset)
     }
+
+    /// Vanillish: the CVar [`Self::modern_lighting`] writes, `(name, value)` in benilla's spelling.
+    /// benilla reads it once at launch, so a change shows at the next one.
+    pub fn modern_lighting_cvar(&self) -> (&'static str, &'static str) {
+        (
+            "modernLighting",
+            if self.modern_lighting { "1" } else { "0" },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +275,20 @@ mod tests {
         assert_eq!(partial.last_game_mode, None);
         // Vanillish: a settings file from before the host mouse steps the HUD aside too.
         assert!(partial.hide_touch_with_mouse);
+        // Vanillish: and one from before the modern look keeps the reference's.
+        assert!(!partial.modern_lighting);
+    }
+
+    /// Vanillish: the switch writes benilla's `modernLighting` CVar, `"0"` (the reference's look)
+    /// unless the player turns it on.
+    #[test]
+    fn the_modern_lighting_switch_is_its_cvar() {
+        let mut s = InillaSettings::default();
+        assert_eq!(s.modern_lighting_cvar(), ("modernLighting", "0"));
+        s.modern_lighting = true;
+        assert_eq!(s.modern_lighting_cvar(), ("modernLighting", "1"));
+        let back: InillaSettings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert!(back.modern_lighting, "the switch survives a save");
     }
 
     #[test]

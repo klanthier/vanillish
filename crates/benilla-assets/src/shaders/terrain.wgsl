@@ -15,6 +15,10 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
+#ifdef VANILLISH_MODERN
+// Vanillish: the modern lighting look's shared maths (`benilla_assets::modern_light`).
+#import benilla_assets::vanillish_modern as vm
+#endif
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var layer_array: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var alpha_array: texture_2d_array<f32>;
@@ -56,11 +60,18 @@ struct TerrainVsOut {
     @location(2) uv: vec2<f32>,
     @location(3) uv_b: vec2<f32>,
     @location(4) color: vec4<f32>,
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look lights per pixel, so in place of the Gouraud terms the MCNR
+    // normal and the chunk's three point lights (indices + 1, 0 an empty slot).
+    @location(1) vm_normal: vec3<f32>,
+    @location(7) @interpolate(flat) vm_lights: vec3<u32>,
+#else
     @location(5) specular: vec3<f32>,
     // The Gouraud diffuse, summed and clamped per vertex as GL T&L does: an over-gamut light (a
     // carried torch is (1.4, 0.87, 0.40)) saturates one vertex and falls off linearly from it,
     // where clamping per pixel would pin a wide plateau at white.
     @location(6) primary: vec3<f32>,
+#endif
 }
 
 // Terrain's point-light candidacy half-width (yd): `w + 10`, `w` being the chunk's bounding-sphere
@@ -131,6 +142,63 @@ fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
     return vec3<f32>((ix + 0.5) * cell - half, P.y, (iz + 0.5) * cell - half);
 }
 
+#ifdef VANILLISH_MODERN
+// Vanillish: `point_light_sum`'s selection alone, the same three lights as indices + 1 (0 an
+// empty slot), for the fragment stage to light per pixel.
+fn vm_pick_lights(anchor: vec3<f32>) -> vec3<u32> {
+    let count = u32(wow_light.point_count.x);
+    var sel = array<u32, 3>(0u, 0u, 0u);
+    var sd = array<f32, 3>(1e30, 1e30, 1e30);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = wow_light.points[2u * i];
+        let dv = pos_range.xyz - anchor;
+        let d2 = dot(dv, dv);
+        if (max(abs(dv.x), abs(dv.z)) > TERRAIN_REACH) {
+            continue;
+        }
+        if (d2 < sd[0]) {
+            sd[2] = sd[1]; sel[2] = sel[1];
+            sd[1] = sd[0]; sel[1] = sel[0];
+            sd[0] = d2; sel[0] = i + 1u;
+        } else if (d2 < sd[1]) {
+            sd[2] = sd[1]; sel[2] = sel[1];
+            sd[1] = d2; sel[1] = i + 1u;
+        } else if (d2 < sd[2]) {
+            sd[2] = d2; sel[2] = i + 1u;
+        }
+    }
+    return vec3<u32>(sel[0], sel[1], sel[2]);
+}
+
+// The picked lights at a pixel, on its relief normal.
+fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        if (sel[s] == 0u) {
+            break;
+        }
+        let i = sel[s] - 1u;
+        sum += vm::point_light(P, N, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
+    }
+    return sum;
+}
+
+// The least splat weight a layer's relief is tapped at: below it the layer moves the blended
+// heights by under 4 %, and a pixel mostly blends one or two layers, so it mostly takes 4 or 8 taps
+// rather than 16.
+const VM_LAYER_MIN: f32 = 0.04;
+
+// One splat layer's four relief taps, as heights (left, right, down, up).
+fn vm_layer_heights(layer: i32, uv: vec2<f32>, g: vm::Taps) -> vec4<f32> {
+    let l = textureSampleGrad(layer_array, splat_samp, uv - vec2<f32>(g.off.x, 0.0), layer, g.ddx, g.ddy);
+    let r = textureSampleGrad(layer_array, splat_samp, uv + vec2<f32>(g.off.x, 0.0), layer, g.ddx, g.ddy);
+    let dn = textureSampleGrad(layer_array, splat_samp, uv - vec2<f32>(0.0, g.off.y), layer, g.ddx, g.ddy);
+    let up = textureSampleGrad(layer_array, splat_samp, uv + vec2<f32>(0.0, g.off.y), layer, g.ddx, g.ddy);
+    // The layers' alpha is the `_s` sheen mask, not coverage.
+    return vm::heights(l, r, dn, up, 0.0, false);
+}
+#endif
+
 @vertex
 fn vertex(in: Vertex) -> TerrainVsOut {
     var out: TerrainVsOut;
@@ -143,6 +211,12 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     out.uv_b = in.uv_b;
     out.color = in.color;
 
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look lights per pixel; the vertex hands on the normal and the chunk's
+    // three lights, picked from the same anchor.
+    out.vm_normal = world_normal;
+    out.vm_lights = vm_pick_lights(mcnk_cell_anchor(out.world_position.xyz));
+#else
     // Sun specular per vertex: white material, row-9 colour, shininess `light_spec.w` (20), local
     // viewer; clamped here, then Gouraud-interpolated.
     let n = normalize(world_normal);
@@ -161,11 +235,17 @@ fn vertex(in: Vertex) -> TerrainVsOut {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
+#endif
     return out;
 }
 
 @fragment
 fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
+#ifdef VANILLISH_MODERN
+    // Vanillish: the relief's UV derivatives, before the far-clip discard; terrain's frame is its
+    // known axes, so no position derivatives.
+    let vm_d = vm::derivs(vec3<f32>(0.0), in.uv * t.params.x);
+#endif
     // The far-clip wall: the reference clips the detailed world per pixel at its far plane
     // (`farclip`, about 777 yd). Discard beyond `fog_params.w` (0 disables) on planar eye-Z.
     if (wow_light.fog_params.w > 0.0) {
@@ -205,7 +285,60 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     specmask = mix(specmask, s2.a, a.g);
     specmask = mix(specmask, s3.a, a.b);
 
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look. The relief reads the splat's own luminance: each layer that
+    // weighs at least VM_LAYER_MIN in the blend is tapped four times and its heights blended by
+    // its splat weight (luma is linear, so this is the blended colour's luminance). It tilts the
+    // MCNR normal along the tile's axes: u runs +X and v +Z (`benilla_formats::terrain`: columns
+    // step east, rows south; Bevy x, z = −WoW y, −WoW x), each projected into the surface plane.
+    // The reference's terms are then lit per pixel on it: the diffuse sum clamped as before, and
+    // row 9's sheen, still masked by `_s`.
+    let vm_tap = vm::taps(vm_d, vec2<f32>(textureDimensions(layer_array).xy), view.mip_bias);
+    let vm_w = vec4<f32>(
+        (1.0 - a.r) * (1.0 - a.g) * (1.0 - a.b),
+        a.r * (1.0 - a.g) * (1.0 - a.b),
+        a.g * (1.0 - a.b),
+        a.b,
+    );
+    var vm_h = vec4<f32>(0.0);
+    var vm_hc = 0.0;
+    if (vm_w.x >= VM_LAYER_MIN) {
+        vm_h += vm_w.x * vm_layer_heights(li.x, tiled, vm_tap);
+        vm_hc += vm_w.x * vm::luma(s0.rgb);
+    }
+    if (vm_w.y >= VM_LAYER_MIN) {
+        vm_h += vm_w.y * vm_layer_heights(li.y, tiled, vm_tap);
+        vm_hc += vm_w.y * vm::luma(s1.rgb);
+    }
+    if (vm_w.z >= VM_LAYER_MIN) {
+        vm_h += vm_w.z * vm_layer_heights(li.z, tiled, vm_tap);
+        vm_hc += vm_w.z * vm::luma(s2.rgb);
+    }
+    if (vm_w.w >= VM_LAYER_MIN) {
+        vm_h += vm_w.w * vm_layer_heights(li.w, tiled, vm_tap);
+        vm_hc += vm_w.w * vm::luma(s3.rgb);
+    }
+    let vm_n0 = normalize(in.vm_normal);
+    let vm_t = vec3<f32>(1.0, 0.0, 0.0) - vm_n0 * vm_n0.x;
+    let vm_b = vec3<f32>(0.0, 0.0, 1.0) - vm_n0 * vm_n0.z;
+    let vm_s = inverseSqrt(max(max(dot(vm_t, vm_t), dot(vm_b, vm_b)), 1e-12));
+    let vm_r = vm::relief(vm_n0, vm_t * vm_s, vm_b * vm_s, vm_h, vm_hc);
+    let vm_l = -normalize(wow_light.light_sun.xyz);
+    let vm_v = normalize(view.world_position.xyz - in.world_position.xyz);
+    let primary = clamp(
+        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * max(dot(vm_r.n, vm_l), 0.0)
+            + vm_lights_at(in.world_position.xyz, vm_r.n, in.vm_lights),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let vm_spec = clamp(
+        wow_light.light_spec.rgb * vm::sheen(vm_r.n, vm_l, vm_v, wow_light.light_spec.w),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    ) * (vm::TERRAIN_SHEEN * vm::SHEEN);
+#else
     let primary = in.primary;
+#endif
 
     // MCSH baked shadow. With `pixelShaders` and `specular` on, terrain is one pass through
     // `terrainp_s.bls`, which reads the MCSH bit from the blend texture's alpha (1 lit, 0 shadowed)
@@ -221,8 +354,15 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // The `terrainp_s.bls` combine, then an LDR clamp:
     //   diffuse  = tex · primary · (0.3·shadow + 0.7)   (a flat −30% in shadow, no tint)
     //   specular = sheen · mask · shadow                 (none in shadow)
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look's cavity darkens the diffuse term; its sheen replaces the
+    // vertex's, under the same mask and shadow.
+    let diffuse_term = color * primary * (0.3 * shadow_lit + 0.7) * vm_r.cavity;
+    let spec_term = vm_spec * specmask * shadow_lit;
+#else
     let diffuse_term = color * primary * (0.3 * shadow_lit + 0.7);
     let spec_term = in.specular * specmask * shadow_lit;
+#endif
     var tuned = clamp(diffuse_term + spec_term, vec3<f32>(0.0), vec3<f32>(1.0));
 
     // Gamma-space GL_LINEAR fog on planar eye-Z, as the reference computes `fogcoord`, not radial

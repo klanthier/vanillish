@@ -10,6 +10,11 @@
 //! - [`watch_pipelines`]: the tripwire, a `warn!` for every pipeline compiled uncovered, which
 //!   means the menagerie has a coverage hole.
 //! - `WOW_PIPE_TRACE=<path>`: one line per pipeline created, with its full variant identity.
+//!
+//! Vanillish: the modern lighting look (`benilla_assets::ModernLighting`) is one def set latched
+//! at boot, which every world material's `specialize` and static_gx's queue push, so the
+//! menagerie's rigs compile the modern variants in place of the stock ones and the warm set needs
+//! no axis for it; a traced pipeline names `VANILLISH_MODERN` among its defs.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -5,6 +5,11 @@
 // and must stay in sync: naga_oil cannot import functions that use another module's bindings.
 
 #import bevy_render::view::View
+#ifdef VANILLISH_MODERN
+// Vanillish: the modern lighting look's shared maths (`benilla_assets::modern_light`); pure
+// functions, so this pass's own layout can import them.
+#import benilla_assets::vanillish_modern as vm
+#endif
 
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -113,6 +118,54 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
+#ifdef VANILLISH_MODERN
+// Vanillish: `point_light_sum`'s selection alone, the same three lights as indices + 1 (0 an
+// empty slot), for the fragment stage to light per pixel (wow_model.wgsl's `vm_pick_lights`).
+fn vm_pick_lights(anchor: vec3<f32>) -> vec3<u32> {
+    let count = u32(wow_light.point_count.x);
+    var sel = array<u32, 3>(0u, 0u, 0u);
+    var sd = array<f32, 3>(1e30, 1e30, 1e30);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = wow_light.points[2u * i];
+        let dv = pos_range.xyz - anchor;
+        let d2 = dot(dv, dv);
+        if (d2 > pos_range.w * pos_range.w) {
+            continue;
+        }
+        if (d2 < sd[0]) {
+            sd[2] = sd[1]; sel[2] = sel[1];
+            sd[1] = sd[0]; sel[1] = sel[0];
+            sd[0] = d2; sel[0] = i + 1u;
+        } else if (d2 < sd[1]) {
+            sd[2] = sd[1]; sel[2] = sel[1];
+            sd[1] = d2; sel[1] = i + 1u;
+        } else if (d2 < sd[2]) {
+            sd[2] = d2; sel[2] = i + 1u;
+        }
+    }
+    return vec3<u32>(sel[0], sel[1], sel[2]);
+}
+
+// The picked lights at a pixel, on its relief normal.
+fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        if (sel[s] == 0u) {
+            break;
+        }
+        let i = sel[s] - 1u;
+        sum += vm::point_light(P, N, wow_light.points[2u * i].xyz, wow_light.points[2u * i + 1u].rgb);
+    }
+    return sum;
+}
+
+// One relief tap: the repeat sampler, a clamped axis held a half texel in, as `uv_mixed` is.
+fn vm_tap(uv: vec2<f32>, layer: i32, inset: vec2<f32>, wrap: vec2<bool>, g: vm::Taps) -> vec4<f32> {
+    let held = select(clamp(uv, inset, vec2<f32>(1.0) - inset), uv, wrap);
+    return textureSampleGrad(tex_array, samp_repeat, held, layer, g.ddx, g.ddy);
+}
+#endif
+
 // ---- the pass ----
 
 struct GxVertex {
@@ -133,6 +186,12 @@ struct GxVsOut {
     @location(3) @interpolate(flat) word: u32,
     @location(4) point_lit: vec3<f32>,
     @location(5) color: vec4<f32>,
+#ifdef VANILLISH_MODERN
+    // Vanillish: the camera-relative position, for the relief's screen-space frame, and the
+    // three point lights (indices + 1), lit per pixel in place of `point_lit`, which stays zero.
+    @location(6) vm_rel: vec3<f32>,
+    @location(7) @interpolate(flat) vm_lights: vec3<u32>,
+#endif
 }
 
 @vertex
@@ -160,6 +219,9 @@ fn vertex(v: GxVertex) -> GxVsOut {
         view.view_from_world[2].xyz,
     );
     out.position = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
+#ifdef VANILLISH_MODERN
+    out.vm_rel = p_cam;
+#endif
     // Authored MOBA batch order (record y, 0 on cells): a later coplanar batch wins reverse-Z
     // GreaterEqual in any draw order, because the draw sort does not keep authored order.
     out.position.z *= 1.0 + f32(recs[v.word & 0xffffu].y) * 1.1920929e-7;
@@ -172,13 +234,22 @@ fn vertex(v: GxVertex) -> GxVsOut {
     if ((v.word & (WORD_WMO | WORD_INTERIOR)) != 0u) {
         out.point_lit = vec3<f32>(0.0);
     } else {
+#ifdef VANILLISH_MODERN
+        // Vanillish: the same three lights, lit per pixel by the fragment stage.
+        out.vm_lights = vm_pick_lights(v.anchor);
+#else
         out.point_lit = point_light_sum(world, v.normal, v.anchor);
+#endif
     }
     return out;
 }
 
 @fragment
 fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
+#ifdef VANILLISH_MODERN
+    // Vanillish: the relief's derivatives, before the first discard.
+    let vm_d = vm::derivs(in.vm_rel, in.uv);
+#endif
     // The hard farclip wall: per-pixel planar eye-Z, the same plane as the entity path.
     let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
     if (wow_light.fog_params.w > 0.0 && eye_z > wow_light.fog_params.w) {
@@ -219,7 +290,34 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
 #endif
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
+#ifdef VANILLISH_MODERN
+    // Vanillish: the modern look tilts that normal by the relief (wow_model.wgsl's), on textured,
+    // lit batches; every lane below reads the tilted one.
+    let vm_on = (in.word & (WORD_TEXTURED | WORD_UNLIT)) == WORD_TEXTURED;
+    let vm_lum = vm::luma(base.rgb);
+    var vm_r = vm::unrelieved(wow_normalize(in.world_normal));
+    if (vm_on) {
+        let vm_layer = i32(recs[in.word & 0xffffu].x);
+        let vm_dims = vec2<f32>(textureDimensions(tex_array).xy);
+        let vm_g = vm::taps(vm_d, vm_dims, view.mip_bias);
+        let vm_inset = 0.5 / vm_dims;
+        let vm_wrap = vec2<bool>(wrap_x, wrap_y);
+        let vm_l = vm_tap(in.uv - vec2<f32>(vm_g.off.x, 0.0), vm_layer, vm_inset, vm_wrap, vm_g);
+        let vm_rt = vm_tap(in.uv + vec2<f32>(vm_g.off.x, 0.0), vm_layer, vm_inset, vm_wrap, vm_g);
+        let vm_dn = vm_tap(in.uv - vec2<f32>(0.0, vm_g.off.y), vm_layer, vm_inset, vm_wrap, vm_g);
+        let vm_up = vm_tap(in.uv + vec2<f32>(0.0, vm_g.off.y), vm_layer, vm_inset, vm_wrap, vm_g);
+#ifdef GX_CUTOUT
+        let vm_h = vm::heights(vm_l, vm_rt, vm_dn, vm_up, vm_lum, true);
+#else
+        let vm_h = vm::heights(vm_l, vm_rt, vm_dn, vm_up, vm_lum, false);
+#endif
+        let vm_f = vm::cotangent_frame(vm_r.n, vm_d);
+        vm_r = vm::relief(vm_r.n, vm_f.t, vm_f.b, vm_h, vm_lum);
+    }
+    let n_lit = vm_r.n;
+#else
     let n_lit = wow_normalize(in.world_normal);
+#endif
     let L = -normalize(wow_light.light_sun.xyz);
     let ndotl = max(dot(n_lit, L), 0.0);
     let lit_nl = clamp(
@@ -348,13 +446,36 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
         let lit = select(lit_nl, lit_doodad, wow_light.light_sun.w > 0.5);
         // FFP combine: the light sum saturates first, then the texture modulates it.
+#ifdef VANILLISH_MODERN
+        // Vanillish: the vertex stage's three lights, per pixel on the relief normal.
+        let vm_points = vm_lights_at(in.world_position.xyz, n_lit, in.vm_lights);
+        let primary = clamp(lit + vm_points, vec3<f32>(0.0), vec3<f32>(1.0));
+#else
         let primary = clamp(lit + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
+#endif
         rgb = folded * primary;
     }
     // Unlit (M2 UNLIT 0x01, WMO UNLIT on an exterior group): texture × vertex colour, no light.
     if ((in.word & WORD_UNLIT) != 0u) {
         rgb = folded;
     }
+#ifdef VANILLISH_MODERN
+    // Vanillish: the relief's cavity, then the sun's sheen on exterior surfaces (none indoors or
+    // on a doodad in MCSH shade; a WMO's MOCV dims it), inside the frame's [0, 1].
+    if (vm_on) {
+        var vm_sheen = vec3<f32>(0.0);
+        if ((in.word & WORD_INTERIOR) == 0u) {
+            let vm_v = -in.vm_rel * inverseSqrt(max(dot(in.vm_rel, in.vm_rel), 1e-12));
+            let vm_wmo = (in.word & WORD_WMO) != 0u;
+            let vm_sunlit = (in.word & (WORD_MATTE | WORD_SHADE_LIT)) != 0u;
+            let vm_sun = select(0.0, 1.0, vm_wmo || vm_sunlit);
+            let vm_occ = select(vec3<f32>(1.0), vc.rgb, vm_wmo);
+            let vm_s = vm::sheen(n_lit, L, vm_v, vm::MODEL_SHININESS) * vm::gloss(vm_lum) * vm_sun;
+            vm_sheen = vm_occ * vm::sheen_rgb(wow_light.light_diffuse.rgb, base.rgb, vm_s);
+        }
+        rgb = clamp(rgb * vm_r.cavity + vm_sheen, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+#endif
     // Planar eye-Z fog; other fog modes belong to blends never admitted here. The interior triple
     // keys on the per-frame record bit, not `WORD_INTERIOR`: the client sets it per group under
     // `[0xca7f00]` (`0x6b5190` for surfaces, `0x6b62e0` for the group's doodads).

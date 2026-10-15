@@ -394,9 +394,18 @@ fn apply_cvar_settings(
     mut cvars: ResMut<Cvars>,
     mut last: Local<Option<(u32, u32)>>,
     mut quality: Local<Option<Quality>>,
+    mut modern: Local<Option<bool>>,
 ) {
     if !super::touch_device() {
         return;
+    }
+    // Vanillish: the modern lighting switch is its CVar, which benilla reads once at launch, so
+    // the row says "(restart)". The switch owns it from the first frame, off iOS, which shows no
+    // such row.
+    if !cfg!(target_os = "ios") && *modern != Some(state.settings.modern_lighting) {
+        *modern = Some(state.settings.modern_lighting);
+        let (name, value) = state.settings.modern_lighting_cvar();
+        cvars.set(name, value);
     }
     let ui = applied_ui_scale(&state.settings, &hud);
     let key = (

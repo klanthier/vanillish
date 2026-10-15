@@ -69,6 +69,8 @@ mod loading_screen;
 mod local_state;
 mod login;
 mod minimap;
+// Vanillish: the `modernLighting` CVar, the opt-in modern lighting look's switch.
+mod modern_lighting;
 mod nameplates;
 mod names;
 mod net;

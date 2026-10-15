@@ -22,3 +22,10 @@ benilla-formats = { path = "../benilla-formats", default-features = false }
 # bytes, with no averaging to darken mid-tones.
 image = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
+
+# Vanillish: the world shaders composed and validated as Bevy's shader cache would, with and
+# without the modern lighting defs (`modern_light`). Both are already in the graph through Bevy;
+# no feature is added, so no build of either changes.
+[dev-dependencies]
+naga = { version = "27", default-features = false }
+naga_oil = { version = "0.20", default-features = false, features = ["test_shader"] }
