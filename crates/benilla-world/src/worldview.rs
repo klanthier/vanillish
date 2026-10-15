@@ -41,6 +41,16 @@ fn view_start() -> [f32; 3] {
     }
 }
 
+/// Vanillish: the opening camera's height and distance from the look-at point, in yards
+/// (`$WOW_WORLDVIEW_DIST`, default [`VIEW_START_HEIGHT`]).
+fn view_dist() -> f32 {
+    std::env::var("WOW_WORLDVIEW_DIST")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|d| d.is_finite() && *d > 1.0)
+        .unwrap_or(VIEW_START_HEIGHT)
+}
+
 /// The look-at height when `WOW_WORLDVIEW_AT` names no `z`, clear of the Northshire valley floor.
 const VIEW_OPEN_Z: f32 = 100.0;
 
@@ -291,7 +301,9 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
         Hdr,
         Tonemapping::None,
         crate::ffx_glow::FfxGlow::WORLD,
-        Transform::from_translation(start + Vec3::new(0.0, VIEW_START_HEIGHT, VIEW_START_HEIGHT))
+        // Vanillish: `$WOW_WORLDVIEW_DIST=<yd>` brings the opening camera nearer (or farther) along
+        // the same diagonal, for close-up comparisons of the ground and buildings.
+        Transform::from_translation(start + Vec3::new(0.0, view_dist(), view_dist()))
             .looking_at(start, Vec3::Y),
         ViewCam {
             yaw: 0.0,
