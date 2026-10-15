@@ -243,6 +243,24 @@ impl InillaSettings {
             if self.modern_lighting { "1" } else { "0" },
         )
     }
+
+    /// Vanillish: one frame of [`Self::modern_lighting`] against its CVar, whose applied flag is
+    /// `cvar`; `synced` is the value the two last agreed on (`None` before the first frame). The
+    /// CVar decides (the saved value at launch, a console write since) unless the player moved the
+    /// row since they agreed: then the row's value is the write to make, `(name, value)`.
+    pub fn sync_modern_lighting(
+        &mut self,
+        synced: &mut Option<bool>,
+        cvar: bool,
+    ) -> Option<(&'static str, &'static str)> {
+        if synced.is_some_and(|s| s != self.modern_lighting) {
+            *synced = Some(self.modern_lighting);
+            return Some(self.modern_lighting_cvar());
+        }
+        self.modern_lighting = cvar;
+        *synced = Some(cvar);
+        None
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +307,31 @@ mod tests {
         assert_eq!(s.modern_lighting_cvar(), ("modernLighting", "1"));
         let back: InillaSettings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
         assert!(back.modern_lighting, "the switch survives a save");
+    }
+
+    /// Vanillish: the row follows its CVar (the saved value at launch, a console write) and writes
+    /// it only when the player moves the row, so neither clobbers the other.
+    #[test]
+    fn the_modern_lighting_row_follows_its_cvar_and_writes_it_when_moved() {
+        // Launch: the saved CVar says on, the settings file off; the CVar wins, nothing is written.
+        let mut s = InillaSettings::default();
+        let mut synced = None;
+        assert_eq!(s.sync_modern_lighting(&mut synced, true), None);
+        assert!(s.modern_lighting);
+        assert_eq!(synced, Some(true));
+        // A steady frame writes nothing.
+        assert_eq!(s.sync_modern_lighting(&mut synced, true), None);
+        // The player turns the row off: that is the write.
+        s.modern_lighting = false;
+        assert_eq!(
+            s.sync_modern_lighting(&mut synced, true),
+            Some(("modernLighting", "0"))
+        );
+        assert_eq!(synced, Some(false));
+        // The write landed; then a console write turns it back on, and the row follows.
+        assert_eq!(s.sync_modern_lighting(&mut synced, false), None);
+        assert_eq!(s.sync_modern_lighting(&mut synced, true), None);
+        assert!(s.modern_lighting);
     }
 
     #[test]

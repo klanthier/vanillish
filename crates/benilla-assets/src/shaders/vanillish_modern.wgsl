@@ -85,8 +85,10 @@ fn heights(
     coverage: bool,
 ) -> vec4<f32> {
     let h = vec4<f32>(luma(l.rgb), luma(r.rgb), luma(dn.rgb), luma(up.rgb));
-    let cut = (vec4<f32>(l.a, r.a, dn.a, up.a) < vec4<f32>(0.5)) & vec4<bool>(coverage);
-    return select(h, vec4<f32>(hc), cut);
+    // Two selects, no `&` of bool vectors: SPIR-V lowers that to a vector OpLogicalAnd, which
+    // naga's own SPIR-V reader rejects, and GLSL has no such operator (naga polyfills it).
+    let cut = vec4<f32>(l.a, r.a, dn.a, up.a) < vec4<f32>(0.5);
+    return select(h, select(h, vec4<f32>(hc), cut), coverage);
 }
 
 // Schüler's cotangent frame ("Followup: Normal Mapping Without Precomputed Tangents", 2013): the

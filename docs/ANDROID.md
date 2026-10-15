@@ -331,8 +331,9 @@ glow untouched. The cost is shader work: four texture reads and a few dozen oper
 pixel (terrain: four per texture layer it blends, mostly one or two). Try it at 60 fps first, and
 watch **Show frame rate, memory and heat** (above) at 120.
 
-On a computer the same look is `/console modernLighting 1` and a restart, or, for one session,
-`VANILLISH_MODERN=1` (which wins over the setting). `VANILLISH_RELIEF` and `VANILLISH_SHEEN` set
+On a computer the same look is `/console modernLighting 1` (or the row in F10's Settings, which
+shows and writes that CVar) and a restart, or, for one session, `VANILLISH_MODERN=1` (which wins
+over the setting). `VANILLISH_RELIEF` and `VANILLISH_SHEEN` set
 the relief's and the sheen's strength in percent (100 by default, 0 to 400). The world viewer shows
 a before and after of one spot:
 
@@ -475,8 +476,9 @@ Everything else is iNilla's ([INILLA.md](INILLA.md#settings)).
 
 In `benilla-config/inilla/settings.toml` the Android-only settings are `tabletop_split`,
 `inner_any_orientation`, `stay_connected` and `hide_touch_with_mouse`, and `last_game_mode` is
-the memory behind Game Dashboard (not a switch). `modern_lighting` is the modern lighting switch,
-which writes benilla's `modernLighting` in `benilla-config/config.toml`.
+the memory behind Game Dashboard (not a switch). `modern_lighting` mirrors benilla's
+`modernLighting` in `benilla-config/config.toml`, which decides: the row follows that CVar (a
+console change included) and writes it when the player moves it.
 
 ## Where the files are
 

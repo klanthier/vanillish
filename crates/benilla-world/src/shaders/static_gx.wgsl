@@ -159,7 +159,7 @@ fn vm_lights_at(P: vec3<f32>, N: vec3<f32>, sel: vec3<u32>) -> vec3<f32> {
     return sum;
 }
 
-// One relief tap: the repeat sampler, a clamped axis held a half texel in, as `uv_mixed` is.
+// One relief tap: the repeat sampler, a clamped axis held `inset` in, as `uv_mixed` is.
 fn vm_tap(uv: vec2<f32>, layer: i32, inset: vec2<f32>, wrap: vec2<bool>, g: vm::Taps) -> vec4<f32> {
     let held = select(clamp(uv, inset, vec2<f32>(1.0) - inset), uv, wrap);
     return textureSampleGrad(tex_array, samp_repeat, held, layer, g.ddx, g.ddy);
@@ -300,7 +300,9 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         let vm_layer = i32(recs[in.word & 0xffffu].x);
         let vm_dims = vec2<f32>(textureDimensions(tex_array).xy);
         let vm_g = vm::taps(vm_d, vm_dims, view.mip_bias);
-        let vm_inset = 0.5 / vm_dims;
+        // A clamped axis is held in by half a texel of the coarser mip the taps blend (one of the
+        // finer, `vm_g.off`), so a distant tap at the edge does not wrap to the far side.
+        let vm_inset = max(0.5 / vm_dims, vm_g.off);
         let vm_wrap = vec2<bool>(wrap_x, wrap_y);
         let vm_l = vm_tap(in.uv - vec2<f32>(vm_g.off.x, 0.0), vm_layer, vm_inset, vm_wrap, vm_g);
         let vm_rt = vm_tap(in.uv + vec2<f32>(vm_g.off.x, 0.0), vm_layer, vm_inset, vm_wrap, vm_g);
