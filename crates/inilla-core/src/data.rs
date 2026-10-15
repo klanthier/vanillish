@@ -136,7 +136,7 @@ impl Manifest {
         }
         if self.build != 5875 {
             out.push(format!(
-                "the server offers client build {} — iNilla needs 1.12.1 (5875)",
+                "the server offers client build {} — this client needs 1.12.1 (5875)",
                 self.build
             ));
         }

@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use inilla_core::data;
+use inilla_core::{data, import};
 use inilla_platform::{device, paths, stdio};
 
 /// How many session logs to keep in `Diagnostics/`.
@@ -111,6 +111,12 @@ pub fn prepare() {
 }
 
 /// Move a complete `Data` folder found in Documents into the data directory.
+///
+/// Vanillish: this runs before the app exists — on Android, on `android_main`, whose answers
+/// GameActivity's lifecycle calls wait for: a 5 GB copy here is a black screen and then "app not
+/// responding". So off iOS the move must be a rename, and of a folder no PC is still copying into
+/// (`inilla_core::import::launch_guard`); anything else is left to the setup screen's threaded
+/// job, which shows its progress.
 fn import_from_documents(docs: &Path, data_dir: &Path) {
     let current = data::status(data_dir);
     if current.complete() {
@@ -122,6 +128,15 @@ fn import_from_documents(docs: &Path, data_dir: &Path) {
     else {
         return;
     };
+    if !cfg!(target_os = "ios") {
+        if let Err(why) = import::launch_guard(&found.status, data_dir, super::data::SETTLE) {
+            println!(
+                "inilla: not importing {} at launch: {why}; the setup screen will",
+                found.dir.display()
+            );
+            return;
+        }
+    }
     println!(
         "inilla: importing {} archives from {}",
         found.status.present.len(),

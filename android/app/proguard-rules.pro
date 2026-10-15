@@ -2,7 +2,7 @@
 -keep class io.github.klanthier.vanillish.Bridge { *; }
 -keep class io.github.klanthier.vanillish.VanillishActivity { *; }
 -keep class io.github.klanthier.vanillish.GamepadBridge { *; }
--keep class io.github.klanthier.vanillish.DataImport { *; }
+-keep class io.github.klanthier.vanillish.FolderImport { *; }
 -keepclasseswithmembernames class * { native <methods>; }
 # GameActivity's own (its consumer rules cover Insets/WindowInsetsCompat).
 -keep class com.google.androidgamesdk.** { *; }

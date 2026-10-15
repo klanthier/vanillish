@@ -443,6 +443,41 @@ public final class Bridge {
 
     // ---- [data] the folder import and sharing files (FolderImport) -----------------------------
 
+    /** Open the folder picker (the Storage Access Framework); false when there is no Activity. */
+    public static boolean pickFolder() {
+        return FolderImport.pick();
+    }
+
+    /** The picked folder's archives as JSON (Rust's import thread); null on failure. */
+    public static String listFolder(String tree, int maxDepth) {
+        return FolderImport.list(tree, maxDepth);
+    }
+
+    /** One archive of the picked folder as a detached file descriptor (Rust owns it); -1 on failure. */
+    public static int openDocument(String tree, String docId) {
+        return FolderImport.open(tree, docId);
+    }
+
+    /** {"tree": …, "label": …} of a picked folder whose copy never finished, or null. */
+    public static String pendingFolder() {
+        return FolderImport.pendingFolder();
+    }
+
+    /** Give a picked folder's grant back and stop offering to resume it. */
+    public static void forgetFolder(String tree) {
+        FolderImport.forget(tree);
+    }
+
+    /** Why the last listFolder or openDocument failed. */
+    public static String folderError() {
+        return FolderImport.lastError();
+    }
+
+    /** Offer one of the app's files (a session log) to another app through the share sheet. */
+    public static boolean shareFile(String path, String mime) {
+        return FolderImport.share(path, mime);
+    }
+
     // ---- [fold] gesture exclusion and the screen ----------------------------------------------
 
     // ---- [input] the soft keyboard and the host pointer ---------------------------------------

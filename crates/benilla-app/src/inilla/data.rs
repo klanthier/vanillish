@@ -6,6 +6,10 @@
 //! benilla opens the archives when the app is built, so data that arrives while it runs needs one
 //! relaunch; the setup screen says so and offers it. (A Documents import found at launch needs
 //! none — `boot::prepare` moves it into place before the app exists.)
+//!
+//! Vanillish: a third way in, the **folder import** — a folder the player picks with the system's
+//! picker (Android's Storage Access Framework), copied in by `inilla_core::import` on the same
+//! job thread, with the same progress, Pause and resume as the download.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -18,6 +22,17 @@ use bevy::prelude::*;
 
 use inilla_core::addons::{self as ka, AddonManifest, HostLocales, SyncReport};
 use inilla_core::data::{self as kd, DataStatus, Fetch, Manifest, Progress};
+use inilla_core::import as ki;
+use inilla_platform::picker::{self, Picked};
+
+use super::ui::words;
+
+/// Vanillish: how long a `Data` folder must have been left alone before it is taken — a copy from
+/// a PC still running into it must not be moved from under it.
+pub(crate) const SETTLE: Duration = Duration::from_secs(15);
+
+/// Room left beyond the archives themselves when a copy or download starts.
+const SPARE: u64 = 200_000_000;
 
 /// What a finished job produced.
 enum Outcome {
@@ -26,6 +41,19 @@ enum Outcome {
     Addons(SyncReport),
     Imported(usize),
     NothingToImport,
+    /// Vanillish: a folder import finished: what it did, what the original holds (what deleting
+    /// it would free), and what it lacked.
+    Copied {
+        label: String,
+        done: ki::Copied,
+        original_bytes: u64,
+        missing: Vec<&'static str>,
+    },
+    /// Vanillish: the picked folder holds no archive.
+    NothingInFolder {
+        label: String,
+        truncated: bool,
+    },
 }
 
 /// What a host offers for one language: the archives, the addons, and where they come from.
@@ -67,6 +95,9 @@ pub(crate) struct DataState {
     pub(crate) base: Option<String>,
     /// The last job's result, for the setup screen.
     pub(crate) message: Option<(bool, String)>,
+    /// Vanillish: a picked folder whose copy has not finished, `(tree, label)` — asked of the
+    /// platform at start and after each folder import, not every frame.
+    pub(crate) pending_folder: Option<(String, String)>,
     job: Option<Job>,
 }
 
@@ -132,6 +163,23 @@ impl DataState {
             let Some(c) = found.into_iter().max_by_key(|c| c.status.present.len()) else {
                 return Ok(Outcome::NothingToImport);
             };
+            // Vanillish: not a folder a PC is still copying into (the boot import's guard too).
+            if !cfg!(target_os = "ios") {
+                let shown = c.dir.strip_prefix(&docs).unwrap_or(&c.dir).display();
+                if !ki::settled(&c.status, SETTLE) {
+                    return Err(format!(
+                        "{shown} changed in the last few seconds — a copy may still be running. \
+                         Let it finish, then check again."
+                    ));
+                }
+                let cut = ki::cut_short(&c.status);
+                if !cut.is_empty() {
+                    return Err(format!(
+                        "{} in {shown} look cut short — copy them in again.",
+                        cut.join(", ")
+                    ));
+                }
+            }
             let n = kd::import(&c.dir, &dir, |name, i, total| {
                 if let Ok(mut p) = progress.lock() {
                     p.file = name.to_string();
@@ -229,6 +277,59 @@ impl DataState {
         });
     }
 
+    /// Vanillish: copy the archives in from a folder the player picked (`tree`, as the picker
+    /// answered; `label` its name): list it, take the best candidate folder in it, check the free
+    /// space, copy with resume (`inilla_core::import::copy_in`). A copy — the original stays — and
+    /// the picker's grant is given back once it is done.
+    pub(crate) fn import_folder(&mut self, tree: String, label: String) {
+        let Some(dir) = self.dir.clone() else {
+            self.message = Some((
+                false,
+                "There is no game data folder on this platform.".into(),
+            ));
+            return;
+        };
+        self.start("folder import", move |progress, stop| {
+            if let Ok(mut p) = progress.lock() {
+                p.state = "looking in".into();
+                p.file = label.clone();
+            }
+            let listing = picker::list(&tree, ki::MAX_DEPTH)?;
+            let Some(c) = ki::candidates(&listing.files).into_iter().next() else {
+                picker::forget(&tree);
+                return Ok(Outcome::NothingInFolder {
+                    label,
+                    truncated: listing.truncated,
+                });
+            };
+            let need = ki::bytes_to_copy(&c.files, &dir);
+            if let Some(free) = free_space(&dir) {
+                if free < need + SPARE {
+                    return Err(format!(
+                        "Not enough space: {:.1} GB needed, {:.1} GB free.",
+                        (need + SPARE) as f64 / 1e9,
+                        free as f64 / 1e9
+                    ));
+                }
+            }
+            let keep = move || !stop.load(Ordering::Relaxed);
+            let report = |p: &Progress| {
+                if let Ok(mut g) = progress.lock() {
+                    *g = p.clone();
+                }
+            };
+            let open = PickedOpen { tree: tree.clone() };
+            let done = ki::copy_in(&open, &c.files, &dir, report, &keep)?;
+            picker::forget(&tree);
+            Ok(Outcome::Copied {
+                label,
+                done,
+                original_bytes: c.total_bytes(),
+                missing: c.status.missing_required,
+            })
+        });
+    }
+
     /// Stop the running download at the next buffer (its `.part` stays for a resume).
     pub(crate) fn pause(&mut self) {
         if let Some(j) = &self.job {
@@ -240,6 +341,19 @@ impl DataState {
     pub(crate) fn free_bytes(&self) -> Option<u64> {
         let dir = self.dir.as_ref()?;
         free_space(dir)
+    }
+}
+
+/// Vanillish: a picked folder's files, through the platform's picker (a provider's file
+/// descriptor on Android, a path on the desktop).
+struct PickedOpen {
+    tree: String,
+}
+
+impl ki::Open for PickedOpen {
+    fn open(&self, id: &str, offset: u64) -> Result<(Box<dyn Read + Send>, u64), String> {
+        let file = picker::open(&self.tree, id)?;
+        Ok(ki::from_offset(file, offset))
     }
 }
 
@@ -280,7 +394,7 @@ impl Http {
     }
 
     fn get(&self, url: &str) -> ureq::Request {
-        let r = self.agent.get(url).set("User-Agent", "iNilla");
+        let r = self.agent.get(url).set("User-Agent", words::APP);
         match &self.token {
             Some(t) => r.set("Authorization", &format!("Bearer {}", t.trim())),
             None => r,
@@ -341,9 +455,29 @@ impl Plugin for DataPlugin {
             locale: None,
             base: None,
             message: None,
+            pending_folder: picker::pending(),
             job: None,
         })
-        .add_systems(Update, poll_job);
+        .add_systems(Update, (poll_job, poll_picker));
+    }
+}
+
+/// Vanillish: the folder picker's answer starts the copy. Only while no job runs — the answer
+/// waits in the picker until then (it may even arrive before the app is built, when Android
+/// brought the app back for it).
+fn poll_picker(mut state: ResMut<DataState>) {
+    if state.job.is_some() {
+        return;
+    }
+    match picker::poll() {
+        Some(Picked::Folder { tree, label }) => {
+            info!("inilla: importing from the picked folder {label}");
+            state.import_folder(tree, label);
+        }
+        Some(Picked::Failed(why)) => {
+            state.message = Some((false, format!("The folder picker failed: {why}")));
+        }
+        Some(Picked::Cancelled) | None => {}
     }
 }
 
@@ -364,6 +498,9 @@ fn poll_job(mut state: ResMut<DataState>) {
         .map(|h| h.join().unwrap_or_else(|_| Err("the job crashed".into())))
         .unwrap_or_else(|| Err("the job could not start".into()));
     state.refresh();
+    if job.label == "folder import" {
+        state.pending_folder = picker::pending();
+    }
     state.message = Some(match result {
         Ok(Outcome::Manifest(offer)) => {
             let offer = *offer;
@@ -395,9 +532,42 @@ fn poll_job(mut state: ResMut<DataState>) {
         ),
         Ok(Outcome::Addons(r)) => (true, sync_text(&r)),
         Ok(Outcome::Imported(n)) => (true, format!("Imported {n} archives.")),
-        Ok(Outcome::NothingToImport) => (
+        Ok(Outcome::NothingToImport) => (false, words::nothing_to_import()),
+        Ok(Outcome::Copied {
+            label,
+            done,
+            original_bytes,
+            missing,
+        }) => {
+            let n = done.copied + done.kept;
+            let mut text = if done.copied == 0 {
+                format!("The {n} archives from {label} were already here.")
+            } else {
+                format!(
+                    "Copied {n} archives from {label}. The original folder is still there; \
+                     delete it to free {:.1} GB.",
+                    original_bytes as f64 / 1e9
+                )
+            };
+            if !missing.is_empty() {
+                text.push_str(&format!(
+                    " It does not have the whole set: missing {}.",
+                    missing.join(", ")
+                ));
+            }
+            (missing.is_empty(), text)
+        }
+        Ok(Outcome::NothingInFolder { label, truncated }) => (
             false,
-            "No Data folder found in iNilla's Documents yet. Copy it in and try again.".into(),
+            format!(
+                "No .MPQ archives in {label}. Pick the Data folder or the World of Warcraft \
+                 folder.{}",
+                if truncated {
+                    " (It is a big folder and only part of it was searched.)"
+                } else {
+                    ""
+                }
+            ),
         ),
         Err(e) if e == "paused" => (true, "Paused — Resume continues where it stopped.".into()),
         Err(e) => (false, e),

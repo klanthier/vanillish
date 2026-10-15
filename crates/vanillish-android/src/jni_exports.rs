@@ -96,4 +96,53 @@ pub extern "system" fn Java_io_github_klanthier_vanillish_GamepadBridge_nativePa
 
 // ---- [data] FolderImport (the Storage Access Framework picker) ---------------------------------
 
+use inilla_platform::picker::{android as folders, Picked};
+
+/// A Java string, or empty when it is null or unreadable.
+fn plain_string(env: &mut JNIEnv, s: &JString) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    env.get_string(s).map(Into::into).unwrap_or_default()
+}
+
+/// The player picked a folder (the grant is already taken).
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_FolderImport_nativeFolderPicked(
+    mut env: JNIEnv,
+    _class: JClass,
+    tree: JString,
+    label: JString,
+) {
+    let tree = plain_string(&mut env, &tree);
+    let label = plain_string(&mut env, &label);
+    folders::deliver(if tree.is_empty() {
+        Picked::Failed("the picker answered without a folder".into())
+    } else {
+        Picked::Folder { tree, label }
+    });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_FolderImport_nativeFolderPickCancelled(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    folders::deliver(Picked::Cancelled);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_klanthier_vanillish_FolderImport_nativeFolderPickFailed(
+    mut env: JNIEnv,
+    _class: JClass,
+    message: JString,
+) {
+    let message = plain_string(&mut env, &message);
+    folders::deliver(Picked::Failed(if message.is_empty() {
+        "the folder picker could not open".into()
+    } else {
+        message
+    }));
+}
+
 // ---- [pointer] the hardware mouse and the pen ---------------------------------------------------

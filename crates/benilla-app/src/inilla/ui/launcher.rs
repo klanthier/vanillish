@@ -10,9 +10,10 @@ use bevy_egui::egui;
 
 use inilla_core::profiles::{is_private_host, Account, Core, DataSource, ServerProfile};
 
-use super::{hint, row, Overlay, Panel};
+use super::{hint, ime, row, words, Overlay, Panel};
 use crate::inilla::data::DataState;
 use crate::inilla::hud::GOLD;
+use crate::inilla::platform::ImePurpose;
 use crate::inilla::session::{self, LoginQueue};
 use crate::inilla::Inilla;
 
@@ -254,6 +255,7 @@ pub(super) fn show(
                                 .hint_text("Password")
                                 .desired_width(200.0),
                         );
+                        ime(&r, ImePurpose::Password);
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             go = true;
                         }
@@ -306,7 +308,8 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
             ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("My vmangos").desired_width(320.0));
         });
         row(ui, "Address (realmlist)", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut f.host).hint_text("192.168.1.10 or wow.example.com").desired_width(320.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut f.host).hint_text("192.168.1.10 or wow.example.com").desired_width(320.0));
+            ime(&r, ImePurpose::Url);
         });
         let private = is_private_host(&f.host);
         if !f.host.trim().is_empty() {
@@ -329,7 +332,8 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
         });
         ui.collapsing("Advanced", |ui| {
             row(ui, "World server host", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut f.realm_override).hint_text("leave empty to use the realm list's").desired_width(320.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut f.realm_override).hint_text("leave empty to use the realm list's").desired_width(320.0));
+                ime(&r, ImePurpose::Url);
             });
             hint(
                 ui,
@@ -341,7 +345,8 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
                 ui.add(egui::TextEdit::singleline(&mut f.realm_name).hint_text("pick automatically after login").desired_width(320.0));
             });
             row(ui, "Game data URL", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut f.data_url).hint_text("https://…/data/ (inilla-datahost)").desired_width(320.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut f.data_url).hint_text("https://…/data/ (inilla-datahost)").desired_width(320.0));
+                ime(&r, ImePurpose::Url);
             });
             row(ui, "Notes", |ui| {
                 ui.add(egui::TextEdit::multiline(&mut f.notes).desired_rows(2).desired_width(320.0));
@@ -401,26 +406,20 @@ fn account_form(
         ui.add(egui::TextEdit::singleline(&mut f.username).desired_width(260.0));
     });
     row(ui, "Password", |ui| {
-        ui.add(
+        let r = ui.add(
             egui::TextEdit::singleline(&mut f.password)
                 .password(true)
                 .hint_text(if f.editing.is_some() { "unchanged" } else { "" })
                 .desired_width(260.0),
         );
+        ime(&r, ImePurpose::Password);
     });
-    ui.checkbox(
-        &mut f.remember,
-        "Remember the password (kept in the iOS Keychain)",
-    );
+    ui.checkbox(&mut f.remember, words::REMEMBER_PASSWORD);
     ui.add_enabled(
         f.remember,
-        egui::Checkbox::new(&mut f.auto_login, "Log in automatically when iNilla starts"),
+        egui::Checkbox::new(&mut f.auto_login, words::AUTO_LOGIN),
     );
-    hint(
-        ui,
-        "iNilla cannot create accounts: 1.12 has no in-game sign-up. Register on your server's \
-         website or with `account create` on its console, then add the account here.",
-    );
+    hint(ui, words::NO_SIGN_UP);
     ui.horizontal(|ui| {
         let can_save = !f.username.trim().is_empty();
         if ui
@@ -481,7 +480,7 @@ fn account_form(
     done
 }
 
-const NOT_SAVED: &str = "Password not saved: the Keychain refused it";
+const NOT_SAVED: &str = words::NOT_SAVED;
 
 /// Save a password in the Keychain. A LiveContainer set up without keychain access groups
 /// refuses; the account then asks for the password at every login, and the caller says so.

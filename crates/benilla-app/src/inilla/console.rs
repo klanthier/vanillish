@@ -16,7 +16,7 @@
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -92,7 +92,35 @@ pub(crate) fn new_token() -> String {
     out
 }
 
-/// This device's IPv4 addresses on its network interfaces (Wi-Fi first), loopback excluded.
+/// How good an interface's address is for reaching the console from another machine, best first;
+/// `None` drops it.
+///
+/// - `0` Wi-Fi: `en0` on iOS, `wlan0` on Android;
+/// - `1` the phone's own network for others: its hotspot (`swlan0`, `ap0`), USB tethering
+///   (`rndis0`, `ncm0`);
+/// - `2` a VPN (`tun0`, `wg0`): reachable from the VPN's other ends only;
+/// - `3` anything else, in the system's order;
+/// - dropped: Android's cellular data (`rmnet*`, `ccmni*` — the carrier's NAT, never reachable)
+///   and dummy interfaces.
+///
+/// Vanillish: iOS only ever needed `en0` first; Android names its interfaces differently.
+pub(crate) fn iface_rank(name: &str) -> Option<u8> {
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| name.starts_with(p));
+    if starts(&["rmnet", "ccmni", "dummy"]) {
+        None
+    } else if name == "en0" || name.starts_with("wlan") {
+        Some(0)
+    } else if starts(&["swlan", "ap", "rndis", "ncm"]) {
+        Some(1)
+    } else if starts(&["tun", "wg"]) {
+        Some(2)
+    } else {
+        Some(3)
+    }
+}
+
+/// This device's IPv4 addresses on its network interfaces (Wi-Fi first, see [`iface_rank`]),
+/// loopback excluded.
 pub(crate) fn local_addresses() -> Vec<String> {
     let mut out: Vec<(String, String)> = Vec::new();
     #[cfg(unix)]
@@ -119,9 +147,13 @@ pub(crate) fn local_addresses() -> Vec<String> {
             libc::freeifaddrs(ifap);
         }
     }
-    // Wi-Fi (`en0` on iOS) first, then the rest.
-    out.sort_by_key(|(n, _)| if n == "en0" { 0 } else { 1 });
-    let mut ips: Vec<String> = out.into_iter().map(|(_, ip)| ip).collect();
+    // Wi-Fi first, then the rest; cellular dropped.
+    let mut ranked: Vec<(u8, String)> = out
+        .into_iter()
+        .filter_map(|(n, ip)| iface_rank(&n).map(|r| (r, ip)))
+        .collect();
+    ranked.sort_by_key(|(r, _)| *r);
+    let mut ips: Vec<String> = ranked.into_iter().map(|(_, ip)| ip).collect();
     ips.dedup();
     if ips.is_empty() {
         ips.push("127.0.0.1".into());
@@ -243,7 +275,7 @@ fn to_json(v: &PlainValue) -> serde_json::Value {
 
 fn handle(ctx: &ServerCtx, req: Request, w: &mut std::net::TcpStream) {
     if req.method == "GET" && (req.path == "/" || req.path == "/index.html") {
-        let _ = http::respond(w, 200, "text/html; charset=utf-8", PAGE.as_bytes());
+        let _ = http::respond(w, 200, "text/html; charset=utf-8", BRANDED.as_bytes());
         return;
     }
     if !req.token().is_some_and(|t| http::token_eq(t, &ctx.token)) {
@@ -454,3 +486,49 @@ fn publish_state(
 
 /// The console page: one file, no build step.
 const PAGE: &str = include_str!("console.html");
+
+/// Vanillish: the page under the app's own name — console.html stays iNilla's file, and on iOS
+/// this is that page unchanged.
+static BRANDED: LazyLock<String> = LazyLock::new(|| branded(PAGE, super::ui::words::APP));
+
+/// `page` with iNilla's name (`iNilla`, and `INILLA` in the header) replaced by `app`. Only the
+/// name: the page's own keys (`inilla-token`) and the log's `inilla:` prefix stay.
+fn branded(page: &str, app: &str) -> String {
+    page.replace("iNilla", app)
+        .replace("INILLA", &app.to_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wifi_comes_first_and_cellular_never() {
+        assert_eq!(iface_rank("en0"), Some(0));
+        assert_eq!(iface_rank("wlan0"), Some(0));
+        assert_eq!(iface_rank("wlan1"), Some(0));
+        assert_eq!(iface_rank("swlan0"), Some(1));
+        assert_eq!(iface_rank("ap0"), Some(1));
+        assert_eq!(iface_rank("rndis0"), Some(1));
+        assert_eq!(iface_rank("ncm0"), Some(1));
+        assert_eq!(iface_rank("tun0"), Some(2));
+        assert_eq!(iface_rank("wg0"), Some(2));
+        assert_eq!(iface_rank("eth0"), Some(3));
+        assert_eq!(iface_rank("pdp_ip0"), Some(3));
+        assert_eq!(iface_rank("rmnet_data0"), None);
+        assert_eq!(iface_rank("rmnet0"), None);
+        assert_eq!(iface_rank("ccmni1"), None);
+        assert_eq!(iface_rank("dummy0"), None);
+    }
+
+    #[test]
+    fn the_page_carries_the_app_name() {
+        let page = branded(PAGE, "Vanillish");
+        assert!(page.contains("<title>Vanillish console</title>"));
+        assert!(page.contains("<b>VANILLISH</b>"));
+        assert!(!page.contains("iNilla") && !page.contains("INILLA"));
+        // The storage key and the log colouring are not the brand.
+        assert!(page.contains("inilla-token"));
+        assert_eq!(branded(PAGE, "iNilla"), PAGE);
+    }
+}

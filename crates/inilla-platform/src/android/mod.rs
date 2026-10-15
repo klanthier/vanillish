@@ -25,6 +25,8 @@ pub(crate) mod fold;
 pub(crate) mod keychain;
 pub(crate) mod log;
 pub(crate) mod paths;
+/// The Storage Access Framework's folder picker and the share sheet (`crate::picker`).
+pub(crate) mod picker;
 pub(crate) mod thermal;
 
 use std::sync::OnceLock;

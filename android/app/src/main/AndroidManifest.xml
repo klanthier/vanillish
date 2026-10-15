@@ -58,7 +58,20 @@
             </intent-filter>
         </activity>
 
-        <!-- [data] the FileProvider for sharing session logs goes here. -->
+        <!-- [data] the FileProvider for sharing session logs: Settings → Debug → Share session
+             log hands a read-only content URI of benilla-config/Diagnostics to another app, the
+             one way to get a log off the phone without a computer (no files app can open
+             Android/data). The authority follows the application id, so a debug build has its
+             own. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- The relauncher: a throwaway Activity in its own process that waits for the game's
              process to end and starts the game again in a fresh one (after a data import, or if
