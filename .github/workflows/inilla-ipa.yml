@@ -24,7 +24,9 @@ on:
         type: string
         default: ""
   push:
-    tags: ["v*"]
+    # Vanillish: `v*` also matches the Android releases' `vanillish-v*` tags, which would build an
+    # .ipa on macOS minutes and race vanillish-apk.yml to create the same GitHub Release.
+    tags: ["v*", "!vanillish-v*"]
 
 concurrency:
   group: inilla-ipa-${{ github.ref }}
