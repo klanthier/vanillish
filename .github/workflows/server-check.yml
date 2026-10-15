@@ -2,7 +2,8 @@
 # on its own architecture (ubuntu-24.04, ubuntu-24.04-arm: no QEMU):
 #
 # - lint: shellcheck over the images' scripts and server/ci, the Python tools compile and match
-#   benilla-srp's golden verifier, both compose files resolve, compose.yaml's pins agree (pins.sh);
+#   benilla-srp's golden verifier, both compose files resolve, compose.yaml's pins agree (pins.sh),
+#   and image-state.sh and pins.sh give the right verdicts on made-up cases (test_ci_tools.sh);
 # - stack: compose.yaml's db, db-init, realmd and data host on an empty Data folder, then
 #   server/ci/check.sh: the sign-up user's grants (what it can and cannot do), GET /server.json,
 #   POST /accounts (created, replay, name taken, invalid bodies, the rate limit, a token, sign-up
@@ -63,6 +64,9 @@ jobs:
       - name: Pins (compose.yaml against Cargo.toml)
         run: server/ci/pins.sh
 
+      - name: What decides a publish (image-state.sh, pins.sh)
+        run: server/ci/test_ci_tools.sh
+
   stack:
     if: >-
       github.event_name != 'push' ||
@@ -91,6 +95,8 @@ jobs:
           while IFS='=' read -r key value; do printf -v "$key" '%s' "$value"; done < <(server/ci/pins.sh)
           {
             echo "vmangos_commit=$vmangos_commit"
+            echo "db_url=$db_url"
+            echo "db_sha256=$db_sha256"
             echo "vmangos_ref=$registry/vanillish-vmangos:$vmangos_tag"
             echo "vmangos=$(server/ci/image-state.sh "$registry/vanillish-vmangos:$vmangos_tag" "$vmangos_inputs")"
             echo "datahost_ref=$registry/vanillish-datahost:$datahost_tag"
@@ -108,7 +114,11 @@ jobs:
           context: server
           file: server/docker/vmangos/Dockerfile
           platforms: ${{ matrix.platform }}
-          build-args: VMANGOS_COMMIT=${{ steps.images.outputs.vmangos_commit }}
+          # compose.yaml's pins, as a local `up` builds it (empty dump pins: db_latest now).
+          build-args: |
+            VMANGOS_COMMIT=${{ steps.images.outputs.vmangos_commit }}
+            VMANGOS_DB_URL=${{ steps.images.outputs.db_url }}
+            VMANGOS_DB_SHA256=${{ steps.images.outputs.db_sha256 }}
           provenance: false
           load: true
           tags: ${{ steps.images.outputs.vmangos_ref }}

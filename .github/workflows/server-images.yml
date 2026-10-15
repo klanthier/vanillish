@@ -121,9 +121,10 @@ jobs:
           if [ "$vmangos" = build ]; then
             dump="$(basename "$db_url" .zip)"
             if [[ "$dump" =~ ^db-([0-9a-f]+)$ ]]; then
-              case "$(gh api "repos/vmangos/core/compare/${BASH_REMATCH[1]}...$vmangos_commit" --jq .status)" in
+              status="$(gh api "repos/vmangos/core/compare/${BASH_REMATCH[1]}...$vmangos_commit" --jq .status)" || status="unknown commit"
+              case "$status" in
                 ahead | identical) echo "world database $dump: no newer than vmangos ${vmangos_commit:0:9}" ;;
-                *) echo "::error::$dump is newer than VMANGOS_COMMIT ${vmangos_commit:0:9}: move the core forward, or pin VMANGOS_DB_URL to an older dump"; exit 1 ;;
+                *) echo "::error::$dump is not in VMANGOS_COMMIT ${vmangos_commit:0:9}'s history ($status): move the core forward, or pin VMANGOS_DB_URL to an older dump"; exit 1 ;;
               esac
             else
               echo "::warning::$db_url is not named db-<commit>.zip: its age against the core is not checked"

@@ -1,7 +1,7 @@
 # Vanillish server: a vmangos 1.12.1 realm and the game-data host for the Vanillish Android app (and
 # iNilla on iOS). On a Mac, the setup script does everything below. By hand, anywhere:
 #
-#   cp .env.example .env      # set REALM_ADDRESS and the three secrets
+#   cp .env.example .env      # set REALM_ADDRESS, the three secrets and WOW_DATA_DIR
 #   docker compose up -d
 #
 # The first `up` pulls the prebuilt images (linux/amd64 and linux/arm64, so an Apple-silicon Mac runs
@@ -219,6 +219,7 @@ volumes:
   datahost:
   # The player's own archives, imported once by the setup script (never in an image). External, so
   # `docker compose down -v` (a fresh realm) keeps them; `docker volume rm vanillish-wowdata` removes
-  # them. Unused when WOW_DATA_DIR names a folder.
+  # them. Unused when WOW_DATA_DIR names a folder; without one, `up` needs the volume to exist, even
+  # empty (`docker volume create vanillish-wowdata`: realm and sign-up first, the data later).
   vanillish-wowdata:
     external: true

@@ -6,7 +6,8 @@
 !docker/vmangos/bin/
 **/*.MPQ
 **/*.mpq
-**/*.[Mm][Pp][Qq]
+# Any case, and a download's partial file (`dbc.MPQ.part`), as in datahost/.dockerignore.
+**/*.[Mm][Pp][Qq]*
 **/Data/
 **/WTF/
 .env

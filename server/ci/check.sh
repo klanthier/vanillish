@@ -96,12 +96,14 @@ step "start: db, db-init, realmd$([ "$datahost" = 1 ] && echo ', datahost') (no 
 services=(realmd)
 [ "$datahost" = 1 ] && services+=(datahost)
 compose up -d "${services[@]}"
+# Asked inside the container, as its healthcheck does: Docker's proxy accepts a connection to the
+# published port before realmd listens behind it (and closes it then), so a connect proves nothing.
 for i in $(seq 1 60); do
-    python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $realmd_port), 2)" 2>/dev/null && break
-    [ "$i" = 60 ] && fail "realmd is not listening on 127.0.0.1:$realmd_port"
+    compose exec -T realmd grep -qi ':0E8C 00000000:0000 0A' /proc/net/tcp 2>/dev/null && break
+    [ "$i" = 60 ] && fail "realmd is not listening on 3724 in its container"
     sleep 2
 done
-echo "  ok  realmd listens on $realmd_port"
+echo "  ok  realmd listens (published on 127.0.0.1:$realmd_port)"
 
 step "1. the sign-up user"
 as_root -e "SHOW GRANTS FOR 'vanillish_signup'@'%'" | sed 's/^/      /'
