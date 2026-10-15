@@ -14,7 +14,11 @@
 
 pub mod addons;
 pub mod data;
+/// Vanillish: foldables — screen classes, the hinge, the per-class layouts.
+pub mod fold;
 pub mod http;
+/// Vanillish: copying the game data in from a folder outside the app.
+pub mod import;
 pub mod logring;
 pub mod pad;
 pub mod profiles;

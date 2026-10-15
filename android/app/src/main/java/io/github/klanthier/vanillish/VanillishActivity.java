@@ -70,6 +70,8 @@ public class VanillishActivity extends GameActivity {
 
         pads = new GamepadBridge(this);
         foldTracker = new FoldTracker(this);
+        // [data] the folder picker registers here (FolderImport).
+        // [fold] gesture-exclusion set-up goes here.
 
         // Back (the key, the gesture, predictive back on Android 16) is Escape in the game: it
         // closes the open window, or opens the game menu — as on every other client.
@@ -219,6 +221,7 @@ public class VanillishActivity extends GameActivity {
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
         if (pads != null && pads.onMotion(event)) return true;
+        // [pointer] a hardware mouse's hover/scroll and a pen's hover go here.
         return super.dispatchGenericMotionEvent(event);
     }
 

@@ -54,6 +54,8 @@
             </intent-filter>
         </activity>
 
+        <!-- [data] the FileProvider for sharing session logs goes here. -->
+
         <!-- The relauncher: a throwaway Activity in its own process that waits for the game's
              process to end and starts the game again in a fresh one (after a data import, or if
              Android ever brings the game's Activity back in a process that already ran it). -->

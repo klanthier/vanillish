@@ -93,3 +93,7 @@ pub extern "system" fn Java_io_github_klanthier_vanillish_GamepadBridge_nativePa
 ) {
     pads::release_all();
 }
+
+// ---- [data] FolderImport (the Storage Access Framework picker) ---------------------------------
+
+// ---- [pointer] the hardware mouse and the pen ---------------------------------------------------

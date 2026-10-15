@@ -124,6 +124,12 @@ pub struct InillaSettings {
     pub debug: DebugSettings,
     /// The first-run setup (data, server) has been completed once.
     pub setup_done: bool,
+    /// Vanillish: half folded with the hinge across (tabletop / Flex mode), the world and the
+    /// stock interface go above the hinge and the touch controls below it.
+    pub tabletop_split: bool,
+    /// Vanillish: on a foldable's near-square inner screen, follow the device into portrait too
+    /// (the cover screen always stays landscape).
+    pub inner_any_orientation: bool,
 }
 
 impl Default for InillaSettings {
@@ -145,6 +151,8 @@ impl Default for InillaSettings {
             controller_bars_shown: false,
             debug: DebugSettings::default(),
             setup_done: false,
+            tabletop_split: true,
+            inner_any_orientation: false,
         }
     }
 }

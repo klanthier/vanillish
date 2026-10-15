@@ -20,6 +20,10 @@ pub mod gamepad;
 pub mod keychain;
 pub mod pasteboard;
 pub mod paths;
+/// Vanillish: a folder the player picks outside the app (the Storage Access Framework).
+pub mod picker;
+/// Vanillish: a hardware mouse and a hovering pen, as the Java side reports them.
+pub mod pointer;
 pub mod stdio;
 
 #[cfg(target_os = "ios")]

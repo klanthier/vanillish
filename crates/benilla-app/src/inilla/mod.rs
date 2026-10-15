@@ -20,6 +20,8 @@
 //! [`synth`] (binding commands by name, into `BindingsState`) and [`mouse`] (an ordinary mouse,
 //! as Bevy input messages). Neither can do anything a keyboard and mouse could not.
 
+/// Vanillish: the Android host's Bevy side (soft keyboard, Back, the native window, lifecycle).
+mod android;
 pub(crate) mod boot;
 mod console;
 mod data;
@@ -29,6 +31,8 @@ mod icons;
 mod mouse;
 mod pad;
 mod platform;
+/// Vanillish: the screen the HUD lays out on — screen classes, the fold, tabletop.
+mod screen;
 mod session;
 mod store;
 mod synth;
@@ -101,6 +105,8 @@ impl Plugin for InillaPlugin {
             hints::HintsPlugin,
             ui::UiPlugin,
             console::ConsolePlugin,
+            android::AndroidPlugin,
+            screen::ScreenPlugin,
         ));
 
         // The seams. The mouse lands before Bevy's input systems so every reader sees it as a

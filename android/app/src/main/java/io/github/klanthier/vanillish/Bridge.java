@@ -428,4 +428,10 @@ public final class Bridge {
         if (a != null) a.finishAffinity();
         Runtime.getRuntime().exit(0);
     }
+
+    // ---- [data] the folder import and sharing files (FolderImport) -----------------------------
+
+    // ---- [fold] gesture exclusion and the screen ----------------------------------------------
+
+    // ---- [input] the soft keyboard and the host pointer ---------------------------------------
 }
