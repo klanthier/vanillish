@@ -147,7 +147,9 @@ const GAME_MODE_FIRST_READ_SECS: f64 = 2.0;
 /// (`InillaSettings::follow_game_mode`). Read once a second (the Activity refreshes it on every
 /// resume, as Android asks).
 fn follow_game_mode(mut state: ResMut<Inilla>, time: Res<Time<Real>>, mut next: Local<f64>) {
-    if !super::touch_device() {
+    // iOS has no system game mode: nothing to follow, and its settings file stays as iNilla
+    // writes it (no `last_game_mode` remembered as Standard).
+    if !super::touch_device() || cfg!(target_os = "ios") {
         return;
     }
     let now = time.elapsed_secs_f64();

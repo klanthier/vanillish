@@ -1175,4 +1175,32 @@ mod tests {
         // The selected entry (34 points) and its name stay above the hinge.
         assert!(c.y + r + 34.0 + 16.0 < 429.5);
     }
+
+    /// The soft keyboard's composing word in the chat bar: nothing when the keyboard holds none;
+    /// else one line in at most half the room, so a long one leaves the line being typed its
+    /// share of the bar.
+    #[test]
+    fn the_composing_word_keeps_to_half_the_room() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(composing_word(ui, "").is_none());
+                let room = ui.available_width();
+                let short = composing_word(ui, "hel").expect("a word");
+                assert_eq!(short.rows.len(), 1);
+                assert!(!short.elided);
+                let long = composing_word(ui, &"w".repeat(300)).expect("a word");
+                assert_eq!(long.rows.len(), 1, "one line");
+                assert!(long.elided, "cut short");
+                assert!(long.size().x <= room / 2.0 + 0.5);
+            });
+        });
+    }
 }
