@@ -1,1 +1,9 @@
 target
+# Never a Blizzard file in a build context, nor a secret: the image is published.
+**/*.MPQ
+**/*.mpq
+# Any case, and a download's partial file (`dbc.MPQ.part`).
+**/*.[Mm][Pp][Qq]*
+**/Data/
+**/WTF/
+.env

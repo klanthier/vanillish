@@ -1,9 +1,9 @@
-//! A deliberately small HTTP/1.1 server on `std` alone: `GET`/`HEAD` with `Range`, one thread per
-//! connection, `Connection: close` after each response. The clients are a few phones downloading a
-//! dozen files, not the internet.
+//! A deliberately small HTTP/1.1 server on `std` alone: `GET`/`HEAD` with `Range`, a `POST` body of
+//! at most [`MAX_BODY`] bytes, one thread per connection, `Connection: close` after each response.
+//! The clients are a few phones downloading a dozen files and creating an account, not the internet.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +16,27 @@ pub struct Request {
     pub query: Vec<(String, String)>,
     /// Header names lower-cased.
     pub headers: Vec<(String, String)>,
-    /// The peer, for logs.
+    /// The peer, for logs and for sign-up's source check.
     pub peer: String,
+    pub body: Body,
+}
+
+/// The largest request body read: a sign-up is about 200 bytes.
+pub const MAX_BODY: u64 = 4096;
+
+/// What followed the head.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Body {
+    /// No `Content-Length`: nothing announced, nothing read.
+    #[default]
+    None,
+    /// The bytes `Content-Length` announced, all of them.
+    Read(Vec<u8>),
+    /// A `Content-Length` over [`MAX_BODY`] (`u64::MAX` when it does not even fit): left unread.
+    TooLarge(u64),
+    /// A body this server does not read: a `Transfer-Encoding` (chunked has no length up front),
+    /// or a `Content-Length` that is not one plain number.
+    Unreadable,
 }
 
 impl Request {
@@ -43,10 +62,23 @@ impl Request {
     }
 }
 
-/// Read one request's head off `r`. A body, if any, is not read: nothing here accepts one.
+/// The longest request line or header line read: a line without an end must not grow forever.
+pub const MAX_LINE: u64 = 16 * 1024;
+
+/// One line of the head, at most [`MAX_LINE`] bytes; 0 at the end of the stream.
+fn read_line(r: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
+    let n = r.by_ref().take(MAX_LINE).read_line(line)?;
+    if n as u64 == MAX_LINE && !line.ends_with('\n') {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+    }
+    Ok(n)
+}
+
+/// Read one request off `r`: the head, and the body when `Content-Length` announces at most
+/// [`MAX_BODY`] bytes (see [`Body`] for the rest).
 pub fn read_request(r: &mut impl BufRead) -> io::Result<Request> {
     let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
+    if read_line(r, &mut line)? == 0 {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "no request"));
     }
     let mut parts = line.split_whitespace();
@@ -59,7 +91,7 @@ pub fn read_request(r: &mut impl BufRead) -> io::Result<Request> {
     let mut headers = Vec::new();
     loop {
         let mut h = String::new();
-        if r.read_line(&mut h)? == 0 {
+        if read_line(r, &mut h)? == 0 {
             break;
         }
         let h = h.trim_end();
@@ -76,13 +108,42 @@ pub fn read_request(r: &mut impl BufRead) -> io::Result<Request> {
             ));
         }
     }
+    let body = read_body(r, &headers)?;
     Ok(Request {
         method,
         path: percent_decode(&path),
         query,
         headers,
         peer: String::new(),
+        body,
     })
+}
+
+/// The body the head announces. Read through the same reader as the head: it may hold the start
+/// of the body already.
+fn read_body(r: &mut impl BufRead, headers: &[(String, String)]) -> io::Result<Body> {
+    if headers.iter().any(|(k, _)| k == "transfer-encoding") {
+        return Ok(Body::Unreadable);
+    }
+    let mut lengths = headers
+        .iter()
+        .filter(|(k, _)| k == "content-length")
+        .map(|(_, v)| v.as_str());
+    let Some(first) = lengths.next() else {
+        return Ok(Body::None);
+    };
+    // Digits only (`parse` would take a `+`), and every copy of the header the same.
+    if first.is_empty() || !first.bytes().all(|b| b.is_ascii_digit()) || lengths.any(|v| v != first)
+    {
+        return Ok(Body::Unreadable);
+    }
+    let len = first.parse::<u64>().unwrap_or(u64::MAX);
+    if len > MAX_BODY {
+        return Ok(Body::TooLarge(len));
+    }
+    let mut body = vec![0; len as usize];
+    r.read_exact(&mut body)?;
+    Ok(Body::Read(body))
 }
 
 pub fn parse_query(q: &str) -> Vec<(String, String)> {
@@ -162,13 +223,20 @@ pub struct Head<'a> {
 pub fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
         206 => "Partial Content",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         416 => "Range Not Satisfiable",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "",
     }
 }
@@ -193,13 +261,25 @@ pub fn respond(
     body: &[u8],
     head_only: bool,
 ) -> io::Result<()> {
+    respond_with(w, status, content_type, body, head_only, &[])
+}
+
+/// [`respond`], with more headers (`Retry-After`, `Allow`).
+pub fn respond_with(
+    w: &mut impl Write,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    extra: &[(&str, String)],
+) -> io::Result<()> {
     write_head(
         w,
         &Head {
             status,
             content_type,
             length: Some(body.len() as u64),
-            extra: &[],
+            extra,
         },
     )?;
     if !head_only {
@@ -261,6 +341,15 @@ where
     }
 }
 
+/// After answering a request whose body was left unread: stop sending, and read and drop what the
+/// client still sends (at most `limit` bytes, for at most a second). Closing a socket with unread
+/// data resets the connection, and a reset can destroy the answer before the client reads it.
+pub fn drain(s: &mut TcpStream, limit: u64) {
+    let _ = s.shutdown(Shutdown::Write);
+    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = io::copy(&mut (&*s).take(limit), &mut io::sink());
+}
+
 /// Stream `len` bytes of `src` to `w` in chunks; returns how many were sent.
 pub fn copy_n(src: &mut impl Read, w: &mut impl Write, len: u64) -> io::Result<u64> {
     let mut left = len;
@@ -299,6 +388,55 @@ mod tests {
         assert_eq!(req.query("token"), Some("t+u"));
         assert_eq!(req.header("host"), Some("h"));
         assert_eq!(req.token(), Some("tok"), "the header wins over the query");
+    }
+
+    #[test]
+    fn a_body_is_read_only_when_its_length_is_announced_and_small() {
+        let raw = b"POST /accounts HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello, and more";
+        let req = read_request(&mut &raw[..]).unwrap();
+        assert_eq!(req.body, Body::Read(b"hello".to_vec()));
+        let raw = b"GET / HTTP/1.1\r\n\r\n";
+        assert_eq!(read_request(&mut &raw[..]).unwrap().body, Body::None);
+        let raw = b"POST /accounts HTTP/1.1\r\nContent-Length: 4097\r\n\r\n";
+        assert_eq!(
+            read_request(&mut &raw[..]).unwrap().body,
+            Body::TooLarge(4097)
+        );
+        let raw = b"POST /accounts HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n";
+        assert_eq!(
+            read_request(&mut &raw[..]).unwrap().body,
+            Body::TooLarge(u64::MAX)
+        );
+        for head in [
+            "Transfer-Encoding: chunked",
+            "Content-Length: +5",
+            "Content-Length: 5\r\nContent-Length: 6",
+            "Content-Length: 5\r\nTransfer-Encoding: chunked",
+            "Content-Length:",
+        ] {
+            let raw = format!("POST /accounts HTTP/1.1\r\n{head}\r\n\r\nhello");
+            let req = read_request(&mut raw.as_bytes()).unwrap();
+            assert_eq!(req.body, Body::Unreadable, "{head}");
+        }
+        let raw = b"POST /accounts HTTP/1.1\r\nContent-Length: 9\r\n\r\nshort";
+        assert!(
+            read_request(&mut &raw[..]).is_err(),
+            "a body cut short is no request"
+        );
+    }
+
+    #[test]
+    fn a_line_without_an_end_is_refused_not_kept() {
+        let long = "x".repeat(MAX_LINE as usize);
+        for raw in [
+            format!("GET /{long} HTTP/1.1\r\n\r\n"),
+            format!("GET / HTTP/1.1\r\nX-Pad: {long}\r\n\r\n"),
+        ] {
+            let e = read_request(&mut raw.as_bytes()).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        }
+        let fits = format!("GET / HTTP/1.1\r\nX-Pad: {}\r\n\r\n", &long[..1000]);
+        assert!(read_request(&mut fits.as_bytes()).is_ok());
     }
 
     #[test]

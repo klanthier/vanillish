@@ -1,14 +1,21 @@
 [package]
+# The binary keeps its iNilla name: the scripts, the docs and the apps already out know it.
 name = "inilla-datahost"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-description = "iNilla: serve your own 1.12.1 client's Data folder to your own devices — a manifest of the archives with SHA-256 hashes, and the files with Range support for resumable downloads"
+description = "Vanillish/iNilla: serve your own 1.12.1 client's Data folder to your own devices — a manifest of the archives with SHA-256 hashes, the files with Range support for resumable downloads — describe the server in /server.json, and create player accounts"
 publish = false
+
+# Its own workspace: the repository root's (the app) must not claim it.
+[workspace]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
+# Sign-up's database: pure Rust (flate2's Rust backend), no TLS (the database is never published),
+# so it builds for musl on x86_64 and aarch64 alike.
+mysql = { version = "28", default-features = false, features = ["minimal-rust"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
