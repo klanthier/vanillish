@@ -231,6 +231,13 @@ pub fn open_url(url: &str) {
     let _ = url;
 }
 
+/// The game has quit: close the app and end the process the way the OS wants it (Android: the
+/// task closes and the process ends from the UI thread). A no-op elsewhere — the caller returns.
+pub fn quit() {
+    #[cfg(target_os = "android")]
+    crate::android::call_bridge_void("quit", "()V", &[]);
+}
+
 /// Start the app over in a fresh process, where the OS allows an app to (Android). `false` where
 /// it does not: the caller then exits and the player opens the app again.
 pub fn relaunch() -> bool {

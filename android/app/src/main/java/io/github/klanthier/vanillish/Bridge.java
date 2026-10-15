@@ -411,6 +411,18 @@ public final class Bridge {
     }
 
     /**
+     * The game quit (its menu's Exit): close the task and end the process — never by returning
+     * from android_main into GameActivity's teardown, which a winit app cannot finish.
+     */
+    public static void quit() {
+        onUi(() -> {
+            Activity a = activity;
+            if (a != null) a.finishAndRemoveTask();
+            Process.killProcess(Process.myPid());
+        });
+    }
+
+    /**
      * Start the game over in a fresh process: the relauncher (its own process) waits for this one
      * to end, then opens the game again. This process ends here.
      */

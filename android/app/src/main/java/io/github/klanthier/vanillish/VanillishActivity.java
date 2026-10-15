@@ -228,13 +228,16 @@ public class VanillishActivity extends GameActivity {
     @Override
     protected void onDestroy() {
         if (pads != null) pads.close();
+        if (foldTracker != null) foldTracker.stop();
         boolean recreating = isChangingConfigurations();
-        super.onDestroy();
         Bridge.detach(this);
-        if (!started) return;
-        // The game cannot outlive its Activity (winit does not survive it), and a later Activity
-        // must not start a second one in this process: end it. If Android is recreating the
-        // Activity (a configuration change the manifest did not list), come straight back.
+        // Never call super.onDestroy(): GameActivity's terminateNativeCode waits — with no
+        // timeout — for android_main to return, and a winit app never returns on Destroy: the UI
+        // thread would hang forever. The game cannot outlive its Activity anyway, and a later
+        // Activity must not start a second one in this process: end the process here. (What has
+        // to survive was saved when the surface went, on Bevy's Suspended.) If Android is
+        // recreating the Activity (a configuration change the manifest did not list), come
+        // straight back in a fresh process.
         if (recreating) {
             Bridge.relaunch();
         } else {
