@@ -1,3 +1,41 @@
+# Vanillish (this fork)
+
+This repository is **Vanillish**, iNilla built for Android (the Galaxy Z Fold8 Ultra first). Ours:
+`crates/vanillish-android` (the app's `libvanillish.so` and its JNI exports), `android/` (the Gradle
+project, the Java side, the build scripts), `crates/inilla-platform/src/android/`, the new Android
+modules in iNilla's crates (`inilla-core`'s `fold` and `import`, `inilla-platform`'s
+`gamepad/android`, `pointer`, `picker`, `benilla-app`'s `inilla::{android,screen,host_pointer}` and
+`inilla/ui/words.rs`) and the `vanillish-*` workflows. Everything else is iNilla's or upstream
+benilla's, merged in (`docs/UPSTREAM.md`). Read `docs/ANDROID.md` first, then
+`docs/ANDROID-BUILD.md`.
+
+- Rust → Java: static methods on `io.github.klanthier.vanillish.Bridge`, through
+  `inilla_platform::android::{call_bridge, call_bridge_void, with_env}`; never `FindClass`, never a
+  cached Activity. Java → Rust: `static native` methods whose functions live in
+  `crates/vanillish-android/src/jni_exports.rs` and only pass plain values on into
+  `inilla-platform`. JNI code never panics. A Java class or member Rust reaches by name needs a
+  `-keep` in `android/app/proguard-rules.pro`.
+- `inilla-platform` takes no Bevy and no android-activity; what needs Bevy's `AndroidApp` lives in
+  `crates/benilla-app/src/inilla/`. Engine-free logic goes in `inilla-core` with a unit test.
+- A change inside an iNilla or benilla file is a carry: minimal, marked `Vanillish:`, listed in
+  `docs/UPSTREAM.md`, iOS behaviour unchanged. A sentence that names the platform goes in
+  `inilla/ui/words.rs`.
+- Before pushing, besides iNilla's checks below (what `vanillish-check` runs; the NDK is
+  28.2.13676358):
+
+  ```sh
+  cargo test -p inilla-core -p inilla-platform
+  cargo check -p benilla-app --no-default-features
+  cargo ndk -t arm64-v8a -P 31 check -p vanillish-android
+  python3 android/tools/test_jni_natives.py
+  (cd android && ./gradlew --no-daemon -q :app:compileReleaseJavaWithJavac)
+  ```
+
+---
+
+*Below: iNilla's own AGENTS.md, unchanged. Its rules hold here too; "this repository" there is
+iNilla, which Vanillish is built on.*
+
 # iNilla (this fork)
 
 This repository is **iNilla**, the iOS build of benilla: `crates/inilla-*`, `ios/`,

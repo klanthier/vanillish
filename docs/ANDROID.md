@@ -1,0 +1,410 @@
+# Vanillish
+
+Vanillish is iNilla on Android: the same client, the same touch controls, controller mapping,
+launcher and remote console ([INILLA.md](INILLA.md)), with what an Android phone needs added
+around them, and the **Samsung Galaxy Z Fold8 Ultra** first among the phones: its cover screen,
+its inner screen and the inner screen half folded on a table each get a layout of their own.
+Nothing inside the game is rewritten, and iOS behaves as it did.
+
+It needs Android 12 (API 31) or later, an arm64 phone and Vulkan 1.1. The APK is sideloaded
+([ANDROID-BUILD.md](ANDROID-BUILD.md)); the game data comes from your own 1.12.1 client
+([ANDROID-DATA.md](ANDROID-DATA.md)).
+
+## Where it lives
+
+| path | what |
+|---|---|
+| `crates/vanillish-android` | the app's entry: `libvanillish.so`, whose `android_main` (on GameActivity's native thread) runs `inilla_boot` and `benilla_app::run`; `src/jni_exports.rs` holds every function the Java side calls. |
+| `crates/inilla-platform/src/android/` | the OS glue behind iNilla's plain Rust calls: JNI into the Java `Bridge` class (`with_env`, `call_bridge`), the app's folders, the clipboard, the device (screen on, haptics, safe area, memory, frame rate, orientation, game mode, Back), the fold, the Keystore, logcat, the thermal state (`AThermal`). |
+| `crates/inilla-platform/src/{gamepad/android,pointer,picker}.rs` | the controller store, the mouse and pen queue, the folder picker: plain Rust the JNI shims feed, tested on any host. |
+| `crates/inilla-core/src/{fold,import}.rs` | the screen classes, their layouts, the tabletop split, the interface scale per screen; copying the game data in from a picked folder. Engine-free, unit-tested. |
+| `crates/benilla-app/src/inilla/android.rs` | the Bevy side: the soft keyboard's text, Back, the native window's size, leaving and coming back to the screen, the frame-rate vote, Game Dashboard's modes, the session service. |
+| `crates/benilla-app/src/inilla/screen.rs` | which screen the game is on, its layout, the world above the hinge, the orientation, the edges the back swipe holds off. |
+| `crates/benilla-app/src/inilla/host_pointer.rs` | a hardware mouse and a hovering pen, into iNilla's virtual mouse. |
+| `crates/benilla-app/src/inilla/ui/words.rs` | every sentence that names the platform or the app: iNilla's on iOS, Vanillish's on Android. |
+| `android/` | the Gradle project: the Java classes (`VanillishActivity`, `Bridge`, `GamepadBridge`, `PointerBridge`, `FolderImport`, `FoldTracker`, `GameSessionService`, `Relauncher`, in `io.github.klanthier.vanillish`), the manifest, the resources, `build-rust.sh`, `build-apk.sh`, `tools/`. |
+| `.github/workflows/vanillish-*.yml` | the gate on every push, and the APK pipeline. |
+
+Rust asks Java for things through static methods on `Bridge` (it pulls: insets, the fold and Back
+presses are cached there for it to read); Java hands Rust events through `static native` methods,
+which only pass plain values on into `inilla-platform`. `inilla-platform` stays free of Bevy and
+of android-activity; what needs Bevy's `AndroidApp` lives in `crates/benilla-app/src/inilla/`.
+
+## How input reaches the game on Android
+
+Through iNilla's two seams and nothing else — commands by name (`inilla/synth.rs`) and an
+ordinary mouse (`inilla/mouse.rs`) — plus ordinary key messages for typing:
+
+| input | path |
+|---|---|
+| fingers | GameActivity → winit's touch events → iNilla's touch engine, as on iOS. At most eight fingers: a ninth is dropped before winit sees it. |
+| the soft keyboard | GameTextInput's text buffer, read every frame by the IME bridge (`inilla::android`) → characters and Backspace as key messages, Enter and Tab as keys pressed for the player. |
+| a hardware keyboard | winit's key events, as on the desktop (a hardware Enter is rewritten to the Enter key). |
+| Back | the Back key or gesture → `BackPresses` → iNilla's screens first, then the game's Escape. |
+| a controller | `GamepadBridge.java` → `jni_exports.rs` → `inilla_platform::gamepad::android` → iNilla's mapper, unchanged. |
+| a mouse, a trackpad, a hovering pen | `PointerBridge.java` → `jni_exports.rs` → `inilla_platform::pointer` → `inilla::host_pointer` → the virtual mouse. |
+
+So, as on iOS, nothing Vanillish does is something a keyboard and mouse player could not do.
+
+## The Galaxy Z Fold8 Ultra
+
+### Three screens, three layouts
+
+| where you play | class (Settings → Touch says) | size in landscape | layout file | the layout |
+|---|---|---|---|---|
+| the cover screen, folded | Phone / cover screen | ≈ 960 × 411 dp | `touch.toml` | iNilla's phone layout, unchanged: the cover screen is about an iPhone Pro Max's size and shape. |
+| the inner screen, unfolded | Inner screen | ≈ 954 × 859 dp | `touch-tablet.toml` | for two hands holding the side edges: the stick under the left thumb, jump under the right one with slots 1–6 around it and 7–12 on an outer arc toward the middle (Combat view); target (Tab), interact (Use) and autorun (Run) above the stick; the ☰, view and menu buttons at the top centre. Everything is anchored to the side edges, so it stays under the thumbs on a taller or shorter window. |
+| the inner screen half folded, hinge across, on a table | Tabletop (half folded) | the world ≈ 954 × 430 dp above the hinge, the deck ≈ 954 × 418 dp below | `touch-tabletop.toml` | the controls on the deck below the hinge, played from above with the fingers of both hands: the stick on the left, jump and twelve slots on the right, target and interact at the bottom middle, the system buttons along the crease. |
+
+The sizes are at a density of 2.625; the phone may use another. The rule behind the classes
+(`inilla_core::fold::classify`): a window whose short side is at least 600 dp and whose long side
+is at most 1.6 times it is the inner-screen kind; anything wider or smaller is a phone; half open
+with the hinge across, and at least 240 dp on either side of it, is a tabletop. So another phone
+gets iNilla's layout, a small tablet the inner screen's, and a split-screen or DeX window
+whichever its shape is.
+
+Each screen keeps its own layout, and an edit changes only the current screen's. The right one
+comes up by itself a moment (0.35 s) after you fold or unfold: the outgoing layout is saved, every
+finger is let go of, and the stock interface is re-anchored. **Settings → Touch** shows the screen
+you are on, has **Copy the phone layout here** to start the inner screen or the tabletop from your
+phone layout, and **Reset layout** puts back the current screen's own shipped layout. **Reset all
+Vanillish settings** (Settings → About) resets every screen's layout.
+
+The interface size follows the screen too (Settings → General → Interface size, Automatic):
+
+| screen | automatic `uiScale` | why |
+|---|---|---|
+| cover | 1.25 | iNilla's phone rule: a stock action button near fingertip size. |
+| inner | ≈ 0.83 | a fingertip button would leave the near-square screen narrower than the 1024-unit main action bar; the scale stops where the bar still fits. |
+| tabletop | 0.64 | the phone rule applied to the half above the hinge: about 600 units of interface there, near a phone's 614, so quest and vendor windows fit above the crease. 0.64 is the smallest scale the 1.12 client applies. |
+
+A pinned interface size (Automatic off) applies as set on the cover and inner screens; on a
+tabletop it is applied to the half above the hinge as it would be to a screen that tall (never
+below 0.64).
+
+### Tabletop (Flex mode)
+
+Half fold the unfolded phone, stand it on a table with the hinge across, and in the world:
+
+- the 3D world and the stock interface — windows, action bars, chat — end at the hinge;
+- below it the HUD has a black deck to itself, with the crease drawn faintly as a line the fingers
+  should not rest on;
+- a drag on the deck's empty middle looks around (a look pad); a tap there clicks nothing;
+- the controller's radial menu opens in the middle of the world above the hinge.
+
+The login and character screens stay whole-screen; the split is in the world only, and only while
+the hinge still reads half open. **Settings → Touch → Tabletop: the game above the hinge, the
+controls below it** turns the split off; a half-folded inner screen is then the inner screen.
+
+Stock windows taller than the half above the hinge (about 600 units), long dropdowns, and addons
+that size themselves with `GetScreenHeight()` can reach into the deck.
+
+### Orientation
+
+The game plays landscape, either way up. Unfolded, **Settings → General → Inner screen: follow the
+device into portrait** lets it turn with the phone (off by default); the cover screen always stays
+landscape, since the touch controls and iNilla's screens need its width, and so does a tabletop,
+since that is what puts the hinge across. In split screen and DeX windows Android ignores the
+game's orientation.
+
+### Cut-outs and the safe area
+
+The game draws under the camera cut-out on every edge, full screen, with the system bars hidden (a
+swipe from an edge shows them for a moment). What the HUD and the stock interface keep clear of:
+
+- **the camera cut-out.** On the cover screen in landscape the hole sits mid-height on the left or
+  right edge — where the Dynamic Island is on an iPhone — and **Settings → General → Keep windows
+  clear of the camera cutout** stops the stock windows at it on that side (the 3D world still fills
+  the screen). The side comes from the cut-out's own bounding rects, so a curved edge is not taken
+  for a camera. A cut-out on the top edge insets the top. Where the inner screen's camera lands in
+  landscape is still to be seen on a device;
+- **the home swipe strip** along the bottom, which Android keeps whatever the app asks: the bottom
+  row of controls stays above it;
+- **in a window** (split screen, pop-up view, Samsung DeX): the system bars and the window's title
+  bar too.
+
+While the touch controls show, Android's back swipe is held off along the side edges beside the
+elements a thumb rests on (a 32 dp band, at most 200 dp of height per edge — Android's limit), so
+a thumb landing on the stick does not leave the game. The bottom edge's home gesture cannot be
+held off.
+
+## Frame rate: 120 Hz and the presets
+
+The graphics preset (Settings → General → Graphics) asks the panel for its rate with the call
+Android recommends for games (`Surface.setFrameRate` on the game's surface, again on every new
+surface: each panel of the Fold has its own modes):
+
+| preset | frame rate | the panel is asked for | view distance (`farclip`), ground clutter |
+|---|---|---|---|
+| Battery saver | 30 fps | 30 Hz | 177, 16 |
+| Balanced (the default) | 60 fps | 60 Hz | 330, 32 |
+| High | the panel's full rate (120 on the Fold8 Ultra) | its highest | 777, 64 |
+| Custom | the panel's full rate | its highest | the stock video options, untouched |
+
+The labels show the rates (`High 120 fps`, read from the panel). The LTPO panel then runs at the
+preset's rate instead of idling at 120 against a capped game. When the panel reports the cap's
+rate and frames come paced, iNilla's sleeping frame cap stands down (presenting already paces
+them); if frames still come faster than reported, it caps again for ten seconds.
+
+High on the inner screen draws twice the pixels of the cover screen at twice Balanced's rate: it is
+best on a charger. Render resolution (80 % by default) lowers the 3D world's pixels and leaves the
+interface sharp. Samsung's own settings can hold a game below what it asks: Settings → Display →
+Motion smoothness → Standard caps the phone at 60 Hz, and Game Booster has frame-rate settings of
+its own.
+
+### Game Dashboard
+
+Android's game modes map onto the presets: **Performance** picks High, **Battery** picks Battery
+saver. Only when the mode *changes* — the mode last seen is kept in `settings.toml`
+(`last_game_mode`), so a launch in the mode the game was left in changes nothing — never over a
+Custom preset, and a preset you pick afterwards stands until the mode changes again. The mode is
+read on every resume (a developer can set it with `adb shell cmd game mode performance
+io.github.klanthier.vanillish`). The manifest declares both modes and lets the system neither
+downscale the game nor cap its frame rate: Vanillish has its own render resolution and cap.
+
+### Heat and memory
+
+Settings → Debug → **Show frame rate, memory and heat** puts both on screen: memory is the
+system-wide room left before Android's low-memory killer starts on background apps (Android has no
+per-app limit like iOS's), and heat is the thermal state — `warm`, `HOT`, `THROTTLING` — from the
+system's thermal service. The Fold8 Ultra cools with graphite sheets, without a vapour chamber, so
+a long session at High is likely to throttle; Balanced, the default, is the preset for long play.
+Nothing steps the preset down by itself yet.
+
+## The soft keyboard and the chat bar
+
+Vanillish types with the system keyboard (Gboard, Samsung Keyboard), suggestions and autocorrect
+included. A chat box raises it when it takes the focus, and so does a field on iNilla's own
+screens (Settings → General → **Show the keyboard when a text box is focused**, as on iOS); on the
+login and character screens the **⌨ Keyboard** button at the top right raises it.
+
+- The keyboard floats over the game; the game is never resized under it. In landscape it covers
+  the stock edit box, so the HUD's **chat bar** at the top shows the line being typed, with
+  **Send** and **× Close** (Close is the Escape key, as on iOS).
+- The keyboard holds the word you are still typing (underlined in its suggestions) until a space,
+  a punctuation mark or a picked suggestion commits it. The chat bar shows that word after the
+  line, dimmed and underlined; the game gets it when it is committed, or when the line is sent or
+  closed.
+- Return on the keyboard, or the chat bar's Send, sends the line. Backspace in an empty box still
+  reaches the game.
+- Password fields open a plain keyboard with no suggestions, and the keyboard learns nothing from
+  them; address fields (the realmlist, the data URL) get the URL layout. The keyboard never takes
+  the whole screen in landscape.
+- A Bluetooth or DeX keyboard types too, also while the on-screen keyboard is up.
+
+## Back
+
+The Back gesture or key is the Escape key iOS has none of, and it never leaves the game:
+
+1. With the on-screen keyboard up, the first Back closes the keyboard (Android's own rule).
+2. On iNilla's screens it undoes the most local thing first: an open dropdown, the password prompt,
+   the server or account form, the layout editor (Done), the log viewer (back to Settings), then
+   the screen itself (without game data, back to the setup screen).
+3. Anything left is the game's Escape: it closes the open window, or opens the game menu.
+
+A controller's B never acts as Back, and a mouse's side button is a mouse button, not Back
+(below).
+
+## Controllers
+
+Anything Android sees as a gamepad: Xbox, DualSense, DualShock 4, Switch Pro, the Backbone One and
+other USB or Bluetooth pads. Pair one in the phone's **Settings → Connections → Bluetooth**, or plug
+in a USB-C one; it works with no setup, in iNilla's mapping and with iNilla's settings
+([INILLA.md](INILLA.md#controllers)).
+
+- **The cover screen with a phone clip.** A USB-C clip (Backbone One, Razer Kishi, GameSir) on the
+  folded phone plays on the cover screen, the Fold as a handheld — if the clip takes the folded
+  phone's size. Unfolded, use a Bluetooth pad.
+- **The pad's own symbols.** The HUD and the stock buttons' hints show ×○□△ for Sony pads and the
+  Backbone One PlayStation Edition, Nintendo letters for Switch pads, Xbox letters otherwise.
+- **More than one pad.** The one you last used — a button, or a stick or trigger past halfway —
+  is in control, so a clip on the cover screen and a pad on the table both work without
+  disconnecting either.
+- **Home** goes to the Android home screen. **B** is the game's B, never Back. Start/☰ opens the
+  radial menu, Select/View/Create (Back on cheaper pads) the game menu, as on iOS.
+- Pulling down the notification shade, folding the phone or anything else that takes the focus
+  releases every held button.
+- Very quick taps — down and up between two frames — still count.
+- Rumble is not supported yet.
+
+## DeX, a mouse, a keyboard, a pen
+
+A hardware mouse, a trackpad or a keyboard works in **Samsung DeX** or connected over Bluetooth or
+USB, as on the desktop client:
+
+- left and right click, and hovering for tooltips; the pointer shows the game's own cursors (the
+  sword, the hand, a held item's icon);
+- the wheel zooms the camera and scrolls lists; a trackpad's two-finger swipe does the same;
+- the wheel button and the two side buttons are `BUTTON3`, `BUTTON4` (autorun by default) and
+  `BUTTON5` for key bindings. The side "back" button is `BUTTON5` and never Android's Back;
+- holding the right button turns the camera; a mouse's pointer is captured and hidden meanwhile and
+  comes back where it was. A trackpad is never captured: mouse-look on one follows its pointer and
+  stops at the screen's edge.
+
+While a mouse or a hardware keyboard is in use, the touch controls step aside; the next touch
+brings them back. **Settings → General → Hide the touch controls while a mouse or keyboard is in
+use** turns that off. The on-screen keyboard does not count.
+
+In DeX the game runs in a window: its layout follows the window's shape (a wide window is laid out
+as a phone), and the safe area keeps clear of the window's title bar.
+
+The Fold8 Ultra takes no S Pen; on a phone or tablet with a stylus, a pen hovering above the screen
+is the mouse without a button — tooltips and highlights under it, and a touch control's tooltip
+without pressing it. Touching the screen with the pen is a tap.
+
+## Staying connected
+
+Android freezes an app's process within seconds of it leaving the screen, and the server drops a
+character whose client stops answering. **Settings → General → Stay connected in the background**
+(on by default) keeps the session: while you are in the world, a foreground service keeps the
+process, and the game's connection, alive while you look at another app or lock the phone. A quiet
+**"Staying connected to the game server. Tap to return."** notification shows meanwhile (channel
+*Game connection*, white V icon); tapping it returns to the game.
+
+- It runs only in the world, and stops when you leave the world, turn the setting off, quit, or
+  swipe Vanillish away from Recents.
+- The first time, Android 13 and later ask for permission to show notifications. Without it the
+  service runs all the same; the game then shows only in the system's list of running apps.
+- The world does not update while the game is off the screen; the connection stays up, and what the
+  server sent waits for your return.
+- Leaving the screen, Vanillish saves its settings and layouts, lets go of every held key and mutes
+  its sound; coming back, the sound returns.
+- How a fold behaves depends on Samsung's **Settings → Display → Continue apps on cover screen**:
+  the game moves to the cover screen, or the phone locks and the game waits in the background (the
+  session kept, with this setting on).
+
+## Settings that differ from iOS
+
+Everything else is iNilla's ([INILLA.md](INILLA.md#settings)).
+
+| tab | on Android |
+|---|---|
+| General | Graphics shows each preset's frame rate (Battery saver 30 fps, Balanced 60 fps, High at the panel's rate), and its hint says High is best on a charger. Interface size: automatic per screen (above). **Keep windows clear of the camera cutout** in place of the Dynamic Island row. Three rows only Android has: **Inner screen: follow the device into portrait** (off), **Stay connected in the background** (on), **Hide the touch controls while a mouse or keyboard is in use** (on). |
+| Touch | **This screen** (the screen class), **Copy the phone layout here**, **Tabletop: the game above the hinge, the controls below it** (on). **Reset layout** puts back this screen's own layout. |
+| Controller | the pairing hint names Android's Bluetooth settings and USB-C clips. |
+| Audio | no silent-switch row: Android has no switch, and Mute or Vibrate mode does not silence the game (the volume keys set its volume). **Let music and podcasts from other apps keep playing** off asks Android for the audio focus, which pauses them. |
+| Debug | the console's hint adds the phone's hotspot and `adb forward`; the session log row says where the log is; **Share session log…**. |
+| About | **Vanillish — benilla for Android**, the credit to benilla and iNilla, **Reset all Vanillish settings** (every screen's layout too; the Game Dashboard mode last seen is kept). |
+
+In `benilla-config/inilla/settings.toml` the Android-only settings are `tabletop_split`,
+`inner_any_orientation`, `stay_connected` and `hide_touch_with_mouse`, and `last_game_mode` is
+the memory behind Game Dashboard (not a switch).
+
+## Where the files are
+
+`<package>` is `io.github.klanthier.vanillish` — `io.github.klanthier.vanillish.debug` for a debug
+build, which is a separate app with its own folders.
+
+| where | what |
+|---|---|
+| `Android/data/<package>/files/` | Vanillish's folder in the phone's shared storage — iOS's Documents. A PC sees it over USB (File transfer); the phone's own file managers cannot open `Android/data`. It is also where a copied `Data` folder is dropped ([ANDROID-DATA.md](ANDROID-DATA.md)). |
+| `…/files/benilla-config/` | benilla's state, as on every platform: `config.toml`, key bindings, macros, saved variables, `AddOns/`, `Screenshots/`, and `Diagnostics/` (session logs, crash reports). |
+| `…/files/benilla-config/inilla/` | iNilla's files: `settings.toml`, `servers.toml`, `controller.toml`, and the touch layouts `touch.toml` (cover), `touch-tablet.toml` (inner), `touch-tabletop.toml` (tabletop). |
+| `…/files/.vanillish/Data/` | the game data, once imported or downloaded. Beside the drop box on the same storage, so importing a copied folder is a rename, not a second 5 GB copy. |
+| `/data/user/0/<package>/files/secrets.bin` | the saved passwords, sealed (private storage: nothing else can read it). |
+| `/data/user/0/<package>/cache/vanillish/` | caches and temporary files; Android may clear them. |
+
+If shared storage is not mounted, everything falls back to private storage
+(`/data/user/0/<package>/files/Documents/`), out of a PC's reach.
+
+**Uninstalling deletes all of it** — the game data, the settings, the layouts, the SavedVariables —
+and so does *Clear storage* in the app's settings. (Uninstalling from the system settings may offer
+to keep the app's data; do not count on it.) Updating (an APK installed over the app) keeps
+everything, as long as it is signed with the same key ([ANDROID-BUILD.md](ANDROID-BUILD.md#signing)).
+Android Auto Backup is off for Vanillish: copy `benilla-config` to a PC to keep it.
+
+## Passwords
+
+**Remember the password** on an account seals it with an AES-256-GCM key kept in the **Android
+Keystore** (alias `vanillish.secrets.v1`); the sealed file, `secrets.bin`, sits in private storage.
+The key never leaves the Keystore and is never backed up, so a copy of the file is useless
+elsewhere. If the key is gone (a reinstall, *Clear storage*), the passwords are forgotten and asked
+for again at the next login. If the Keystore refuses, the account form says "Password not saved:
+the Android Keystore refused it" and the launcher asks at each login.
+
+## The manifest
+
+Every attribute in `android/app/src/main/AndroidManifest.xml` is there for a reason:
+
+| attribute | why |
+|---|---|
+| `appCategory="game"`, `isGame="true"` | One UI files Vanillish with the games (Game Launcher, Game Booster), and Android 16 keeps honouring a game's landscape lock on a large screen (the inner one). |
+| `allowBackup="false"` | 5 GB of game data and Auto Backup's 25 MB quota do not mix, and the Keystore key that seals the passwords is never backed up anyway. |
+| `hasFragileUserData="true"` | an uninstall from the system settings offers to keep the app's data. |
+| `extractNativeLibs="true"` (and Gradle's `useLegacyPackaging`) | the library is stored compressed in the APK — it keeps its symbol table — and unpacked at install. |
+| `android.game_mode_config` → `res/xml/game_mode_config.xml` | Performance and Battery modes declared; no system downscaling, no frame-rate override. |
+| `uses-feature android.hardware.vulkan.version` `0x401000` | wgpu's Vulkan backend: Vulkan 1.1 is the floor. The gamepad and the touchscreen are optional features. |
+| `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | the game server, the data host, the remote console. |
+| `VIBRATE` | haptics on the HUD and the radial menu. |
+| `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS` | staying connected: `GameSessionService` and its notification. |
+| activity `configChanges` (the full list) | folding, unfolding, rotating, a controller or keyboard connecting, DeX, a theme change: none may recreate the Activity — a Bevy app cannot be built twice in one process. |
+| `launchMode="singleTask"` | a second launch never makes a second Activity. |
+| `screenOrientation="sensorLandscape"`, `resizeableActivity="true"` | landscape either way up (the inner screen may be let into portrait); split screen and DeX windows allowed. |
+| `windowSoftInputMode="adjustNothing\|stateHidden"` | the keyboard floats over the game rather than shrinking it (the automatic interface size follows the height). GameActivity asks for the opposite at run time; `VanillishActivity.onSetUpWindow` sets it back. |
+| `android.app.lib_name` = `vanillish` | the library GameActivity loads. |
+| the FileProvider `${applicationId}.files` | **Share session log…**: hands one file of `benilla-config/Diagnostics` to another app, read-only. |
+| `.Relauncher` in its own process `:relauncher` | "Restart Vanillish now": waits for the game's process to end and opens the game in a fresh one. |
+| `.GameSessionService`, `foregroundServiceType="specialUse"`, `stopWithTask="true"` | staying connected; no other service type fits a game session, and swiping the game away ends it. |
+
+No storage permission is asked for: the drop box is the app's own folder, and a folder elsewhere
+is read through the system's picker.
+
+**One game per process.** A Bevy app is built once per process. When the game quits, the process
+ends with it; an Activity that Android ever creates again in a process that already ran the game
+starts the game over in a fresh one (`Relauncher`); `VanillishActivity.onDestroy` ends the process
+instead of calling GameActivity's teardown, which would wait forever for a winit app to return.
+Pipelined rendering is off on Android (`crates/benilla-world/src/boot.rs`): with the render thread
+presenting while Android takes the surface away (leaving the screen, a fold), the swapchain is
+lost mid-frame, which Bevy cannot recover from.
+
+## Known limits
+
+- **Rumble** is not supported.
+- **In the background** the sound is muted, not paused: the mixer keeps running silently. There is
+  no wake lock, so with the screen off for a long time the connection can still drop.
+- **A dismissed keyboard** (closed with Back or its hide key while the box keeps the focus) does not
+  come back on the next tap — iOS has the same gap. Back once more leaves the box (Escape); open
+  chat again.
+- **With the on-screen keyboard up**, a hardware keyboard's arrows, Home and End move the
+  keyboard's cursor, not the game's caret; the text the game gets is still right.
+- **Tabletop**: windows taller than the half above the hinge and some addons reach into the deck.
+- **A mouse's back button** on Android 16: a real Back gesture within half a second after releasing
+  it is dropped too.
+- **Controllers**: a generic HID pad laid out like a DualShock 4 without Android's mapping file
+  could read its triggers as the right stick; a Bluetooth keyboard that Android takes for a gamepad
+  would have its arrows and Back taken as the d-pad and Options.
+- **Copying over USB**: if the PC stamps the files with a time in the future (another time zone,
+  a clock off), the folder reads as "still changing" until that time passes.
+- **iOS**: Vanillish keeps iOS's behaviour by construction (the Android arms are `cfg`-gated, iOS's
+  words are asserted by a test), but this port has not been built for iOS.
+
+## What needs a device
+
+Vanillish has been built and checked on Linux only; nothing above has run on a phone yet. The
+first device runs should check, on the Fold8 Ultra:
+
+1. `adb shell wm size; adb shell wm density` folded and unfolded: the dp sizes above, the classes
+   they give, the camera cut-out on each screen and each landscape rotation (the inner screen's
+   camera position is unknown), and the bottom inset with gesture and with 3-button navigation
+   (the latter may reserve about 48 dp even with the bar hidden).
+2. Folding and unfolding many times, with each *Continue apps on cover screen* option: no new
+   Activity, the right layout each time, the surface and the frame-rate vote back.
+3. Tabletop: the world drawn above the hinge only (the viewport on Adreno/Vulkan), and the stock
+   interface ending exactly at the hinge (`return UIParent:GetBottom()` in the remote console's Lua
+   prompt).
+4. The back swipe held off beside the stick on One UI 9, and how it meets Samsung's Edge panel.
+5. The panel's measured rate in each preset, with Motion smoothness Adaptive and Standard, and
+   with Game Booster's settings; Game Dashboard's modes (`adb shell cmd game mode …`), and whether
+   One UI offers them.
+6. Gboard and Samsung Keyboard: the composing word, passwords, Backspace in an empty box, Return;
+   Back on Android 16 against 12–15.
+7. Controllers: Xbox, DualSense, Switch Pro, a Backbone on the cover screen, an 8BitDo. The logcat
+   line `vanillish: controller <id>: <name> [vvvv:pppp] "<family>", axes …` names the axis layout
+   chosen; triggers rest at 0; the LT layer engages; nothing stays held after the shade or a
+   fold.
+8. Staying connected: start and stop, the permission prompt's timing, the notification.
+9. The data: the folder picker opening in Download, a copy resumed after the app was killed, the
+   share sheet, a real 1.12.1 `Data` folder passing the archive checks.
+10. DeX and a mouse: pointer positions in a DeX window (its title bar), mouse-look sensitivity
+    captured and not, a trackpad's scroll direction and speed.
+11. Heat: twenty minutes at High on the inner screen against Balanced, with the perf overlay on.
