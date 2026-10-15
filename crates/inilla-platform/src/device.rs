@@ -2,8 +2,8 @@
 //! exclusion, identity. Every call is a cheap no-op off iOS.
 //!
 //! Vanillish: each call also has an Android arm (`crate::android::device`), and Android adds the
-//! fold ([`fold`]), the display's frame rate ([`set_frame_rate`]), the orientation policy and
-//! [`relaunch`] — no-ops on iOS and the desktop.
+//! fold ([`fold`]), the display's frame rate ([`set_frame_rate`]), the orientation policy, the
+//! background session ([`set_session_service`]) and [`relaunch`] — no-ops on iOS and the desktop.
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -309,6 +309,17 @@ pub fn take_back_presses() -> u32 {
     {
         0
     }
+}
+
+/// Keep the app's process — and with it the game's connection to its server — alive while the app
+/// is in the background, where the OS would otherwise freeze or reclaim it: Android's foreground
+/// service, with the notification the OS requires (tapping it returns to the game). A no-op where
+/// there is no such thing (iOS suspends a backgrounded app regardless).
+pub fn set_session_service(on: bool) {
+    #[cfg(target_os = "android")]
+    crate::android::device::set_session_service(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
 }
 
 /// Which orientations the game may take.

@@ -8,7 +8,7 @@ use crate::thread_qos;
 
 /// `DefaultPlugins` with benilla's engine tuning applied, around the caller's primary window.
 pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
-    DefaultPlugins
+    let plugins = DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(primary_window),
             ..default()
@@ -68,5 +68,21 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         // No bevy AA: no Fxaa/TAA/SMAA/CAS component anywhere (MSAA is core render, unaffected).
         .disable::<bevy::anti_alias::AntiAliasPlugin>()
         // No gamepad input; 1.12's bindings are keyboard/mouse.
-        .disable::<bevy::gilrs::GilrsPlugin>()
+        .disable::<bevy::gilrs::GilrsPlugin>();
+    // Vanillish: Android renders inside the main update.
+    unpipelined_on_android(plugins)
+}
+
+/// Vanillish: no pipelined rendering on Android. Pipelined, the render thread presents a frame
+/// while the main thread already handles Android's next window event; should Android take the
+/// surface (the app leaving the screen, a fold moving it to the other panel) with that frame in
+/// flight, the swapchain answers `Lost`, which bevy_render treats as unrecoverable (a panic).
+/// Rendering inside the main update, the surface only ever changes between whole frames. The cost
+/// is the main/render overlap; `VANILLISH_PIPELINED=1` keeps it, to measure that.
+fn unpipelined_on_android(plugins: PluginGroupBuilder) -> PluginGroupBuilder {
+    #[cfg(target_os = "android")]
+    if std::env::var("VANILLISH_PIPELINED").as_deref() != Ok("1") {
+        return plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+    }
+    plugins
 }

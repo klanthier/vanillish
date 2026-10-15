@@ -446,4 +446,24 @@ public final class Bridge {
     // ---- [fold] gesture exclusion and the screen ----------------------------------------------
 
     // ---- [input] the soft keyboard and the host pointer ---------------------------------------
+
+    /**
+     * Stay connected: the session service ({@link GameSessionService}) on or off. The game turns
+     * it on in the world (with the setting on), while on the screen — Android allows a foreground
+     * service to start only then — and off when the player leaves the world, turns the setting
+     * off or quits. The first start asks for the notification permission (Android 13+), once.
+     */
+    public static void sessionService(boolean on) {
+        onUi(() -> {
+            Context c = app;
+            if (c == null) return;
+            if (on) {
+                VanillishActivity a = activity;
+                if (a != null) a.askToNotify();
+                GameSessionService.start(c);
+            } else {
+                GameSessionService.stop(c);
+            }
+        });
+    }
 }

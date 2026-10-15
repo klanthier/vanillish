@@ -59,10 +59,30 @@ pub fn prepare() {
         // benilla's own default (`wgpu=error,naga=warn`), plus silence for the one error iOS
         // produces by design: the virtual mouse moves the cursor every drag frame, and winit
         // answers every `set_cursor_position` on iOS with NotSupported.
-        std::env::set_var(
-            "RUST_LOG",
-            "info,wgpu=error,naga=warn,bevy_winit::system=off",
-        );
+        //
+        // Vanillish: Android adds two by-design noises. winit's Android backend warns on every
+        // soft-keyboard edit (GameActivity's text events, which the IME bridge reads itself), on
+        // each fullscreen request and on the lifecycle events it ignores; and the camera's
+        // mouse-look asks to lock a cursor Android does not have on every look drag.
+        let filter = if cfg!(target_os = "android") {
+            "info,wgpu=error,naga=warn,bevy_winit::system=off,\
+             winit::platform_impl::android=error,bevy_winit::winit_windows=off"
+        } else {
+            "info,wgpu=error,naga=warn,bevy_winit::system=off"
+        };
+        std::env::set_var("RUST_LOG", filter);
+    }
+    if cfg!(target_os = "android") {
+        // Vanillish: `std::env::temp_dir()` is `/data/local/tmp` on Android, which an app cannot
+        // write; benilla's unattended runs and anything else temporary go to the app's caches.
+        if let Some(tmp) = paths::caches() {
+            let _ = std::fs::create_dir_all(&tmp);
+            std::env::set_var("TMPDIR", &tmp);
+        }
+        // A panic's backtrace in logcat names the functions (the library keeps its symbols).
+        if std::env::var_os("RUST_BACKTRACE").is_none() {
+            std::env::set_var("RUST_BACKTRACE", "1");
+        }
     }
 
     println!("inilla: {}", device::describe());

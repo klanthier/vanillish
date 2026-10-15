@@ -225,6 +225,56 @@ public class VanillishActivity extends GameActivity {
         return super.dispatchGenericMotionEvent(event);
     }
 
+    /** GameActivity copies at most this many pointers of a MotionEvent. */
+    private static final int MAX_POINTERS = 8;
+
+    /**
+     * A ninth finger is dropped. winit looks up the pointer a POINTER_DOWN/UP is about by its
+     * index, and a ninth finger's index is past the eight GameActivity copies: the lookup panics,
+     * which ends the game (Bevy #16798). Its moves never reach the game either (beyond the copy).
+     */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if ((action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP)
+                && event.getActionIndex() >= MAX_POINTERS) {
+            return true;
+        }
+        // [pointer] a hardware mouse's buttons go here.
+        return super.dispatchTouchEvent(event);
+    }
+
+    /** The notification permission's request code (distinct from any other area's). */
+    private static final int ASK_NOTIFY = 0x5E55;
+
+    /**
+     * The session service's notification needs the permission on Android 13+; asked for once,
+     * the first time the service starts (the service runs either way).
+     */
+    void askToNotify() {
+        // (Fully qualified, here and below: the import block is every area's to grow.)
+        if (android.os.Build.VERSION.SDK_INT < 33) return;
+        String permission = android.Manifest.permission.POST_NOTIFICATIONS;
+        if (checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        android.content.SharedPreferences prefs =
+                getSharedPreferences("vanillish.session", MODE_PRIVATE);
+        if (prefs.getBoolean("asked_notifications", false)) return;
+        prefs.edit().putBoolean("asked_notifications", true).apply();
+        requestPermissions(new String[] {permission}, ASK_NOTIFY);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == ASK_NOTIFY && results.length > 0
+                && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            // The service's notification, posted before the answer, shows now.
+            GameSessionService.refresh(this);
+        }
+    }
+
     @Override
     protected void onDestroy() {
         if (pads != null) pads.close();

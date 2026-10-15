@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Haptics on the HUD and the radial menu. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Stay connected: the session service (GameSessionService) and its notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- wgpu's Vulkan backend: Vulkan 1.1 is the floor. -->
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
@@ -66,5 +70,19 @@
             android:theme="@style/Theme.Vanillish.Invisible"
             android:excludeFromRecents="true"
             android:noHistory="true" />
+
+        <!-- Stay connected: while the player is in the world, a foreground service keeps the
+             process (and the game's connection to its server) alive in the background, where
+             Android would freeze it and the server drop the character. specialUse: no other type
+             fits a game session. stopWithTask: swiping the game away ends it. -->
+        <service
+            android:name=".GameSessionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="true">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the game server connection alive while the player is briefly away from the game (another app, the lock screen), so the online session is not dropped. Runs only while the player is in the game world, and stops when they leave it or quit." />
+        </service>
     </application>
 </manifest>
