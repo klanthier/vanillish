@@ -18,7 +18,7 @@ use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -59,12 +59,31 @@ pub fn capture(log_file: Option<&Path>) -> Result<(), String> {
         // SAFETY: a fresh duplicate of the original stderr.
         Some(unsafe { File::from_raw_fd(passthrough) })
     } else {
-        None
+        // Somewhere for fds 1 and 2 to go back to should the reader end (below).
+        OpenOptions::new().write(true).open("/dev/null").ok()
     };
+    /// Points fds 1 and 2 back at the pass-through when the reader ends or unwinds, before its
+    /// read end closes: a write into a pipe nobody drains is EPIPE, which `eprint!` turns into a
+    /// panic in whichever thread logs next.
+    struct Restore(Option<libc::c_int>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(fd) = self.0 {
+                // SAFETY: `fd` is the pass-through, which outlives this guard (captured by the
+                // closure, dropped after its locals).
+                unsafe {
+                    libc::dup2(fd, 1);
+                    libc::dup2(fd, 2);
+                }
+            }
+        }
+    }
     std::thread::Builder::new()
         .name("inilla-stdio".into())
         .spawn(move || {
             let mut r = BufReader::new(reader);
+            // Declared after `r`, so dropped (and run) before `r` closes the pipe.
+            let _restore = Restore(pass.as_ref().map(AsRawFd::as_raw_fd));
             let mut raw = Vec::with_capacity(512);
             loop {
                 raw.clear();
@@ -139,7 +158,7 @@ pub fn is_tracing_line(line: &str) -> bool {
     if !stamp {
         return false;
     }
-    let head = &line[..line.len().min(48)];
+    let head = head(line, 48);
     [" TRACE ", " DEBUG ", " INFO ", " WARN ", " ERROR "]
         .iter()
         .any(|l| head.contains(l))
@@ -147,7 +166,7 @@ pub fn is_tracing_line(line: &str) -> bool {
 
 /// The logcat priority (`ANDROID_LOG_*`) a captured line deserves.
 pub fn logcat_priority(line: &str) -> i32 {
-    let head = &line[..line.len().min(64)];
+    let head = head(line, 64);
     if head.contains("ERROR") || line.contains("panicked") || head.starts_with("error") {
         6
     } else if head.contains("WARN") || head.starts_with("warning") {
@@ -155,6 +174,12 @@ pub fn logcat_priority(line: &str) -> i32 {
     } else {
         4
     }
+}
+
+/// `s` cut to at most `max` bytes, on a char boundary: a byte index inside a multibyte character
+/// panics, and this runs on the thread that drains stdout and stderr.
+fn head(s: &str, max: usize) -> &str {
+    &s[..s.floor_char_boundary(max)]
 }
 
 #[cfg(test)]
@@ -174,6 +199,26 @@ mod tests {
         assert_eq!(logcat_priority("thread 'main' panicked at x"), 6);
         assert_eq!(logcat_priority("warning: something"), 5);
         assert_eq!(logcat_priority("inilla: state /x"), 4);
+    }
+
+    #[test]
+    fn heads_cut_on_char_boundaries() {
+        assert_eq!(logcat_priority(&format!("{}— tail", "x".repeat(62))), 4); // '—' at 62..65
+        assert_eq!(
+            logcat_priority(
+                "inilla: no complete game data yet (missing: dbc.MPQ, wmo.MPQ) — setup will ask for it"
+            ),
+            4
+        );
+        assert_eq!(
+            logcat_priority(
+                "inilla: motorola motorola edge 50 ultra · Android 15 (API 35) · SM7550"
+            ),
+            4
+        );
+        assert!(is_tracing_line(
+            "2026-10-15T04:20:00.123456Z  INFO benilla: Привет мир"
+        )); // 'и' at 47..49
     }
 
     #[test]
