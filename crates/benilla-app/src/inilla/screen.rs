@@ -267,3 +267,59 @@ fn hold_off_edge_swipes(
         *last = Some(rects);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inilla_core::pad::PadProfile;
+    use inilla_core::settings::InillaSettings;
+
+    fn inilla(layout: inilla_core::touch::TouchLayout) -> Inilla {
+        Inilla {
+            settings: InillaSettings::default(),
+            launcher: Default::default(),
+            layout,
+            other_layouts: Default::default(),
+            pad: PadProfile::default(),
+        }
+    }
+
+    /// A fold swaps the layout in use for the new screen's, keeps the outgoing one for when its
+    /// screen comes back, and an unfold brings that one back as it was left.
+    #[test]
+    fn a_switch_puts_the_screens_layout_in_use_and_keeps_the_others() {
+        let mut phone = ScreenClass::Phone.defaults();
+        phone.hud_scale = 1.3; // the player's own
+        let mut tablet = ScreenClass::Tablet.defaults();
+        tablet.opacity = 0.4;
+        let mut k = inilla(phone.clone());
+        k.other_layouts.insert(ScreenClass::Tablet, tablet.clone());
+
+        swap_layout(&mut k, ScreenClass::Tablet, false);
+        assert_eq!(k.layout, tablet);
+        assert_eq!(k.other_layouts.get(&ScreenClass::Phone), Some(&phone));
+        assert!(!k.other_layouts.contains_key(&ScreenClass::Tablet));
+
+        k.layout.opacity = 0.9; // edited on the inner screen
+        swap_layout(&mut k, ScreenClass::Phone, false);
+        assert_eq!(k.layout, phone, "the cover's layout as it was left");
+        let kept = &k.other_layouts[&ScreenClass::Tablet];
+        assert_eq!(kept.opacity, 0.9, "the inner screen's edit is kept");
+    }
+
+    /// On a tabletop the world is drawn in the window's physical pixels above the hinge, from the
+    /// top left; a rect past the window is cut to it.
+    #[test]
+    fn the_world_viewport_is_the_window_above_the_hinge_in_pixels() {
+        let mut w = Window::default();
+        // A Galaxy Z Fold8 Ultra's inner screen: 2504 × 2256 px at density 2.625.
+        w.resolution = bevy::window::WindowResolution::new(2504, 2256);
+        w.resolution.set_scale_factor(2.625);
+        let hinge = w.height() / 2.0;
+        let r = world_viewport(&w, hinge);
+        assert_eq!(r.min, UVec2::ZERO);
+        assert_eq!(r.max, UVec2::new(2504, 1128));
+        assert_eq!(world_viewport(&w, 5000.0).max.y, 2256);
+        assert_eq!(world_viewport(&w, -3.0).max.y, 1, "never empty");
+    }
+}

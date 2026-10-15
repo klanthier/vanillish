@@ -337,7 +337,7 @@ fn keyboard_policy(
 
 /// The interface scale for the screen the game is on: iNilla's rule on a phone; Vanillish: on a
 /// foldable's inner screen and on a tabletop, `fold::ui_scale`'s (the 1024-unit main bar on the
-/// near-square screen; ~614 units of `UIParent` above the hinge, as a phone has).
+/// near-square screen; about 600 units of `UIParent` above the hinge, near a phone's 614).
 fn applied_ui_scale(settings: &InillaSettings, hud: &HudScreen) -> f32 {
     let [w, h] = hud.screen.size;
     let world_h = hud.screen.world.map_or(h, |r| r.size()[1]);
@@ -459,6 +459,7 @@ fn clear_the_island(
     script: Option<NonSend<benilla_ui::script::UiScript>>,
     safe: Res<SafeArea>,
     hud: Res<HudScreen>,
+    ui_scale: Option<Res<crate::ui_script::UiScaleCvar>>,
     client: Res<State<ClientState>>,
     time: Res<Time<Real>>,
     mut inset: ResMut<IslandInset>,
@@ -498,14 +499,17 @@ fn clear_the_island(
         .world
         .map_or(0.0, |w| (height - w.max[1]).max(0.0) / seam);
     // … in `UIParent`'s own units: the resolver multiplies an anchor's offsets by the frame's
-    // effective scale (`benilla-ui` `anchor_resolve_x`), which for `UIParent` is `uiScale`. iOS
+    // effective scale (`benilla-ui` `anchor_resolve_x`), which for `UIParent` is `uiScale` as the
+    // client applies it (`fold::ui_parent_scale`: capped below 4:3, floored at 0.64). That is the
+    // one `apply_cvar_settings` asks for on a touch device, else the player's own `uiScale`. iOS
     // keeps the root-unit inset it has shipped with until it is measured on a device.
-    let scale = applied_ui_scale(&state.settings, &hud);
-    let unit = if cfg!(target_os = "ios") {
-        1.0
+    let requested = if super::touch_device() {
+        applied_ui_scale(&state.settings, &hud)
     } else {
-        scale.max(0.1)
+        ui_scale.map_or(crate::ui_script::DEFAULT_UI_SCALE, |s| s.0)
     };
+    let scale = inilla_core::fold::ui_parent_scale(requested, hud.screen.size);
+    let unit = if cfg!(target_os = "ios") { 1.0 } else { scale };
     let [left, right, top, bottom] = [left, right, top, bottom].map(|v| v / unit);
     let key = if [left, right, top, bottom].iter().all(|v| *v < 0.05) {
         "0".to_string()

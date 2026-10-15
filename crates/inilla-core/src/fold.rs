@@ -169,11 +169,31 @@ impl ClassTracker {
 /// automatic scale keeps it on the screen.
 const MAIN_BAR_UNITS: f32 = 1024.0;
 
+/// The smallest `uiScale` the 1.12 client applies (`SetUiScale`'s floor, benilla-ui's
+/// `UI_SCALE_FLOOR`): its CVar callback raises a smaller one to it, and its display handler — a
+/// resize, a reload — drops a smaller one for the automatic scale (0.9 on the inner screen), so a
+/// scale under it would not be the one `UIParent` has.
+pub const UI_SCALE_FLOOR: f32 = 0.64;
+
+/// The scale `UIParent` ends up with when the `uiScale` CVar is set to `requested` on a window
+/// `window` points big — the 1.12 ladder benilla-ui applies (`ui_scale.rs`): the CVar as written
+/// (two decimals), the dial's `0.5..=1.5`, capped at `0.75·w/h` below a 4:3 aspect, then floored
+/// at [`UI_SCALE_FLOOR`]. An anchor offset given to `UIParent` is multiplied by it.
+pub fn ui_parent_scale(requested: f32, window: Vec2) -> f32 {
+    let [w, h] = window;
+    let mut s = ((requested * 100.0).round() / 100.0).clamp(0.5, 1.5);
+    if w > 0.0 && h > 0.0 && (w / h) * 3.0 < 4.0 {
+        s = s.min(w / h * 0.75);
+    }
+    s.max(UI_SCALE_FLOOR)
+}
+
 /// The interface size for `class` on a `window` points big: iNilla's phone rule on a phone; on
 /// the inner screen a stock action button at fingertip size (36 points) with a screen to spare; on
 /// a tabletop the phone's rule applied to the half above the hinge (`world_h` tall) — `UIParent`
-/// then spans that half with the same ~614 units a phone's screen has, so the quest and vendor
-/// windows fit above the crease.
+/// then spans that half with about the 600–614 units a phone's screen has, so the quest and vendor
+/// windows fit above the crease (no less than [`UI_SCALE_FLOOR`], the smallest scale the client
+/// applies).
 ///
 /// `UIParent` is `768·w/h ÷ scale` units wide, and on a near-square screen the height rule alone
 /// leaves it narrower than the main action bar (954 units on the inner screen, 859 in portrait):
@@ -202,7 +222,9 @@ pub fn ui_scale(settings: &InillaSettings, class: ScreenClass, window: Vec2, wor
             }
             let half = settings.effective_ui_scale(world_h) * world_h / h;
             let s = if auto { half.min(bar_fits) } else { half };
-            s.clamp(0.5, 1.5)
+            // On the Z Fold8 Ultra the phone's rule asks 0.625 here: the client would make it
+            // 0.64 at once, and the automatic 0.9 at the next resize.
+            s.clamp(UI_SCALE_FLOOR, 1.5)
         }
     }
 }
@@ -866,10 +888,12 @@ mod tests {
         let window_h = INNER[1];
         let world_h = INNER[1] / 2.0;
         let s = ui_scale(&st, ScreenClass::Tabletop, INNER, world_h);
+        // The scale asked for is the one the client applies (not under its floor).
+        assert_eq!(ui_parent_scale(s, INNER), s, "{s}");
         // UIParent's height in its own units: the half's share of the 768-unit root ÷ the scale.
         let units = 768.0 * (world_h / window_h) / s;
         assert!(
-            (600.0..=640.0).contains(&units),
+            (599.5..=640.0).contains(&units),
             "{units} units above the hinge at {s}"
         );
         // A phone keeps iNilla's rule; the inner screen gets bigger stock buttons than it would.
@@ -897,7 +921,53 @@ mod tests {
         };
         assert_eq!(ui_scale(&pinned, ScreenClass::Tablet, INNER, window_h), 1.2);
         let half = ui_scale(&pinned, ScreenClass::Tabletop, INNER, world_h);
-        assert!((half - 0.6).abs() < 0.01, "{half}");
+        assert_eq!(
+            half, UI_SCALE_FLOOR,
+            "1.2 on the half is 0.6: the client's floor"
+        );
+        let pinned = InillaSettings {
+            ui_scale: 1.4,
+            ..Default::default()
+        };
+        let half = ui_scale(&pinned, ScreenClass::Tabletop, INNER, world_h);
+        assert!((half - 0.7).abs() < 0.01, "{half}");
+    }
+
+    /// The scale `UIParent` gets for a `uiScale` (the 1.12 ladder benilla-ui applies), which the
+    /// interface's insets are divided by.
+    #[test]
+    fn uiparent_gets_the_scale_the_client_ladder_makes_of_the_cvar() {
+        // A phone, and anything 4:3 or wider: the CVar as written, two decimals.
+        assert_eq!(ui_parent_scale(1.25, COVER), 1.25);
+        assert_eq!(ui_parent_scale(0.8875, [852.0, 393.0]), 0.89);
+        assert_eq!(ui_parent_scale(0.9, [1024.0, 768.0]), 0.9);
+        // Never under the floor, never past the dial.
+        assert_eq!(ui_parent_scale(0.625, COVER), UI_SCALE_FLOOR);
+        assert_eq!(ui_parent_scale(2.0, COVER), 1.5);
+        // Narrower than 4:3: capped at 0.75·w/h — the inner screen's, its portrait's.
+        let cap = INNER[0] / INNER[1] * 0.75;
+        assert!((ui_parent_scale(1.2, INNER) - cap).abs() < 1e-6);
+        assert_eq!(ui_parent_scale(0.64, INNER), 0.64);
+        assert_eq!(
+            ui_parent_scale(1.0, [INNER[1], INNER[0]]),
+            INNER[1] / INNER[0] * 0.75
+        );
+        // A degenerate window keeps the request.
+        assert_eq!(ui_parent_scale(1.0, [0.0, 0.0]), 1.0);
+        // Every automatic scale is applied as asked (to the CVar's two decimals).
+        let st = InillaSettings::default();
+        for (class, size, world_h) in [
+            (ScreenClass::Phone, COVER, COVER[1]),
+            (ScreenClass::Tablet, INNER, INNER[1]),
+            (ScreenClass::Tablet, [INNER[1], INNER[0]], INNER[0]),
+            (ScreenClass::Tabletop, INNER, INNER[1] / 2.0),
+        ] {
+            let s = ui_scale(&st, class, size, world_h);
+            assert!(
+                (ui_parent_scale(s, size) - s).abs() <= 0.005 + 1e-6,
+                "{class:?} {size:?}: {s}"
+            );
+        }
     }
 
     #[test]
