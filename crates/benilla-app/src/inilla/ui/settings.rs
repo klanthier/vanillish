@@ -1,6 +1,13 @@
 //! **Settings**: iNilla's own switches, grouped for a thumb. Game settings (graphics details,
 //! sound volumes, key bindings, the interface options) stay in the stock options windows — the
 //! Game menu is one tap away on the radial.
+//!
+//! Vanillish: the platform's words come from [`words`]; Android adds the frame rates to the
+//! graphics presets, the inner screen's orientation and the background connection, hides the
+//! silent switch it has none of, and shares the session log.
+
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use bevy_egui::egui;
 
@@ -9,7 +16,7 @@ use inilla_core::pad::{Layer, PadBinding, PadButton, PadProfile, Special};
 use inilla_core::settings::Quality;
 use inilla_core::touch::default_layout;
 
-use super::{hint, row, Overlay, Panel, SettingsTab};
+use super::{hint, row, words, Overlay, Panel, SettingsTab};
 use crate::inilla::data::DataState;
 use crate::inilla::hud::GOLD;
 use crate::inilla::pad::PadHud;
@@ -54,14 +61,33 @@ pub(super) fn show(
     });
 }
 
+/// Vanillish: the panel's highest refresh rate, asked of the display at most every two seconds
+/// (a JNI call; the cover and inner panels may differ). `None` where the OS does not say.
+fn panel_max_hz() -> Option<f32> {
+    static CACHE: Mutex<Option<(Instant, Option<f32>)>> = Mutex::new(None);
+    if !words::ANDROID {
+        return None;
+    }
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match *cache {
+        Some((at, hz)) if at.elapsed() < Duration::from_secs(2) => hz,
+        _ => {
+            let hz = inilla_platform::device::refresh_rate().map(|(_, max)| max.round());
+            *cache = Some((Instant::now(), hz));
+            hz
+        }
+    }
+}
+
 fn general(ui: &mut egui::Ui, k: &mut Inilla) {
     let s = &mut k.settings;
+    let max_hz = panel_max_hz();
     row(ui, "Graphics", |ui| {
         for q in Quality::ALL {
-            ui.radio_value(&mut s.quality, q, q.label());
+            ui.radio_value(&mut s.quality, q, words::quality_label(q, max_hz));
         }
     });
-    hint(ui, "Battery saver caps at 30 fps with a short view; High runs at the display's full rate. Custom leaves the stock video options alone.");
+    hint(ui, &words::graphics_hint(max_hz));
     row(ui, "Render resolution", |ui| {
         ui.add(
             egui::Slider::new(&mut s.render_scale, 0.5..=1.0)
@@ -69,7 +95,7 @@ fn general(ui: &mut egui::Ui, k: &mut Inilla) {
                 .custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
         );
     });
-    hint(ui, "The 3D world renders at this fraction of the screen; the interface stays sharp. 80 % is a good phone default.");
+    hint(ui, words::RENDER_HINT);
     let mut auto = s.ui_scale == 0.0;
     row(ui, "Interface size", |ui| {
         if ui.checkbox(&mut auto, "Automatic").changed() {
@@ -79,10 +105,7 @@ fn general(ui: &mut egui::Ui, k: &mut Inilla) {
             ui.add(egui::Slider::new(&mut s.ui_scale, 0.64..=1.5).step_by(0.01));
         }
     });
-    hint(
-        ui,
-        "Automatic is 1.25 on a phone: action buttons near fingertip size, and quest and vendor windows still clear of the action bars.",
-    );
+    hint(ui, words::UI_SCALE_HINT);
     ui.checkbox(&mut s.keep_screen_on, "Keep the screen on while playing");
     ui.checkbox(
         &mut s.auto_keyboard,
@@ -93,11 +116,14 @@ fn general(ui: &mut egui::Ui, k: &mut Inilla) {
         &mut s.compact_stock_ui,
         "Compact stock interface (hide the action bar's gryphons)",
     );
-    ui.checkbox(
-        &mut s.island_margin,
-        "Keep windows clear of the Dynamic Island",
-    );
-    hint(ui, "Game windows stop where the Dynamic Island (or the notch) begins, on whichever side it is; the world still fills the screen, and the menu buttons sit beside the island.");
+    ui.checkbox(&mut s.island_margin, words::ISLAND_ROW);
+    hint(ui, words::ISLAND_HINT);
+    if words::ANDROID {
+        ui.checkbox(&mut s.inner_any_orientation, words::INNER_PORTRAIT_ROW);
+        hint(ui, words::INNER_PORTRAIT_HINT);
+        ui.checkbox(&mut s.stay_connected, words::STAY_CONNECTED_ROW);
+        hint(ui, words::STAY_CONNECTED_HINT);
+    }
 }
 
 fn touch(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
@@ -184,9 +210,7 @@ fn controller(ui: &mut egui::Ui, k: &mut Inilla, pad: &PadHud) {
         Some(n) => ui.label(
             egui::RichText::new(format!("Connected: {n}")).color(egui::Color32::LIGHT_GREEN),
         ),
-        None => ui.label(
-            "No controller connected. Pair one in iOS Settings → Bluetooth, or attach a Backbone.",
-        ),
+        None => ui.label(words::NO_CONTROLLER),
     };
     let p = &mut k.pad;
     row(ui, "Stick deadzone", |ui| {
@@ -297,10 +321,16 @@ fn audio(ui: &mut egui::Ui, k: &mut Inilla) {
         &mut s.mix_with_other_audio,
         "Let music and podcasts from other apps keep playing",
     );
-    ui.checkbox(
-        &mut s.ignore_silent_switch,
-        "Play sound even when the silent switch is on",
-    );
+    // Vanillish: Android's media stream ignores Mute and Vibrate: no switch, so no row (the setting
+    // stays in the file for iOS).
+    if words::ANDROID {
+        hint(ui, words::NO_SILENT_SWITCH);
+    } else {
+        ui.checkbox(
+            &mut s.ignore_silent_switch,
+            "Play sound even when the silent switch is on",
+        );
+    }
     hint(
         ui,
         "Volumes, music and ambience are in the stock Sound Options (Game menu → Sound & Voice).",
@@ -323,7 +353,7 @@ fn debug(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
                     .color(GOLD),
             );
         }
-        hint(ui, "Open that address in a browser on a computer on the same Wi-Fi: the live log, Lua, game commands, screenshots and the benilla-config files. Anyone with the address can drive the game — turn it off when you are done.");
+        hint(ui, &words::console_hint(port));
         ui.horizontal(|ui| {
             if ui.button("Copy address").clicked() {
                 if let Some(ip) = crate::inilla::console::local_addresses().first() {
@@ -339,10 +369,7 @@ fn debug(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
             }
         });
     }
-    ui.checkbox(
-        &mut d.log_to_file,
-        "Write a session log (Files → iNilla → benilla-config → Diagnostics)",
-    );
+    ui.checkbox(&mut d.log_to_file, words::SESSION_LOG_ROW);
     ui.checkbox(&mut d.perf_overlay, "Show frame rate, memory and heat");
     ui.checkbox(&mut d.show_touch_zones, "Show touch zones");
     ui.horizontal(|ui| {
@@ -355,15 +382,15 @@ fn debug(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
         if ui.button("Game data…").clicked() {
             overlay.panel = Some(Panel::Setup);
         }
+        // Vanillish: the one way to get a log off the phone without a computer.
+        if inilla_platform::picker::can_share() && ui.button(words::SHARE_LOG).clicked() {
+            super::logs::share_session_log(overlay);
+        }
     });
 }
 
 fn about(ui: &mut egui::Ui, k: &mut Inilla, data: &DataState, build: &BuildId) {
-    ui.label(
-        egui::RichText::new("iNilla — benilla for iPhone")
-            .strong()
-            .color(GOLD),
-    );
+    ui.label(egui::RichText::new(words::ABOUT_TITLE).strong().color(GOLD));
     ui.label(format!(
         "Build {} ({}, {})",
         build.short, build.date, build.profile
@@ -378,10 +405,10 @@ fn about(ui: &mut egui::Ui, k: &mut Inilla, data: &DataState, build: &BuildId) {
             .map(|d| format!(" in {}", d.display()))
             .unwrap_or_default()
     ));
-    hint(ui, "benilla is a from-scratch World of Warcraft 1.12.1 client in Rust (github.com/samwhosung/benilla); iNilla is its iOS port. Neither ships Blizzard content, nor is affiliated with Blizzard Entertainment.");
+    hint(ui, words::CREDIT);
     ui.add_space(12.0);
     if ui
-        .button(egui::RichText::new("Reset all iNilla settings").color(egui::Color32::LIGHT_RED))
+        .button(egui::RichText::new(words::RESET_ALL).color(egui::Color32::LIGHT_RED))
         .clicked()
     {
         k.settings = Default::default();

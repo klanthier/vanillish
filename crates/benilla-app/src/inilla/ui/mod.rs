@@ -1,18 +1,25 @@
 //! **iNilla's own screens**, in egui over the game: first-run setup, the launcher (servers and
 //! accounts), settings, the HUD layout editor and the log viewer. Styled dark and gold to sit
 //! beside the stock interface, and sized for a thumb (44-point rows, 17-point text).
+//!
+//! Vanillish: every sentence that names the platform comes from [`words`]; on Android the screens
+//! also take the system Back first ([`back_to_screens`]) and tell the soft keyboard what the
+//! focused field holds ([`ime`]).
 
 mod editor;
 mod launcher;
 mod logs;
 mod settings;
 mod setup;
+/// Vanillish: the platform's and the app's words (iNilla's on iOS, Vanillish's on Android).
+pub(crate) mod words;
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
 use super::data::DataState;
 use super::hud::GOLD;
+use super::platform::{BackPresses, ImePurpose};
 use super::session::LoginQueue;
 use super::Inilla;
 use crate::char_select::ClientState;
@@ -94,7 +101,16 @@ pub(crate) struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Overlay>()
-            .add_systems(Update, (tick_clock, first_screen, desktop_hotkey))
+            .add_systems(
+                Update,
+                (
+                    tick_clock,
+                    first_screen,
+                    desktop_hotkey,
+                    back_to_screens,
+                    plain_keyboard_when_closed,
+                ),
+            )
             .add_systems(OnEnter(ClientState::Login), back_at_login)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -230,11 +246,15 @@ fn draw_panels(
     safe: Res<super::platform::SafeArea>,
     pad: Res<super::pad::PadHud>,
     build: Res<benilla_world::build_id::BuildId>,
+    mut ime_purpose: ResMut<ImePurpose>,
 ) -> Result {
     let Some(panel) = overlay.panel else {
+        ime_purpose.set_if_neq(ImePurpose::Text);
         return Ok(());
     };
     let ctx = contexts.ctx_mut()?.clone();
+    // Vanillish: the fields drawn below say what they hold while focused (`ime`).
+    ctx.data_mut(|d| d.remove::<ImePurpose>(ime_id()));
     let insets = safe.0;
     let frame = egui::Frame::new()
         .fill(ctx.style().visuals.panel_fill)
@@ -265,7 +285,34 @@ fn draw_panels(
             });
         }
     }
+    let purpose = ctx
+        .data(|d| d.get_temp::<ImePurpose>(ime_id()))
+        .unwrap_or_default();
+    ime_purpose.set_if_neq(purpose);
     Ok(())
+}
+
+/// Vanillish: where a focused field leaves its [`ImePurpose`] for [`draw_panels`] (egui's
+/// per-frame scratch memory, so no form needs a new parameter).
+fn ime_id() -> egui::Id {
+    egui::Id::new("vanillish-ime-purpose")
+}
+
+/// Vanillish: with no screen up there is no field of iNilla's to type into (the lane may sleep
+/// before `draw_panels` runs once more to say so).
+fn plain_keyboard_when_closed(overlay: Res<Overlay>, mut ime_purpose: ResMut<ImePurpose>) {
+    if overlay.panel.is_none() {
+        ime_purpose.set_if_neq(ImePurpose::Text);
+    }
+}
+
+/// Vanillish: while `field` has the focus, the soft keyboard opens for `purpose` — a password is
+/// never suggested or learned, an address gets the URL layout. Call it on the `TextEdit`'s
+/// response.
+pub(super) fn ime(field: &egui::Response, purpose: ImePurpose) {
+    if field.has_focus() {
+        field.ctx.data_mut(|d| d.insert_temp(ime_id(), purpose));
+    }
 }
 
 /// The strip across the top of every screen: the title and the ways out.
@@ -277,7 +324,7 @@ fn header(
     data_ready: bool,
 ) {
     ui.horizontal(|ui| {
-        ui.heading(egui::RichText::new("iNilla").color(GOLD).strong());
+        ui.heading(egui::RichText::new(words::APP).color(GOLD).strong());
         let title = match panel {
             Panel::Setup => "Game data",
             Panel::Launcher => "Servers & accounts",
@@ -329,29 +376,120 @@ pub(super) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).small().color(egui::Color32::GRAY));
 }
 
-/// How to start iNilla again after [`restart`].
+/// How to start iNilla again after [`restart`] (Vanillish: the `Host::Android` arm says it comes
+/// back by itself).
 pub(super) fn relaunch_hint() -> &'static str {
-    match inilla_platform::paths::host() {
-        inilla_platform::paths::Host::LiveContainer => {
-            "Then open LiveContainer and run iNilla again (or its home-screen shortcut)."
-        }
-        _ => "Then tap the iNilla icon on the home screen.",
-    }
+    words::relaunch_hint()
 }
 
 /// Leave the app so the next launch opens the archives (iOS has no relaunch API; the player taps
 /// the icon again). Settings are written first.
+///
+/// Vanillish: Android can start the app again — in a fresh process, since a Bevy app is built
+/// once per process — so `device::relaunch()` comes first; the Java side ends this process. The
+/// exit stays as the fallback (no Activity to relaunch from).
 pub(super) fn restart(inilla: &Inilla) {
     super::store::save_settings(&inilla.settings);
     super::store::save_launcher(&inilla.launcher);
     super::store::save_layout(&inilla.layout);
     super::store::save_pad(&inilla.pad);
     info!("inilla: exiting for a relaunch");
+    if inilla_platform::device::relaunch() {
+        info!("inilla: relaunching");
+    }
     std::process::exit(0);
+}
+
+/// Vanillish: what one system Back press does on iNilla's screens, most local first — iOS has no
+/// Back, and on Android it must reach these screens before the game, since a panel does not
+/// block the keyboard and an Escape would close the game's window underneath. `false` when no
+/// screen is open: that press is the game's Escape.
+fn take_back(overlay: &mut Overlay, data_ready: bool) -> bool {
+    let Some(panel) = overlay.panel else {
+        return false;
+    };
+    let forms = overlay.server_form.is_some() || overlay.account_form.is_some();
+    match panel {
+        // The inline password prompt, then the server or account form: Cancel.
+        Panel::Launcher if !forms && overlay.password_prompt.is_some() => {
+            overlay.password_prompt = None;
+        }
+        Panel::Launcher if forms => {
+            overlay.server_form = None;
+            overlay.account_form = None;
+        }
+        // The editor's Done.
+        Panel::Editor => {
+            overlay.panel = None;
+            overlay.editor = EditorState::default();
+        }
+        Panel::Logs => overlay.panel = Some(Panel::Settings),
+        // Without the game data there is nothing behind the setup screen.
+        Panel::Setup if !data_ready => {}
+        _ if !data_ready => overlay.panel = Some(Panel::Setup),
+        _ => overlay.panel = None,
+    }
+    true
+}
+
+/// Vanillish: the system Back presses this frame go to iNilla's screens first — an open popup (a
+/// combo box) closes, then [`take_back`]; what no screen takes stays in [`BackPresses`] for the
+/// game's Escape.
+fn back_to_screens(
+    mut back: ResMut<BackPresses>,
+    mut overlay: ResMut<Overlay>,
+    data: Res<DataState>,
+    mut contexts: EguiContexts,
+) {
+    if back.0 == 0 {
+        return;
+    }
+    let ctx = contexts.ctx_mut().ok().cloned();
+    while back.0 > 0 {
+        // Only a screen's popup: with no screen up, a popup egui still remembers is a stale one.
+        let popup = ctx
+            .as_ref()
+            .filter(|c| overlay.panel.is_some() && egui::Popup::is_any_open(c));
+        if let Some(c) = popup {
+            egui::Popup::close_all(c);
+        } else if !take_back(&mut overlay, data.ready_at_boot) {
+            break;
+        }
+        back.0 -= 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{take_back, Overlay, Panel};
+
+    /// Vanillish: Back undoes the most local thing first, and only a bare game gets the Escape.
+    #[test]
+    fn back_closes_the_innermost_screen_first() {
+        let mut o = Overlay {
+            panel: Some(Panel::Launcher),
+            password_prompt: Some(("a".into(), String::new())),
+            ..Default::default()
+        };
+        assert!(take_back(&mut o, true));
+        assert!(o.password_prompt.is_none());
+        assert_eq!(o.panel, Some(Panel::Launcher));
+        assert!(take_back(&mut o, true));
+        assert_eq!(o.panel, None);
+        assert!(!take_back(&mut o, true), "no screen: the game's Escape");
+
+        o.panel = Some(Panel::Logs);
+        assert!(take_back(&mut o, true));
+        assert_eq!(o.panel, Some(Panel::Settings));
+
+        // Without the game data the setup screen stays, and the others lead back to it.
+        o.panel = Some(Panel::Settings);
+        assert!(take_back(&mut o, false));
+        assert_eq!(o.panel, Some(Panel::Setup));
+        assert!(take_back(&mut o, false));
+        assert_eq!(o.panel, Some(Panel::Setup));
+    }
+
     /// Every symbol iNilla's HUD and screens print is in the font egui draws it with: a glyph the
     /// font lacks draws as a box on the phone. Non-ASCII outside comments counts as printed.
     #[test]
@@ -368,6 +506,11 @@ mod tests {
             include_str!("logs.rs"),
             include_str!("settings.rs"),
             include_str!("setup.rs"),
+            include_str!("words.rs"),
+            include_str!("../console.rs"),
+            include_str!("../../../../inilla-core/src/import.rs"),
+            include_str!("../../../../inilla-platform/src/picker.rs"),
+            include_str!("../../../../inilla-platform/src/paths.rs"),
             include_str!("../../../../inilla-core/src/pad.rs"),
             include_str!("../../../../inilla-core/src/touch.rs"),
             include_str!("../../../../inilla-core/src/addons.rs"),

@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use inilla_core::data;
+use inilla_core::{data, import};
 use inilla_platform::{device, paths, stdio};
 
 /// How many session logs to keep in `Diagnostics/`.
@@ -91,6 +91,12 @@ pub fn prepare() {
 }
 
 /// Move a complete `Data` folder found in Documents into the data directory.
+///
+/// Vanillish: this runs before the app exists — on Android, on `android_main`, whose answers
+/// GameActivity's lifecycle calls wait for: a 5 GB copy here is a black screen and then "app not
+/// responding". So off iOS the move must be a rename, and of a folder no PC is still copying into
+/// ([`boot_guard`]); anything else is left to the setup screen's threaded job, which shows its
+/// progress.
 fn import_from_documents(docs: &Path, data_dir: &Path) {
     let current = data::status(data_dir);
     if current.complete() {
@@ -102,6 +108,15 @@ fn import_from_documents(docs: &Path, data_dir: &Path) {
     else {
         return;
     };
+    if !cfg!(target_os = "ios") {
+        if let Err(why) = boot_guard(&found, data_dir) {
+            println!(
+                "inilla: not importing {} at launch: {why}; the setup screen will",
+                found.dir.display()
+            );
+            return;
+        }
+    }
     println!(
         "inilla: importing {} archives from {}",
         found.status.present.len(),
@@ -115,6 +130,26 @@ fn import_from_documents(docs: &Path, data_dir: &Path) {
         }
         Err(e) => eprintln!("inilla: import failed: {e}"),
     }
+}
+
+/// Vanillish: why the launch must leave `found` to the setup screen, if it must:
+///
+/// 1. moving it would not be a rename (another mount: the move would fall back to a copy);
+/// 2. it changed within [`super::data::SETTLE`] (a copy from a PC still running into it — the
+///    move would take a half-written archive and pull the folder from under the next file);
+/// 3. an archive's MPQ header places its tables past its end (cut short).
+fn boot_guard(found: &data::ImportCandidate, data_dir: &Path) -> Result<(), String> {
+    if !import::rename_works(&found.dir, data_dir) {
+        return Err("moving it would be a copy, not a rename".into());
+    }
+    if !import::settled(&found.status, super::data::SETTLE) {
+        return Err("it is still changing (a copy still running?)".into());
+    }
+    let cut = import::cut_short(&found.status);
+    if !cut.is_empty() {
+        return Err(format!("{} look cut short", cut.join(", ")));
+    }
+    Ok(())
 }
 
 fn prune_logs(dir: &Path) {

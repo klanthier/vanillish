@@ -71,6 +71,7 @@ public class VanillishActivity extends GameActivity {
         pads = new GamepadBridge(this);
         foldTracker = new FoldTracker(this);
         // [data] the folder picker registers here (FolderImport).
+        FolderImport.register(this);
         // [fold] gesture-exclusion set-up goes here.
 
         // Back (the key, the gesture, predictive back on Android 16) is Escape in the game: it

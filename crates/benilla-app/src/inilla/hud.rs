@@ -290,8 +290,12 @@ fn draw(
                     }
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new("iNilla").size(16.0).color(GOLD))
-                                .min_size(egui::vec2(44.0, 40.0)),
+                            egui::Button::new(
+                                egui::RichText::new(super::ui::words::APP)
+                                    .size(16.0)
+                                    .color(GOLD),
+                            )
+                            .min_size(egui::vec2(44.0, 40.0)),
                         )
                         .clicked()
                     {

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vanillish: what the FileProvider may hand to another app (Share session log): the session
+     logs and crash reports in benilla-config/Diagnostics, nothing else. The second entry is the
+     fallback layout when shared storage is not mounted (inilla-platform's paths: Documents in
+     private storage). -->
+<paths>
+    <external-files-path name="diagnostics" path="benilla-config/Diagnostics/" />
+    <files-path name="diagnostics-private" path="Documents/benilla-config/Diagnostics/" />
+</paths>
