@@ -98,6 +98,9 @@ pub struct FfxBackdrop {
     /// The world camera drawing this frame (main-world entity). While `None` the camera's own
     /// clear is the ground; the component stays so its pipelines compile before any world exists.
     pub source: Option<Entity>,
+    /// Vanillish: where in the target the world goes, in physical px, when not over all of it (a
+    /// foldable on a table: above the hinge); the UI phase after it still covers the whole target.
+    pub rect: Option<URect>,
 }
 
 /// The glow weight `w`: the live `LightParams.glow`, synced every frame by [`sync_gain`].
@@ -1051,15 +1054,24 @@ impl ViewNode for FfxTransparent2dNode {
         &'static ViewTarget,
         &'static ViewDepthTexture,
         Option<&'static FfxBackdropView>,
+        Option<&'static FfxBackdrop>,
     );
 
     fn run<'w>(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (camera, view, target, depth, backdrop): QueryItem<'w, '_, Self::ViewQuery>,
+        (camera, view, target, depth, backdrop, claim): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
+        // Vanillish: the world's rect and the whole target, when the world goes into a part of it;
+        // the rect kept inside (a resize lands on both sides of a frame, and a viewport past the
+        // attachment is a wgpu validation error).
+        let split = claim
+            .and_then(|c| c.rect)
+            .zip(camera.physical_target_size)
+            .map(|(r, size)| (URect::from_corners(r.min.min(size), r.max.min(size)), size))
+            .filter(|(r, _)| r.width() > 0 && r.height() > 0);
         let Some(transparent_phases) =
             world.get_resource::<ViewSortedRenderPhases<Transparent2d>>()
         else {
@@ -1131,11 +1143,24 @@ impl ViewNode for FfxTransparent2dNode {
                     render_pass.set_camera_viewport(viewport);
                 }
                 if let Some((combine, bind)) = ground.as_ref() {
+                    // Vanillish: the world into its rect alone…
+                    if let Some((r, _)) = split {
+                        let [x, y] = r.min.as_vec2().to_array();
+                        let [w, h] = r.size().as_vec2().to_array();
+                        render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
+                    }
                     // No span of its own: a `pass_span` is also a pipeline-statistics query, wgpu
                     // allows one active at a time, and Vulkan validation fails a nested one.
                     render_pass.set_render_pipeline(combine);
                     render_pass.set_bind_group(0, bind, &[]);
                     render_pass.draw(0..3, 0..1);
+                    // Vanillish: …and the interface over the whole target again.
+                    if let Some((_, size)) = split {
+                        render_pass.set_viewport(0.0, 0.0, size.x as f32, size.y as f32, 0.0, 1.0);
+                        if let Some(viewport) = camera.viewport.as_ref() {
+                            render_pass.set_camera_viewport(viewport);
+                        }
+                    }
                 }
                 if !transparent_phase.items.is_empty() {
                     if let Err(err) = transparent_phase.render(&mut render_pass, world, view_entity)

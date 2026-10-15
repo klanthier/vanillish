@@ -112,8 +112,13 @@ pub(crate) fn open_url(url: &str) -> bool {
     super::with_env(|env| {
         let class = super::bridge(env)?;
         let s = env.new_string(url)?;
-        env.call_static_method(&class, "openUrl", "(Ljava/lang/String;)Z", &[JValue::Object(&s)])?
-            .z()
+        env.call_static_method(
+            &class,
+            "openUrl",
+            "(Ljava/lang/String;)Z",
+            &[JValue::Object(&s)],
+        )?
+        .z()
     })
     .unwrap_or(false)
 }
@@ -157,6 +162,25 @@ pub(crate) fn set_session_service(on: bool) {
 /// Which orientations the game may take: `0` landscape (either way up, by the sensor), `1` any.
 pub(crate) fn set_orientation_mode(mode: i32) {
     super::call_bridge_void("setOrientationMode", "(I)V", &[JValue::Int(mode)]);
+}
+
+/// The edge-swipe exclusion rects, dp `[left, top, right, bottom]` each, flattened into the
+/// `float[]` `Bridge.setGestureExclusion` takes (it converts to px on the UI thread, with the
+/// density of the panel the game is on then).
+pub(crate) fn set_gesture_exclusion(rects: &[[f32; 4]]) {
+    let flat: Vec<f32> = rects.iter().flatten().copied().collect();
+    super::with_env(|env| {
+        let class = super::bridge(env)?;
+        let arr = env.new_float_array(flat.len() as i32)?;
+        env.set_float_array_region(&arr, 0, &flat)?;
+        env.call_static_method(
+            &class,
+            "setGestureExclusion",
+            "([F)V",
+            &[JValue::Object(&arr)],
+        )?;
+        Ok(())
+    });
 }
 
 fn property(name: &CStr) -> String {

@@ -134,15 +134,32 @@ fn window_physical_size(window: &Window) -> UVec2 {
     )
 }
 
+/// Vanillish: the part of the window the world is drawn in, physical px, when not all of it — a
+/// foldable half folded on a table draws the world above the hinge and its touch controls below.
+/// The size-carrier takes the rect's size (the projection its aspect, from the target), and it
+/// starts at the window's top left, so a window cursor is a world-viewport cursor as it is:
+/// picking and the world-anchored overlays need no offset. Set by iNilla's screen tracking.
+#[derive(Resource, Clone, Copy, Default, PartialEq, Debug)]
+pub(crate) struct WorldViewport(pub(crate) Option<URect>);
+
+/// Vanillish: the world's size in physical px — the window's, or [`WorldViewport`]'s rect.
+fn world_physical_size(window: &Window, viewport: Option<&WorldViewport>) -> UVec2 {
+    match viewport.and_then(|v| v.0) {
+        Some(rect) => rect.size().max(UVec2::ONE),
+        None => window_physical_size(window),
+    }
+}
+
 fn setup_backdrop(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     scale: Res<RenderScale>,
+    viewport: Option<Res<WorldViewport>>,
 ) {
     let (size, _) = windows.single().map_or((UVec2::new(1280, 720), 1.0), |w| {
         render_target_for(
-            window_physical_size(w),
+            world_physical_size(w, viewport.as_deref()),
             w.resolution.scale_factor(),
             scale.0,
         )
@@ -166,12 +183,13 @@ fn track_render_size(
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     scale: Res<RenderScale>,
+    viewport: Option<Res<WorldViewport>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
     let (size, _) = render_target_for(
-        window_physical_size(window),
+        world_physical_size(window, viewport.as_deref()),
         window.resolution.scale_factor(),
         scale.0,
     );
@@ -206,9 +224,13 @@ fn retarget_world_camera(
     windows: Query<&Window, With<PrimaryWindow>>,
     added: Query<(), Added<WorldCamera>>,
     mut cameras: Query<(Entity, &mut RenderTarget), With<WorldCamera>>,
+    viewport: Option<Res<WorldViewport>>,
 ) {
     let (px, window_factor) = windows.single().map_or((UVec2::ONE, 1.0), |w| {
-        (window_physical_size(w), w.resolution.scale_factor())
+        (
+            world_physical_size(w, viewport.as_deref()),
+            w.resolution.scale_factor(),
+        )
     });
     // The built size, not the requested one: `track_render_size` may have clamped.
     let scale_factor = window_factor * backdrop.size.x as f32 / px.x.max(1) as f32;
@@ -234,14 +256,20 @@ fn retarget_world_camera(
 fn claim_backdrop(
     cameras: Query<(Entity, &Camera), With<WorldCamera>>,
     mut ui: Query<&mut FfxBackdrop, With<PlayerUiCamera>>,
+    viewport: Option<Res<WorldViewport>>,
 ) {
     let source = cameras
         .iter()
         .find_map(|(entity, camera)| camera.is_active.then_some(entity));
+    // Vanillish: the world is composited into its own rect, when it has one.
+    let rect = viewport.and_then(|v| v.0);
     for mut backdrop in &mut ui {
         // Compare first: a write would trip change detection for nothing.
         if backdrop.source != source {
             backdrop.source = source;
+        }
+        if backdrop.rect != rect {
+            backdrop.rect = rect;
         }
     }
 }
@@ -263,6 +291,7 @@ impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
         app.init_resource::<RenderScale>()
+            .init_resource::<WorldViewport>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,
@@ -547,6 +576,60 @@ mod tests {
             app.world().resource::<Assets<Image>>().contains(after.0),
             "the camera must point at an image that still exists"
         );
+    }
+
+    /// Vanillish: a world drawn above a hinge renders that rect only, at the window's own factor,
+    /// and the UI camera composites it there.
+    #[test]
+    fn a_world_viewport_sizes_the_world_and_the_composite_follows_it() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>();
+        let mut w = Window::default();
+        w.resolution.set_scale_factor(2.0);
+        let px = window_physical_size(&w);
+        app.world_mut().spawn((w, PrimaryWindow));
+        let top = URect::new(0, 0, px.x, px.y / 2);
+        app.insert_resource(RenderScale(1.0))
+            .insert_resource(WorldViewport(Some(top)))
+            .add_systems(Startup, setup_backdrop)
+            .add_systems(
+                Update,
+                (track_render_size, retarget_world_camera, claim_backdrop).chain(),
+            );
+        let cam = app
+            .world_mut()
+            .spawn((WorldCamera, RenderTarget::default()))
+            .id();
+        let ui = app
+            .world_mut()
+            .spawn((PlayerUiCamera, FfxBackdrop::default()))
+            .id();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<WorldBackdrop>().size,
+            top.size(),
+            "the world renders the rect above the hinge, not the window"
+        );
+        match app.world().entity(cam).get::<RenderTarget>() {
+            Some(RenderTarget::Image(t)) => assert!(
+                (t.scale_factor - 2.0).abs() < 1e-6,
+                "the same width keeps the window's factor: {}",
+                t.scale_factor
+            ),
+            _ => panic!("the world camera must target the backdrop image"),
+        }
+        assert_eq!(
+            app.world().get::<FfxBackdrop>(ui).unwrap().rect,
+            Some(top),
+            "the UI camera composites the world into the same rect"
+        );
+
+        app.insert_resource(WorldViewport(None));
+        app.update();
+        assert_eq!(app.world().resource::<WorldBackdrop>().size, px);
+        assert_eq!(app.world().get::<FfxBackdrop>(ui).unwrap().rect, None);
     }
 
     /// A half-scale world on a 2× display: a half-size image, a factor of 1.0, `MipBias(-1)`.

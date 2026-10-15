@@ -244,6 +244,7 @@ fn draw_panels(
     mut queue: ResMut<LoginQueue>,
     client: Res<State<ClientState>>,
     safe: Res<super::platform::SafeArea>,
+    hud: Res<super::screen::HudScreen>,
     pad: Res<super::pad::PadHud>,
     build: Res<benilla_world::build_id::BuildId>,
     mut ime_purpose: ResMut<ImePurpose>,
@@ -266,7 +267,7 @@ fn draw_panels(
         });
     let in_world = *client.get() == ClientState::InWorld;
     match panel {
-        Panel::Editor => editor::show(&ctx, &mut overlay, &mut inilla, &safe),
+        Panel::Editor => editor::show(&ctx, &mut overlay, &mut inilla, &hud.screen),
         _ => {
             egui::CentralPanel::default().frame(frame).show(&ctx, |ui| {
                 header(ui, &mut overlay, panel, in_world, data.ready_at_boot);
@@ -513,6 +514,7 @@ mod tests {
             include_str!("../../../../inilla-platform/src/paths.rs"),
             include_str!("../../../../inilla-core/src/pad.rs"),
             include_str!("../../../../inilla-core/src/touch.rs"),
+            include_str!("../../../../inilla-core/src/fold.rs"),
             include_str!("../../../../inilla-core/src/addons.rs"),
             include_str!("../../../../inilla-core/src/data.rs"),
             include_str!("../../../../inilla-core/src/profiles.rs"),

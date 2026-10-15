@@ -8,7 +8,6 @@
 //! widgets here (the glue screens' keyboard and menu buttons) are ordinary foreground areas.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
 use std::collections::HashMap;
@@ -20,6 +19,7 @@ use super::hints::ChatLine;
 use super::icons::{HudTooltip, Icons};
 use super::pad::PadHud;
 use super::platform::{KeyboardRequest, SafeArea, SyntheticKeys};
+use super::screen::HudScreen;
 use super::touch::{hud_visible, TouchState};
 use super::ui::Overlay;
 use super::{EguiWanted, Inilla};
@@ -72,18 +72,19 @@ fn draw(
     mut keyboard: ResMut<KeyboardRequest>,
     safe: Res<SafeArea>,
     client: Res<State<ClientState>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    hud: Res<HudScreen>,
     time: Res<Time<Real>>,
     chat: Res<ChatLine>,
     mut keys: ResMut<SyntheticKeys>,
     tooltip: Res<HudTooltip>,
     mut fps: Local<f32>,
 ) -> Result {
-    let Ok(window) = windows.single() else {
+    // Vanillish: the screen class's (on a tabletop, the deck below the hinge); empty: no window.
+    let screen = hud.screen;
+    if screen.size[0] <= 0.0 || screen.size[1] <= 0.0 {
         return Ok(());
-    };
+    }
     let now = time.elapsed_secs_f64();
-    let screen = safe.screen(window.width(), window.height());
     // Textures first: `icons.texture` needs the contexts mutably, the painter borrows one.
     let mut slot_textures: Vec<(u32, egui::TextureId)> = Vec::new();
     for (slot, info) in icons.slots.clone() {
@@ -113,6 +114,9 @@ fn draw(
     if hud_visible(&inilla, client.get(), &overlay, pad_active) {
         let layout = &inilla.layout;
         let base = layout.opacity;
+        if let (Some(deck), Some(world)) = (screen.deck, screen.world) {
+            draw_deck(&painter, deck, world, &screen);
+        }
         for (i, el) in layout.shown() {
             let r = el.rect(&screen, layout.hud_scale);
             let rect = egui::Rect::from_min_max(
@@ -677,6 +681,33 @@ fn draw_hub(
         p.rect_filled(bg, 8.0, alpha(INK, 0.9));
         p.galley(bg.center() - galley.size() / 2.0, galley, GOLD);
     }
+}
+
+/// Vanillish: on a tabletop, the crease and the deck under it, faintly. Nothing is drawn below the
+/// hinge but the HUD (the world and the stock interface end at it), so the deck needs an edge
+/// for the eye, and the crease a line where the fingers should not rest.
+fn draw_deck(
+    p: &egui::Painter,
+    deck: inilla_core::touch::Rect,
+    world: inilla_core::touch::Rect,
+    screen: &Screen,
+) {
+    // The middle of the hinge: the world ends at its top, the deck starts its gap below its foot.
+    let y = (world.max[1] + deck.min[1] - inilla_core::fold::DECK_GAP) / 2.0;
+    p.line_segment(
+        [egui::pos2(0.0, y), egui::pos2(screen.size[0], y)],
+        egui::Stroke::new(1.0_f32, alpha(GOLD, 0.3)),
+    );
+    p.rect_stroke(
+        egui::Rect::from_min_max(
+            egui::pos2(deck.min[0], deck.min[1]),
+            egui::pos2(deck.max[0], deck.max[1]),
+        )
+        .shrink(2.0),
+        12.0,
+        egui::Stroke::new(1.0_f32, alpha(egui::Color32::WHITE, 0.12)),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// A held HUD button's words, in a bubble above it (below it when there is no room above).

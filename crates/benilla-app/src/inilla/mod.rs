@@ -39,12 +39,15 @@ mod synth;
 mod touch;
 mod ui;
 
+use std::collections::BTreeMap;
+
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::CameraOutputMode;
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
 use bevy_egui::{EguiContextSettings, EguiGlobalSettings, EguiPlugin, PrimaryEguiContext};
 
+use inilla_core::fold::ScreenClass;
 use inilla_core::pad::PadProfile;
 use inilla_core::profiles::Launcher;
 use inilla_core::settings::InillaSettings;
@@ -59,7 +62,11 @@ pub(crate) use session::world_address;
 pub(crate) struct Inilla {
     pub(crate) settings: InillaSettings,
     pub(crate) launcher: Launcher,
+    /// The touch layout in use: the one of the screen the game is on ([`screen::HudScreen`]).
     pub(crate) layout: TouchLayout,
+    /// Vanillish: the layouts of a foldable's other screens, as they were left — each was saved to
+    /// its own file when its screen went away, and is read from it the first time it comes back.
+    pub(crate) other_layouts: BTreeMap<ScreenClass, TouchLayout>,
     pub(crate) pad: PadProfile,
 }
 
@@ -84,6 +91,7 @@ impl Plugin for InillaPlugin {
             settings: store::load_settings(),
             launcher: store::load_launcher(),
             layout: store::load_layout(),
+            other_layouts: BTreeMap::new(),
             pad: store::load_pad(),
         };
         if let Some(dir) = store::dir() {

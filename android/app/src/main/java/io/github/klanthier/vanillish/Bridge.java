@@ -480,6 +480,37 @@ public final class Bridge {
 
     // ---- [fold] gesture exclusion and the screen ----------------------------------------------
 
+    /** {left, top, right, bottom} per rect, dp in window coordinates; empty: none. */
+    private static volatile float[] gestureExclusion = new float[0];
+
+    /**
+     * Where a swipe in from a side edge stays the game's instead of being Android's back gesture:
+     * beside the touch controls a thumb rests on (the stick at the left edge). Rects in dp, window
+     * coordinates, four floats each; empty clears them (the HUD hid). Applied to the decor view in
+     * px on the UI thread, and again whenever the decor view changes size ({@link
+     * VanillishActivity}: a fold moves the game to a panel with another density). Android honours
+     * 200 dp of height per side edge, and never holds off the bottom edge's home gesture.
+     */
+    public static void setGestureExclusion(float[] rects) {
+        gestureExclusion = rects != null ? rects : new float[0];
+        onUi(Bridge::applyGestureExclusion);
+    }
+
+    static void applyGestureExclusion() {
+        Activity a = activity;
+        if (a == null || a.getWindow() == null) return;
+        android.view.View decor = a.getWindow().getDecorView();
+        float density = a.getResources().getDisplayMetrics().density;
+        float[] v = gestureExclusion;
+        java.util.List<android.graphics.Rect> rects = new java.util.ArrayList<>(v.length / 4);
+        for (int i = 0; i + 3 < v.length; i += 4) {
+            rects.add(new android.graphics.Rect(
+                    Math.round(v[i] * density), Math.round(v[i + 1] * density),
+                    Math.round(v[i + 2] * density), Math.round(v[i + 3] * density)));
+        }
+        decor.setSystemGestureExclusionRects(rects);
+    }
+
     // ---- [input] the soft keyboard and the host pointer ---------------------------------------
 
     /**

@@ -12,10 +12,12 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, ScreenEdge};
 
+use inilla_core::settings::{InillaSettings, Quality};
 use inilla_core::touch::Screen;
 use inilla_platform::device::Side;
 use inilla_platform::{audio, device};
 
+use super::screen::HudScreen;
 use super::Inilla;
 use crate::char_select::ClientState;
 use crate::cvars::Cvars;
@@ -247,17 +249,43 @@ fn is_newline_key(k: &Key) -> bool {
     matches!(k, Key::Character(c) if c.as_str() == "\n" || c.as_str() == "\r")
 }
 
+/// The safe area, once a second. Vanillish: on Android also at once when the screen changes (a
+/// fold moves the game to the other panel, with its own cut-out), and then every quarter second
+/// for a second — the new insets can reach the Java side a moment after the new size.
 fn track_safe_area(
     windows: Query<&bevy::window::RawHandleWrapper, With<PrimaryWindow>>,
+    hud: Res<HudScreen>,
     mut area: ResMut<SafeArea>,
     time: Res<Time<Real>>,
     mut next: Local<f64>,
+    mut quick: Local<u8>,
 ) {
     let now = time.elapsed_secs_f64();
+    if !cfg!(target_os = "ios") && hud.is_changed() {
+        *next = now;
+        *quick = 4;
+    }
     if now < *next {
         return;
     }
     *next = now + 1.0;
+    if *quick > 0 {
+        *quick -= 1;
+        *next = now + 0.25;
+    }
+    // Vanillish: Android's cut-out insets are dp already, Bevy's logical pixels; no view needed.
+    #[cfg(target_os = "android")]
+    {
+        let _ = &windows;
+        let insets = device::safe_area_insets(std::ptr::null_mut());
+        if area.0 != insets {
+            area.0 = insets;
+        }
+        let side = device::camera_side(std::ptr::null_mut());
+        if area.1 != side {
+            area.1 = side;
+        }
+    }
     #[cfg(target_os = "ios")]
     {
         let Ok(handle) = windows.single() else {
@@ -274,7 +302,7 @@ fn track_safe_area(
             }
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = (&windows, &mut area);
     }
@@ -349,39 +377,51 @@ fn keyboard_policy(
     }
 }
 
+/// The interface scale for the screen the game is on: iNilla's rule on a phone; Vanillish: on a
+/// foldable's inner screen and on a tabletop, `fold::ui_scale`'s (the 1024-unit main bar on the
+/// near-square screen; about 600 units of `UIParent` above the hinge, near a phone's 614).
+fn applied_ui_scale(settings: &InillaSettings, hud: &HudScreen) -> f32 {
+    let [w, h] = hud.screen.size;
+    let world_h = hud.screen.world.map_or(h, |r| r.size()[1]);
+    inilla_core::fold::ui_scale(settings, hud.class, [w, h], world_h)
+}
+
 /// iNilla settings → benilla CVars, when they move.
 fn apply_cvar_settings(
     state: Res<Inilla>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    hud: Res<HudScreen>,
     mut cvars: ResMut<Cvars>,
-    mut last: Local<Option<(u32, u32, inilla_core::settings::Quality)>>,
+    mut last: Local<Option<(u32, u32)>>,
+    mut quality: Local<Option<Quality>>,
 ) {
     if !super::touch_device() {
         return;
     }
-    let height = windows.single().map_or(0.0, |w| w.height());
-    let ui = state.settings.effective_ui_scale(height);
+    let ui = applied_ui_scale(&state.settings, &hud);
     let key = (
         (state.settings.render_scale * 100.0).round() as u32,
         (ui * 100.0).round() as u32,
-        state.settings.quality,
     );
-    if *last == Some(key) {
-        return;
+    if *last != Some(key) {
+        *last = Some(key);
+        cvars.set(
+            "renderScale",
+            &format!("{:.2}", state.settings.render_scale.clamp(0.5, 1.0)),
+        );
+        cvars.set("useUiScale", "1");
+        cvars.set("uiScale", &format!("{ui:.2}"));
     }
-    let first = last.is_none();
-    *last = Some(key);
-    cvars.set(
-        "renderScale",
-        &format!("{:.2}", state.settings.render_scale.clamp(0.5, 1.0)),
-    );
-    cvars.set("useUiScale", "1");
-    cvars.set("uiScale", &format!("{ui:.2}"));
-    // The preset writes its CVars when the player picks it, not on every launch — a detail the
-    // player then changed in the stock options must survive a restart.
-    if !first {
-        for (name, value) in state.settings.quality.cvars() {
-            cvars.set(name, value);
+    // The preset writes its CVars when the player picks it: not on every launch — a detail the
+    // player then changed in the stock options must survive a restart — and (Vanillish) not when
+    // the screen changes either, which moves the UI scale on every fold.
+    let q = state.settings.quality;
+    if *quality != Some(q) {
+        let first = quality.is_none();
+        *quality = Some(q);
+        if !first {
+            for (name, value) in q.cvars() {
+                cvars.set(name, value);
+            }
         }
     }
 }
@@ -585,45 +625,84 @@ struct IslandInset {
 /// short of it while the 3D world, which is not `UIParent`'s, still runs edge to edge. The applied
 /// inset is kept in the VM, so a reloaded interface gets it again; an interface never inset is
 /// left as the stock anchors it.
+///
+/// Vanillish: two more edges. A cut-out on the top edge (a foldable's inner screen in landscape
+/// can put its camera there) insets the top. On a tabletop the interface ends at the hinge with
+/// the world ([`HudScreen`]'s `world`): `UIParent` is the half above it, and the stock windows,
+/// the action bars and the chat with it. Runs at once when the screen changes (a fold, the split).
 #[allow(clippy::too_many_arguments)]
 fn clear_the_island(
     state: Res<Inilla>,
     script: Option<NonSend<benilla_ui::script::UiScript>>,
     safe: Res<SafeArea>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    hud: Res<HudScreen>,
+    ui_scale: Option<Res<crate::ui_script::UiScaleCvar>>,
     client: Res<State<ClientState>>,
     time: Res<Time<Real>>,
     mut inset: ResMut<IslandInset>,
 ) {
     let now = time.elapsed_secs_f64();
-    if now < inset.next || *client.get() != ClientState::InWorld {
+    if *client.get() != ClientState::InWorld || (now < inset.next && !hud.is_changed()) {
         return;
     }
     inset.next = now + 0.5;
-    let (Some(script), Ok(window)) = (script, windows.single()) else {
+    let Some(script) = script else {
         return;
     };
-    let seam = crate::ui_script::seam_scale(window.height());
+    let [_, height] = hud.screen.size;
+    if height <= 0.0 {
+        return;
+    }
+    let seam = crate::ui_script::seam_scale(height);
+    let on = state.settings.island_margin && super::touch_device();
     let points = |side: Side, inset: f32| {
-        let on = state.settings.island_margin && super::touch_device() && safe.1 == Some(side);
-        if on {
+        if on && safe.1 == Some(side) {
             inset
         } else {
             0.0
         }
     };
+    // Root units (768 to the window's height) …
     let left = points(Side::Left, safe.0[1]) / seam;
     let right = points(Side::Right, safe.0[3]) / seam;
-    let key = format!("{left:.1}:{right:.1}");
+    // (iOS reports no top inset in landscape; iNilla never used one.)
+    let top = if on && !cfg!(target_os = "ios") {
+        safe.0[0] / seam
+    } else {
+        0.0
+    };
+    let bottom = hud
+        .screen
+        .world
+        .map_or(0.0, |w| (height - w.max[1]).max(0.0) / seam);
+    // … in `UIParent`'s own units: the resolver multiplies an anchor's offsets by the frame's
+    // effective scale (`benilla-ui` `anchor_resolve_x`), which for `UIParent` is `uiScale` as the
+    // client applies it (`fold::ui_parent_scale`: capped below 4:3, floored at 0.64). That is the
+    // one `apply_cvar_settings` asks for on a touch device, else the player's own `uiScale`. iOS
+    // keeps the root-unit inset it has shipped with until it is measured on a device.
+    let requested = if super::touch_device() {
+        applied_ui_scale(&state.settings, &hud)
+    } else {
+        ui_scale.map_or(crate::ui_script::DEFAULT_UI_SCALE, |s| s.0)
+    };
+    let scale = inilla_core::fold::ui_parent_scale(requested, hud.screen.size);
+    let unit = if cfg!(target_os = "ios") { 1.0 } else { scale };
+    let [left, right, top, bottom] = [left, right, top, bottom].map(|v| v / unit);
+    let key = if [left, right, top, bottom].iter().all(|v| *v < 0.05) {
+        "0".to_string()
+    } else {
+        format!("{left:.1}:{right:.1}:{top:.1}:{bottom:.1}:{scale:.2}")
+    };
     crate::ui_script::run_or_warn(
         &script,
         &format!(
-            "if (INILLA_INSET or \"0.0:0.0\") ~= \"{key}\" and UIParent then \
+            "if (INILLA_INSET or \"0\") ~= \"{key}\" and UIParent then \
                UIParent:ClearAllPoints() \
-               UIParent:SetPoint(\"TOPLEFT\", nil, \"TOPLEFT\", {left:.1}, 0) \
-               UIParent:SetPoint(\"BOTTOMRIGHT\", nil, \"BOTTOMRIGHT\", {r:.1}, 0) \
+               UIParent:SetPoint(\"TOPLEFT\", nil, \"TOPLEFT\", {left:.1}, {t:.1}) \
+               UIParent:SetPoint(\"BOTTOMRIGHT\", nil, \"BOTTOMRIGHT\", {r:.1}, {bottom:.1}) \
                INILLA_INSET = \"{key}\" \
              end",
+            t = -top,
             r = -right,
         ),
     );

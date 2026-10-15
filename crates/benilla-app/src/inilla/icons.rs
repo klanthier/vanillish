@@ -18,16 +18,15 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
 use benilla_assets::{BlpLoaderSettings, BlpVariant};
 use benilla_ui::script::plain::PlainValue;
 use benilla_ui::script::UiScript;
 use inilla_core::pad::{command_label, PadBinding, Special};
-use inilla_core::touch::{slot_binding, Element, ElementKind, TouchLayout};
+use inilla_core::touch::{slot_binding, Element, ElementKind, Rect, TouchLayout};
 
-use super::platform::SafeArea;
+use super::screen::HudScreen;
 use super::touch::TouchState;
 use super::Inilla;
 use crate::char_select::ClientState;
@@ -234,8 +233,7 @@ fn hud_tooltip(
     touch: Res<TouchState>,
     inilla: Res<Inilla>,
     icons: Res<Icons>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    safe: Res<SafeArea>,
+    hud: Res<HudScreen>,
     mut tip: ResMut<HudTooltip>,
 ) {
     let want = touch.frame.tooltip;
@@ -264,12 +262,17 @@ fn hud_tooltip(
         .and_then(|s| icons.slots.get(&s))
         .map(|info| info.action)
         .filter(|a| *a > 0);
-    if let (Some(action), Ok(window)) = (action, windows.single()) {
-        let screen = safe.screen(window.width(), window.height());
+    if let Some(action) = action {
+        let screen = hud.screen;
         let r = el.rect(&screen, inilla.layout.hud_scale);
-        let (w, h) = (screen.size[0].max(1.0), screen.size[1].max(1.0));
+        // Vanillish: `UIParent` covers the world's rect — above the hinge on a tabletop — so the
+        // fractions are of that; a button on the deck below puts the tooltip on the hinge.
+        let world = screen
+            .world
+            .unwrap_or_else(|| Rect::new([0.0, 0.0], screen.size));
+        let [w, h] = world.size().map(|v| v.max(1.0));
         // Beside the button, on the side toward the middle of the screen.
-        let (point, x) = if r.center()[0] > w / 2.0 {
+        let (point, x) = if r.center()[0] > world.center()[0] {
             ("BOTTOMRIGHT", r.min[0])
         } else {
             ("BOTTOMLEFT", r.max[0])
@@ -280,8 +283,8 @@ fn hud_tooltip(
              GameTooltip:SetPoint(\"{point}\", UIParent, \"BOTTOMLEFT\", \
                UIParent:GetWidth() * {fx}, UIParent:GetHeight() * {fy}) \
              GameTooltip:SetAction({action}) GameTooltip:Show() return 1",
-            fx = x / w,
-            fy = (h - r.min[1]) / h,
+            fx = ((x - world.min[0]) / w).clamp(0.0, 1.0),
+            fy = ((world.max[1] - r.min[1]) / h).clamp(0.0, 1.0),
         );
         let shown = matches!(
             script.eval_plain(&chunk).ok().and_then(|v| v.into_iter().next()),
