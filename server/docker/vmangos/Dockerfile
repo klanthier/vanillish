@@ -41,6 +41,26 @@ RUN test -n "${VMANGOS_COMMIT}" || { echo "VMANGOS_COMMIT build arg is required"
     && git -C /src fetch -q --depth 1 origin "${VMANGOS_COMMIT}" \
     && git -C /src checkout -q FETCH_HEAD
 
+# Vanillish's patches to vmangos, in name order (docker/vmangos/patches/, GPL-2.0-or-later like
+# vmangos; each says what it changes): today one, Rate.MoveSpeed.Player. With another
+# VMANGOS_COMMIT a patch that no longer applies is left out with a warning, and the server runs
+# without what it adds; VANILLISH_PATCHES=strict (what CI builds) fails instead. The names of the
+# patches applied go in /opt/vmangos/vanillish-patches, which the admin agent reads, and the
+# patches themselves in /opt/vmangos/patches.
+ARG VANILLISH_PATCHES=lenient
+COPY docker/vmangos/patches/ /patches/
+RUN mkdir -p /applied \
+    && for p in /patches/*.patch; do \
+         [ -e "$p" ] || continue; \
+         if git -C /src apply --check "$p" 2>/dev/null; then \
+           git -C /src apply "$p" && cp "$p" /applied/; \
+         elif [ "${VANILLISH_PATCHES}" = strict ]; then \
+           echo "$p does not apply to ${VMANGOS_COMMIT}" >&2; exit 1; \
+         else \
+           echo "WARNING: $(basename "$p") does not apply to ${VMANGOS_COMMIT}: built without it" >&2; \
+         fi; \
+       done
+
 # SUPPORTED_CLIENT_BUILD keeps its default (1.12.1). BUILD_FOR_HOST_CPU=0 so the image runs on any
 # x86-64 or arm64 (armv8-a: GCC's outline atomics still use LSE where the CPU has it), not just the
 # machine that built it. The extractors turn the client's MPQs into the dbc/maps/vmaps/mmaps
@@ -86,6 +106,8 @@ RUN cmake -S /src -B /build \
           /src/sql/migrations/*_characters.sql /src/sql/migrations/*_logs.sql \
           /opt/vmangos/sql/migrations/ \
     && cp /src/LICENSE /opt/vmangos/LICENSE \
+    && mkdir -p /opt/vmangos/patches && cp -R /applied/. /opt/vmangos/patches/ \
+    && for p in /applied/*.patch; do if [ -e "$p" ]; then basename "$p" .patch; fi; done > /opt/vmangos/vanillish-patches \
     && git -C /src rev-parse HEAD > /opt/vmangos/sql/core-commit
 
 # ---- world database snapshot --------------------------------------------------------------------
@@ -122,7 +144,8 @@ RUN url="${VMANGOS_DB_URL}" want="${VMANGOS_DB_SHA256}" \
 # ---- runtime ------------------------------------------------------------------------------------
 FROM ubuntu:${UBUNTU_VERSION}
 ARG DEBIAN_FRONTEND=noninteractive
-# mariadb-client and unzip are for db-init, python3 for the mmap generator's driver script.
+# mariadb-client and unzip are for db-init, python3 for the mmap generator's driver script and the
+# admin agent (vanillish-admin), which also reads the characters database with mariadb-client.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libmysqlclient21 \
@@ -140,18 +163,18 @@ COPY docker/vmangos/bin/ /usr/local/bin/
 
 # A checkout with CRLF endings would hand the shell `bash\r`; strip them rather than trust the
 # checkout. Then fail the build now, not at first start, if a library the binaries need is missing.
-RUN sed -i 's/\r$//' /usr/local/bin/inilla-* /usr/local/bin/vmangos-console \
-    && chmod 0755 /usr/local/bin/inilla-* /usr/local/bin/vmangos-console \
+RUN sed -i 's/\r$//' /usr/local/bin/inilla-* /usr/local/bin/vmangos-console /usr/local/bin/vanillish-admin \
+    && chmod 0755 /usr/local/bin/inilla-* /usr/local/bin/vmangos-console /usr/local/bin/vanillish-admin \
     && ! ldd /opt/vmangos/bin/mangosd /opt/vmangos/bin/realmd /opt/vmangos/bin/Extractors/* 2>/dev/null \
          | grep 'not found' \
     && groupadd --system vmangos \
     && useradd --system --gid vmangos --home-dir /vmangos --shell /usr/sbin/nologin vmangos \
-    && mkdir -p /vmangos/data /vmangos/logs /run/vmangos \
+    && mkdir -p /vmangos/data /vmangos/logs /vmangos/admin /run/vmangos \
     && chown -R vmangos:vmangos /vmangos /run/vmangos
 
 # source: where this image is built from; version and revision: the vmangos commit it packages
-# (GPLv2, its LICENSE in /opt/vmangos), not Ubuntu's. CI adds the image tag, this repository's
-# commit and the dump it baked.
+# (GPLv2, its LICENSE in /opt/vmangos, with Vanillish's patches in /opt/vmangos/patches), not
+# Ubuntu's. CI adds the image tag, this repository's commit and the dump it baked.
 ARG VMANGOS_REPO
 ARG VMANGOS_COMMIT
 LABEL org.opencontainers.image.title="Vanillish vmangos" \

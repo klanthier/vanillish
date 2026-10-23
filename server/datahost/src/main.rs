@@ -1,7 +1,8 @@
 //! **inilla-datahost** (Vanillish's data host) — hand your own World of Warcraft 1.12.1 `Data`
 //! folder to your own phone, once, with the addons that go with it; tell the app what this server
-//! is; and create the player's account. The app's Connect screen (Vanillish) or setup screen
-//! (iNilla) downloads the data from here (resumable, SHA-256 verified).
+//! is; create the player's account; and pass the owner's admin menu on to the world server. The
+//! app's Connect screen (Vanillish) or setup screen (iNilla) downloads the data from here
+//! (resumable, SHA-256 verified).
 //!
 //! ```text
 //! inilla-datahost serve --data "/games/WoW 1.12.1/Data"
@@ -11,6 +12,8 @@
 //!     → the same, in two languages, with addons, behind a token
 //! inilla-datahost serve --realm-name Vanillish --world-same-host --signup lan
 //!     → no game data (yet): /server.json and sign-up only
+//! INILLA_ADMIN_CODE="$ADMIN_CODE" inilla-datahost serve --admin-agent mangosd:8091
+//!     → and the admin menu, from the LAN (the code from the environment only, never a flag)
 //! inilla-datahost manifest --data "/games/WoW 1.12.1/Data"
 //!     → prints the manifest (and caches it) without serving
 //! ```
@@ -22,6 +25,7 @@
 //! |---|---|
 //! | `GET\|HEAD /server.json` | what this server is: logon, realm, data, sign-up ([`info`]); never needs the token |
 //! | `POST /accounts` | a player account, from the salt and verifier the phone computed ([`accounts`]) |
+//! | `GET /admin/nonce`, `GET /admin/status`, `POST /admin/{rates,rates/reset,gold}` | the admin menu, signed with the admin code, passed on to the world server's agent ([`admin`]) |
 //! | `GET /locales.json` | the languages this host has game data for, the first one the default |
 //! | `GET [/<locale>]/manifest.json` | the archives: names, sizes, SHA-256 |
 //! | `GET\|HEAD [/<locale>]/files/<name>` | one archive, with `Range`, so a download resumes |
@@ -40,6 +44,7 @@
 
 mod accounts;
 mod addons;
+mod admin;
 mod http;
 mod info;
 mod manifest;
@@ -56,6 +61,7 @@ use clap::{Parser, Subcommand};
 
 use crate::accounts::{DbConfig, Mode, Signup};
 use crate::addons::AddonSet;
+use crate::admin::Admin;
 use crate::http::{Body, Head, Request};
 use crate::manifest::Manifest;
 
@@ -68,7 +74,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the Data folder(s) and addons, /server.json and sign-up.
+    /// Serve the Data folder(s) and addons, /server.json, sign-up and the admin menu.
     Serve {
         /// A client's `Data` folder, as `DIR` or `LOCALE=DIR` (e.g. `deDE=/games/de/Data`).
         /// Repeat for more languages; the first is the default. A folder without archives is
@@ -165,6 +171,25 @@ struct ServerArgs {
     /// realmd's database [default: realmd].
     #[arg(long, env = "INILLA_SIGNUP_DB_NAME")]
     signup_db_name: Option<String>,
+    /// The admin menu: lan (from private addresses only), open or off. It is on only with
+    /// --admin-agent and a usable code in the environment, INILLA_ADMIN_CODE (ADMIN_CODE: 16
+    /// or more of the setup's symbols, or 20 or more hex digits; no flag, so it never shows in
+    /// `ps`).
+    #[arg(long, env = "INILLA_ADMIN", default_value = "lan", value_parser = admin_mode)]
+    admin: Mode,
+    /// The world server's admin agent, host:port (compose: mangosd:8091) [default: none, the
+    /// admin menu off].
+    #[arg(long, env = "INILLA_ADMIN_AGENT")]
+    admin_agent: Option<String>,
+}
+
+/// `INILLA_ADMIN`: like sign-up's mode, but empty (compose's `${X:-}`) is the default, lan.
+fn admin_mode(s: &str) -> Result<Mode, String> {
+    if s.trim().is_empty() {
+        Ok(Mode::Lan)
+    } else {
+        Mode::parse(s)
+    }
 }
 
 /// A setting that was given: neither absent nor empty.
@@ -227,6 +252,22 @@ impl ServerArgs {
             token,
             Box::new(accounts::Database::new(&db)),
         ))
+    }
+
+    /// The admin menu as configured; `code` is INILLA_ADMIN_CODE, read from the environment.
+    fn admin(&self, code: Option<&str>) -> Result<Admin, String> {
+        let agent = given(&self.admin_agent)
+            .map(|a| match a.rsplit_once(':') {
+                Some((host, p)) if !host.is_empty() && p.parse::<u16>().is_ok_and(|p| p != 0) => {
+                    Ok(a)
+                }
+                _ => Err(format!("--admin-agent {a:?} is not host:port")),
+            })
+            .transpose()?;
+        let code = code.unwrap_or_default();
+        let backend =
+            agent.map(|a| Box::new(admin::Agent::new(&a, code)) as Box<dyn admin::Backend>);
+        Ok(Admin::new(self.admin, code, backend))
     }
 }
 
@@ -374,18 +415,32 @@ struct Host {
     locales_json: Option<String>,
     token: Option<String>,
     /// `/server.json` for a requester at a private address, and for any other: they differ only
-    /// in whether sign-up is open to it.
+    /// in whether sign-up and the admin menu are open to it.
     server_json_private: String,
     server_json_public: String,
     signup: Signup,
+    admin: Admin,
 }
 
 impl Host {
-    fn new(sets: Vec<DataSet>, token: Option<String>, realm: &info::Realm, signup: Signup) -> Self {
+    fn new(
+        sets: Vec<DataSet>,
+        token: Option<String>,
+        realm: &info::Realm,
+        signup: Signup,
+        admin: Admin,
+    ) -> Self {
         let locales = locales(&sets);
         let server_json = |private: bool| {
             let registration = signup.registration(private);
-            info::server_json(realm, &locales, token.is_some(), registration.as_ref())
+            let section = admin.section(private);
+            info::server_json(
+                realm,
+                &locales,
+                token.is_some(),
+                registration.as_ref(),
+                section.as_ref(),
+            )
         };
         let (server_json_private, server_json_public) = (server_json(true), server_json(false));
         Host {
@@ -395,6 +450,7 @@ impl Host {
             server_json_private,
             server_json_public,
             signup,
+            admin,
         }
     }
 
@@ -493,8 +549,9 @@ fn serve(
     let token = token.filter(|t| !t.trim().is_empty());
     let realm = server.realm()?;
     let signup = server.signup(token.is_some())?;
+    let admin = server.admin(std::env::var("INILLA_ADMIN_CODE").ok().as_deref())?;
     let sets = load(data, addons, locale, cache_dir)?;
-    let host = Arc::new(Host::new(sets, token, &realm, signup));
+    let host = Arc::new(Host::new(sets, token, &realm, signup, admin));
     let listener = TcpListener::bind(bind).map_err(|e| format!("cannot listen on {bind}: {e}"))?;
     if host.sets.is_empty() {
         eprintln!(
@@ -521,6 +578,7 @@ fn serve(
         }
     );
     eprintln!("inilla-datahost: {}", host.signup.describe());
+    eprintln!("inilla-datahost: {}", host.admin.describe());
     http::serve(listener, move |req, stream| handle(&host, req, stream));
     Ok(())
 }
@@ -533,6 +591,11 @@ fn handle(host: &Host, req: Request, w: &mut TcpStream) {
     let peer = req.peer.parse::<SocketAddr>().ok().map(|a| a.ip());
     if req.path == "/accounts" {
         accounts(host, &req, peer, authorized, w);
+        return;
+    }
+    // Its own signature, not the data token; and POSTs, so before the GET/HEAD gate.
+    if req.path == "/admin" || req.path.starts_with("/admin/") {
+        admin(host, &req, peer, w);
         return;
     }
     let head_only = req.method == "HEAD";
@@ -659,6 +722,43 @@ fn accounts(host: &Host, req: &Request, peer: Option<IpAddr>, authorized: bool, 
     }
 }
 
+/// `/admin/*`: the admin menu, JSON whatever the answer.
+fn admin(host: &Host, req: &Request, peer: Option<IpAddr>, w: &mut TcpStream) {
+    let ask = admin::Request {
+        method: &req.method,
+        path: &req.path,
+        peer,
+        authorization: req.header("authorization"),
+        content_type: req.header("content-type"),
+        body: &req.body,
+    };
+    let reply = host.admin.handle(&ask, Instant::now());
+    eprintln!("{}", admin_log(&req.peer, &reply));
+    let mut extra = Vec::new();
+    if let Some(secs) = reply.retry_after {
+        extra.push(("Retry-After", secs.to_string()));
+    }
+    if let Some(method) = reply.allow {
+        extra.push(("Allow", method.to_string()));
+    }
+    let _ = http::respond_with(
+        w,
+        reply.status,
+        "application/json",
+        reply.body.as_bytes(),
+        req.method == "HEAD",
+        &extra,
+    );
+    if matches!(req.body, Body::TooLarge(_) | Body::Unreadable) {
+        http::drain(w, 1 << 20);
+    }
+}
+
+/// The route's fixed name and the status only: never the path, the header, the code or a nonce.
+fn admin_log(peer: &str, reply: &admin::Reply) -> String {
+    format!("{peer} admin {} {}", reply.route, reply.status)
+}
+
 fn send_file(path: &Path, size: u64, req: &Request, head_only: bool, w: &mut TcpStream) {
     let Ok(mut f) = fs::File::open(path) else {
         let _ = http::respond_text(w, 500, "the file vanished", head_only);
@@ -733,8 +833,9 @@ mod tests {
     use crate::accounts::tests::SALT;
     use crate::manifest::tests::{fill, tmp};
     use crate::manifest::REQUIRED;
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::io::{Read, Write};
+    use std::time::Duration;
 
     fn data_dir(name: &str) -> PathBuf {
         let dir = tmp(name);
@@ -756,11 +857,29 @@ mod tests {
         signup: Signup,
     ) -> SocketAddr {
         let sets = load(data, addons, "enUS", None).unwrap();
-        let host = Arc::new(Host::new(sets, token.map(str::to_string), realm, signup));
+        let token = token.map(str::to_string);
+        start(Host::new(sets, token, realm, signup, Admin::off()))
+    }
+
+    /// `host`, live on an ephemeral port.
+    fn start(host: Host) -> SocketAddr {
+        let host = Arc::new(host);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || http::serve(listener, move |r, s| handle(&host, r, s)));
         addr
+    }
+
+    /// A live host with no game data, behind the data token `s3cret`, and the admin menu `admin`.
+    fn host_admin(admin: Admin) -> SocketAddr {
+        let token = Some("s3cret".to_string());
+        start(Host::new(
+            Vec::new(),
+            token,
+            &stack_realm(),
+            Signup::off(),
+            admin,
+        ))
     }
 
     fn host(name: &str, token: Option<&str>) -> (SocketAddr, PathBuf) {
@@ -837,7 +956,8 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["format"], 1);
         assert_eq!(v["name"], "Vanillish");
-        assert_eq!(v["software"], "vanillish-datahost 0.3.0");
+        assert_eq!(v["software"], "vanillish-datahost 0.4.0");
+        assert!(v.get("admin").is_none(), "the admin menu is off");
         assert_eq!(v["auth"]["port"], 3724);
         assert_eq!(v["realms"][0]["world"]["same_host"], true);
         assert_eq!(v["data"]["url"], "");
@@ -1160,5 +1280,349 @@ mod tests {
                 .as_deref(),
             Some("deDE")
         );
+    }
+
+    /// `method path` with `headers` (each ending in CRLF) and `body` → (status, headers, JSON).
+    fn admin_req(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &str,
+        body: &[u8],
+    ) -> (u16, String, Value) {
+        let mut raw = format!(
+            "{method} {path} HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(body);
+        let (status, headers, body) = send(addr, &raw);
+        (
+            status,
+            headers,
+            serde_json::from_slice(&body).unwrap_or(Value::Null),
+        )
+    }
+
+    fn nonce(addr: SocketAddr) -> String {
+        let (status, _, v) = admin_req(addr, "GET", "/admin/nonce", "", b"");
+        assert_eq!(status, 200, "{v}");
+        v["nonce"].as_str().unwrap().to_string()
+    }
+
+    /// `method path` with a JSON `body`, signed with `code` over a fresh nonce.
+    fn signed(
+        addr: SocketAddr,
+        code: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> (u16, String, Value) {
+        let auth = admin::tests::auth_header(code, &nonce(addr), method, path, body);
+        let headers = format!("{JSON}Authorization: {auth}\r\n");
+        admin_req(addr, method, path, &headers, body)
+    }
+
+    fn error(v: &Value) -> &str {
+        v["error"].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn the_admin_menu_over_http() {
+        use crate::admin::tests::{auth_header, say, tcp_agent, Act, CODE, RATES};
+        let status_json =
+            r#"{"ok":true,"world":"up","overrides":0,"rates":{},"players":[],"players_ok":true}"#;
+        let (agent, seen) = tcp_agent(vec![
+            say(200, status_json),
+            say(200, r#"{"ok":true,"changed":["Rate.XP.Kill"]}"#),
+            say(
+                503,
+                r#"{"ok":false,"error":"world_starting","message":"Starting."}"#,
+            ),
+            say(401, r#"{"ok":false,"error":"admin_auth","message":"No."}"#),
+            Act::Say(b"HTTP/1.0 500 X\r\n\r\n<html>Traceback</html>".to_vec()),
+            Act::Hold,
+            // Read, then gone: mangosd stopped, and the agent with it.
+            Act::Say(Vec::new()),
+        ]);
+        let backend = admin::Agent::new(&agent, CODE).with_deadline(Duration::from_millis(300));
+        let admin = Admin::new(Mode::Lan, CODE, Some(Box::new(backend)));
+        let addr = host_admin(admin);
+
+        // server.json says where the menu is; none of it needs the data token.
+        let (_, _, body) = get(addr, "GET /server.json HTTP/1.1");
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["admin"],
+            json!({"url": "admin/", "open": true}),
+            "127.0.0.1 is private"
+        );
+        let (status, headers, v) = admin_req(addr, "GET", "/admin/nonce", "", b"");
+        assert_eq!(status, 200);
+        assert!(headers.contains("Content-Type: application/json"));
+        assert!(headers.contains("Cache-Control: no-store"));
+        assert_eq!(
+            (
+                v["ok"].as_bool(),
+                v["expires_in"].as_u64(),
+                v["nonce"].as_str().map(str::len)
+            ),
+            (Some(true), Some(60), Some(32))
+        );
+
+        // Forwarded with this host's own code, normalised, the answers passed on.
+        let status = auth_header(CODE, &nonce(addr), "GET", "/admin/status", b"");
+        let status_auth = format!("Authorization: {status}\r\n");
+        let (status, _, v) = admin_req(addr, "GET", "/admin/status", &status_auth, b"");
+        assert_eq!(
+            (status, v),
+            (200, serde_json::from_str(status_json).unwrap())
+        );
+        let got = seen.recv().unwrap();
+        assert_eq!((got.method.as_str(), got.path.as_str()), ("GET", "/status"));
+        assert_eq!(got.header("authorization"), Some("Bearer ABCDEFGHJKLMNPQR"));
+        assert_eq!(got.header("host"), Some("mangosd"));
+        let rates = auth_header(CODE, &nonce(addr), "POST", "/admin/rates", RATES.as_bytes());
+        let rates_auth = format!("{JSON}Authorization: {rates}\r\n");
+        let (status, _, v) = admin_req(addr, "POST", "/admin/rates", &rates_auth, RATES.as_bytes());
+        assert_eq!(
+            (status, &v["changed"][0]),
+            (200, &Value::from("Rate.XP.Kill"))
+        );
+        let got = seen.recv().unwrap();
+        assert_eq!((got.method.as_str(), got.path.as_str()), ("POST", "/rates"));
+        assert_eq!(got.body, Body::Read(RATES.as_bytes().to_vec()), "verbatim");
+        let (status, _, v) = admin_req(addr, "GET", "/admin/status", &status_auth, b"");
+        assert_eq!((status, error(&v)), (401, "admin_nonce"), "replayed");
+
+        // The agent's own refusal passes through; its 401 and an answer without JSON do not; its
+        // silence is a 504 at the deadline, and so is its hanging up once asked.
+        let (status, _, v) = signed(addr, CODE, "GET", "/admin/status", b"");
+        assert_eq!((status, error(&v)), (503, "world_starting"));
+        let gold = br#"{"id":"g1","to":"online","copper":100}"#;
+        let (status, headers, v) = signed(addr, CODE, "POST", "/admin/gold", gold);
+        assert_eq!((status, error(&v)), (502, "admin_misconfigured"));
+        assert!(headers.starts_with("HTTP/1.1 502 Bad Gateway"), "{headers}");
+        assert!(v["message"]
+            .as_str()
+            .unwrap()
+            .contains("disagree on ADMIN_CODE"));
+        let reset = br#"{"announce":false}"#;
+        let (status, _, v) = signed(addr, CODE, "POST", "/admin/rates/reset", reset);
+        assert_eq!((status, error(&v)), (502, "admin_misconfigured"));
+        let started = Instant::now();
+        let (status, headers, v) = signed(addr, CODE, "GET", "/admin/status", b"");
+        assert_eq!((status, error(&v)), (504, "no_answer"));
+        assert!(
+            headers.starts_with("HTTP/1.1 504 Gateway Timeout"),
+            "{headers}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let (status, _, v) = signed(addr, CODE, "POST", "/admin/gold", gold);
+        assert_eq!(
+            (status, error(&v)),
+            (504, "no_answer"),
+            "it may have been done"
+        );
+        for want in ["/status", "/gold", "/rates/reset", "/status", "/gold"] {
+            assert_eq!(seen.recv().unwrap().path, want);
+        }
+
+        // Refused here, never forwarded.
+        let (status, headers, v) = admin_req(addr, "GET", "/admin/rates", "", b"");
+        assert_eq!((status, error(&v)), (405, "bad_request"));
+        assert!(headers.contains("Allow: POST"), "{headers}");
+        let (status, headers, body) = get(addr, "HEAD /admin/status HTTP/1.1");
+        assert_eq!((status, body.is_empty()), (405, true));
+        assert!(headers.contains("Allow: GET"), "{headers}");
+        let (status, _, v) = admin_req(addr, "GET", "/admin/status", "", b"");
+        assert_eq!((status, error(&v)), (401, "admin_auth"));
+        let (status, _, v) = admin_req(addr, "GET", "/admin/status?token=s3cret", "", b"");
+        assert_eq!(
+            (status, error(&v)),
+            (401, "admin_auth"),
+            "only the header signs"
+        );
+        let (status, _, v) = signed(addr, "ABCD-EFGH-JKLM-NPQX", "GET", "/admin/status", b"");
+        assert_eq!((status, error(&v)), (401, "admin_code"));
+        let auth = auth_header(CODE, &nonce(addr), "POST", "/admin/rates", RATES.as_bytes());
+        let text = format!("Content-Type: text/plain\r\nAuthorization: {auth}\r\n");
+        let (status, _, v) = admin_req(addr, "POST", "/admin/rates", &text, RATES.as_bytes());
+        assert_eq!((status, error(&v)), (415, "json_only"));
+        let auth = auth_header(CODE, &nonce(addr), "POST", "/admin/gold", b"");
+        let raw = format!("POST /admin/gold HTTP/1.1\r\n{JSON}Authorization: {auth}\r\n\r\n");
+        let (status, _, body) = send(addr, raw.as_bytes());
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!((status, error(&v)), (400, "bad_request"), "no body");
+        // Over 4 KiB: refused unread, and the answer still reaches the client.
+        let (status, _, v) = signed(addr, CODE, "POST", "/admin/gold", &vec![b' '; 200_000]);
+        assert_eq!((status, error(&v)), (413, "too_large"));
+        let (status, _, v) = admin_req(addr, "GET", "/admin/status%0a1.2.3.4", "", b"");
+        assert_eq!((status, error(&v)), (404, "not_found"));
+        assert!(seen.recv().is_err(), "nothing more reached the agent");
+    }
+
+    #[test]
+    fn the_admin_menu_off_or_its_agent_down() {
+        use crate::admin::tests::{nobody, CODE};
+        let agent =
+            || Some(Box::new(admin::Agent::new(&nobody(), CODE)) as Box<dyn admin::Backend>);
+        for off in [
+            Admin::new(Mode::Off, CODE, agent()),
+            Admin::new(Mode::Lan, "change-me-admin-code", agent()),
+            Admin::new(Mode::Lan, "ABCD-EFGH", agent()),
+            Admin::new(Mode::Open, "vanillishadmin2026", agent()),
+            Admin::new(Mode::Open, CODE, None),
+        ] {
+            let addr = host_admin(off);
+            let (_, _, body) = get(addr, "GET /server.json HTTP/1.1");
+            let v: Value = serde_json::from_slice(&body).unwrap();
+            assert!(v.get("admin").is_none(), "{v}");
+            for (method, path) in [
+                ("GET", "/admin/nonce"),
+                ("GET", "/admin/status"),
+                ("POST", "/admin/gold"),
+            ] {
+                let (status, headers, v) = admin_req(addr, method, path, JSON, b"{}");
+                assert_eq!((status, error(&v)), (404, "admin_off"), "{path}");
+                assert!(headers.contains("Content-Type: application/json"));
+            }
+        }
+        let addr = host_admin(Admin::new(Mode::Open, CODE, agent()));
+        let (_, _, body) = get(addr, "GET /server.json HTTP/1.1");
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["admin"], json!({"url": "admin/", "open": true}));
+        let (status, _, v) = signed(addr, CODE, "GET", "/admin/status", b"");
+        assert_eq!((status, error(&v)), (503, "world_unavailable"));
+        assert_eq!(
+            v["message"],
+            "The world server is not running (or still starting)."
+        );
+        // Ten wrong codes, then the wait, with Retry-After; the right code is still served.
+        let wrong = "ABCD-EFGH-JKLM-NPQX";
+        for _ in 0..10 {
+            let (status, _, v) = signed(addr, wrong, "GET", "/admin/status", b"");
+            assert_eq!((status, error(&v)), (401, "admin_code"));
+        }
+        let (status, headers, v) = signed(addr, wrong, "POST", "/admin/gold", b"{}");
+        assert_eq!((status, error(&v)), (429, "too_many"));
+        assert!(headers.contains("Retry-After: 600"), "{headers}");
+        assert_eq!(v["retry_after"], 600);
+        let (status, _, v) = signed(addr, CODE, "GET", "/admin/status", b"");
+        assert_eq!((status, error(&v)), (503, "world_unavailable"));
+    }
+
+    #[test]
+    fn admin_flags_and_the_code_from_the_environment() {
+        use crate::admin::tests::CODE;
+        let parse = |args: &[&str]| {
+            let mut all = vec!["inilla-datahost", "serve"];
+            all.extend_from_slice(args);
+            match Cli::try_parse_from(all).map(|c| c.cmd) {
+                Ok(Cmd::Serve { server, .. }) => Ok(server),
+                Ok(_) => panic!("serve"),
+                Err(e) => Err(e),
+            }
+        };
+        let server = parse(&["--admin", "", "--admin-agent", "mangosd:8091"]).unwrap();
+        assert_eq!(server.admin, Mode::Lan, "empty is the default");
+        let admin = server.admin(Some(CODE)).unwrap();
+        let said = admin.describe();
+        assert!(
+            said.starts_with("admin menu on, from private addresses only"),
+            "{said}"
+        );
+        assert!(
+            said.ends_with("agent at mangosd:8091") && !said.contains("ABCD"),
+            "{said}"
+        );
+        assert_eq!(admin.section(false).map(|s| s.open), Some(false));
+        let said = server.admin(None).unwrap().describe();
+        assert_eq!(
+            said,
+            "admin menu off: no ADMIN_CODE (INILLA_ADMIN_CODE) is set"
+        );
+        for weak in [
+            "",
+            "1234",
+            "CHANGEME-1234-5678-9ABC",
+            "ÄBCD-EFGH-JKLM-NPQR",
+            "VanillishServer2024",
+        ] {
+            let admin = server.admin(Some(weak)).unwrap();
+            assert_eq!(admin.section(true), None, "{weak:?}");
+            assert!(
+                !admin.describe().contains(weak) || weak.is_empty(),
+                "{weak:?}"
+            );
+        }
+        for (flag, mode) in [
+            ("off", Mode::Off),
+            ("OPEN", Mode::Open),
+            (" lan ", Mode::Lan),
+        ] {
+            assert_eq!(parse(&["--admin", flag]).unwrap().admin, mode, "{flag}");
+        }
+        let off = parse(&["--admin", "off", "--admin-agent", "mangosd:8091"]).unwrap();
+        assert_eq!(
+            off.admin(Some(CODE)).unwrap().describe(),
+            "admin menu off: INILLA_ADMIN=off"
+        );
+        for bad in [
+            "mangosd",
+            "mangosd:0",
+            ":8091",
+            "mangosd:x",
+            "mangosd:70000",
+        ] {
+            let args = ServerArgs {
+                admin: Mode::Lan,
+                admin_agent: Some(bad.into()),
+                ..ServerArgs::default()
+            };
+            assert!(args.admin(Some(CODE)).is_err(), "{bad}");
+        }
+        let alone = ServerArgs {
+            admin: Mode::Lan,
+            admin_agent: Some(" ".into()),
+            ..ServerArgs::default()
+        };
+        assert!(alone
+            .admin(Some(CODE))
+            .unwrap()
+            .describe()
+            .contains("no INILLA_ADMIN_AGENT"));
+        assert!(parse(&["--admin", "yes"]).is_err());
+        assert!(
+            parse(&["--admin-code", CODE]).is_err(),
+            "the code is never a flag"
+        );
+    }
+
+    #[test]
+    fn the_admin_log_line_names_the_route_never_the_path() {
+        use crate::admin::tests::CODE;
+        let admin = Admin::new(Mode::Lan, CODE, None);
+        for (path, name) in [
+            ("/admin/status", "status"),
+            ("/admin/rates/reset", "rates/reset"),
+            ("/admin/gold", "gold"),
+            ("/admin/x\n10.0.0.1:1 admin status 200", "unknown"),
+            ("/admin/\u{1b}[2J", "unknown"),
+        ] {
+            let ask = admin::Request {
+                method: "GET",
+                path,
+                peer: None,
+                authorization: Some("Vanillish-Admin 00112233445566778899aabbccddeeff:00"),
+                content_type: None,
+                body: &Body::None,
+            };
+            let reply = admin.handle(&ask, Instant::now());
+            assert_eq!(
+                admin_log("10.0.0.2:5000", &reply),
+                format!("10.0.0.2:5000 admin {name} 404")
+            );
+        }
     }
 }

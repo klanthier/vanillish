@@ -1,0 +1,84 @@
+Vanillish patch to vmangos: Rate.MoveSpeed.Player, the realm's player speed rate.
+
+Every player's walk, run (backwards too) and swim speed times the rate, mounts and speed auras
+included, ahead of the normal-speed cap (aura 191); backward swimming, which vmangos never
+recomputes, and taxi flights keep their speed. `.reload config` hands a new rate to every player at
+once; a login applies it before the first step. 1 (the default) changes nothing. The Vanillish
+app's admin menu sets it (server/docker/vmangos/bin/vanillish-admin).
+
+GPL-2.0-or-later, like the vmangos code it changes (https://github.com/vmangos/core).
+
+diff --git a/src/game/Objects/Player.cpp b/src/game/Objects/Player.cpp
+index c45726e..22efb63 100644
+--- a/src/game/Objects/Player.cpp
++++ b/src/game/Objects/Player.cpp
+@@ -14974,6 +14974,12 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
+     if (HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+         m_deathState = DEAD;
+ 
++    // Vanillish: the realm's player speed rate from the first step, speed auras or not. Set without
++    // a packet (not in a map yet): the create packet carries it.
++    if (sWorld.getConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER) != 1.0f)
++        for (UnitMoveType mtype : { MOVE_WALK, MOVE_RUN, MOVE_RUN_BACK, MOVE_SWIM })
++            UpdateSpeed(mtype, true);
++
+     _LoadSpells(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADSPELLS));
+ 
+     // after spell load
+diff --git a/src/game/Objects/Unit.cpp b/src/game/Objects/Unit.cpp
+index 6b9a89a..2a8b287 100644
+--- a/src/game/Objects/Unit.cpp
++++ b/src/game/Objects/Unit.cpp
+@@ -7018,6 +7018,11 @@ void Unit::UpdateSpeed(UnitMoveType mtype, bool forced, float ratio)
+     // now we ready for speed calculation
+     float speed  = mainSpeedMod ? bonus * (100.0f + mainSpeedMod) / 100.0f : bonus;
+ 
++    // Vanillish: the realm's player speed rate (Rate.MoveSpeed.Player, 1 by default), ahead of the
++    // normal-speed cap below, so an aura that sets a fixed speed still does.
++    if (IsPlayer())
++        speed *= sWorld.getConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER);
++
+     switch (mtype)
+     {
+         case MOVE_RUN:
+diff --git a/src/game/World.cpp b/src/game/World.cpp
+index ca0b522..66c836b 100644
+--- a/src/game/World.cpp
++++ b/src/game/World.cpp
+@@ -777,6 +777,24 @@ void World::LoadConfigSettings(bool reload)
+     setConfigMinMax(CONFIG_FLOAT_GHOST_RUN_SPEED_WORLD,   "Death.Ghost.RunSpeed.World", 1.0f, 0.1f, 10.0f);
+     setConfigMinMax(CONFIG_FLOAT_GHOST_RUN_SPEED_BG,      "Death.Ghost.RunSpeed.Battleground", 1.0f, 0.1f, 10.0f);
+ 
++    // Vanillish: every player's walk, run and swim speed times this, mounted or not (NaN reads as
++    // 1). A reload hands a new rate to every player at once: console and chat commands run here on
++    // the world thread with the map threads idle; a player between two maps takes it without a
++    // packet, and the new map's create packet carries it.
++    float const oldPlayerMoveSpeedRate = getConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER);
++    setConfigMinMax(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER,  "Rate.MoveSpeed.Player", 1.0f, 0.1f, 10.0f);
++    if (!(getConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER) >= 0.1f && getConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER) <= 10.0f))
++        setConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER, 1.0f);
++    if (reload && getConfig(CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER) != oldPlayerMoveSpeedRate)
++    {
++        for (auto const& itr : m_sessions)
++        {
++            if (Player* player = itr.second ? itr.second->GetPlayer() : nullptr)
++                for (UnitMoveType mtype : { MOVE_WALK, MOVE_RUN, MOVE_RUN_BACK, MOVE_SWIM })
++                    player->UpdateSpeed(mtype, !player->IsInWorld());
++        }
++    }
++
+     setConfig(CONFIG_UINT32_PVP_POOL_SIZE_PER_FACTION, "PvP.PoolSizePerFaction", 0);
+ 
+     setConfig(CONFIG_UINT32_AV_MIN_PLAYERS_IN_QUEUE, "Alterac.MinPlayersInQueue", 0);
+diff --git a/src/game/World.h b/src/game/World.h
+index 05849cf..0771ca8 100644
+--- a/src/game/World.h
++++ b/src/game/World.h
+@@ -461,6 +461,7 @@ enum eConfigFloatValues
+     CONFIG_FLOAT_AC_MOVEMENT_CHEAT_TELEPORT_DISTANCE,
+     CONFIG_FLOAT_AC_MOVEMENT_CHEAT_WALL_CLIMB_ANGLE,
+     CONFIG_FLOAT_RP_DECAY,
++    CONFIG_FLOAT_RATE_MOVE_SPEED_PLAYER,                    // Vanillish
+     CONFIG_FLOAT_VALUE_COUNT
+ };
+ 

@@ -1,11 +1,11 @@
 [package]
 # The binary keeps its iNilla name: the scripts, the docs and the apps already out know it.
 name = "inilla-datahost"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-description = "Vanillish/iNilla: serve your own 1.12.1 client's Data folder to your own devices — a manifest of the archives with SHA-256 hashes, the files with Range support for resumable downloads — describe the server in /server.json, and create player accounts"
+description = "Vanillish/iNilla: serve your own 1.12.1 client's Data folder to your own devices — a manifest of the archives with SHA-256 hashes, the files with Range support for resumable downloads — describe the server in /server.json, create player accounts, and pass the owner's admin menu on to the world server"
 publish = false
 
 # Its own workspace: the repository root's (the app) must not claim it.

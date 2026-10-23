@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # mangosd: the world server (port 8085). Config = upstream defaults + this stack + config/mangosd.conf.
+# Then the app's admin menu: its rates over that, and its agent beside mangosd (vanillish-admin).
 #
 # The console reads commands from a FIFO instead of a terminal, so `vmangos-console` can drive it
 # from `docker compose exec` (account creation, GM levels, announcements) with no TTY attached.
@@ -44,14 +45,48 @@ conf_set "$conf" mmap.enabled "$mmaps"
 log "vmaps $([ "$vmaps" = 1 ] && echo on || echo off), mmaps $([ "$mmaps" = 1 ] && echo on || echo off)"
 
 conf_apply_overrides "$conf" /config/mangosd.conf
+# The server's own settings, under the admin menu's rates: what its "Server defaults" go back to.
+cp "$conf" /run/vmangos/mangosd.base.conf
+
+# The admin menu's rates (the admin volume) go into the config over the server's own settings; a
+# render that fails never keeps the world from starting.
+if [ -n "${INILLA_ADMIN_CODE:-}" ]; then
+    vanillish-admin render || {
+        log "admin rates not applied (render failed): starting with config/mangosd.conf only"
+        cp /run/vmangos/mangosd.base.conf "$conf"
+    }
+else
+    n="$(grep -cvE '^[[:space:]]*([#;]|$)' /vmangos/admin/rates.conf 2>/dev/null)" || n=0
+    [ "$n" = 0 ] || log "$n admin override(s) not applied (admin off: ADMIN_CODE is empty)"
+fi
 
 wait_for_db "$DB_USER" "$DB_PASSWORD"
 
 # Holding the FIFO open read-write means mangosd never sees EOF on stdin (which would shut the
 # world down) and a writer never blocks. Everything mangosd prints also lands in console.log, which
-# vmangos-console reads the answer from.
+# vmangos-console and the admin agent read the answer from, one command at a time (console.lock).
 fifo=/run/vmangos/console.fifo
 [ -p "$fifo" ] || { rm -f "$fifo" && mkfifo -m 0600 "$fifo"; }
+: >>/run/vmangos/console.lock
+# A prompt the last mangosd still owed (console.pending, see vmangos-console) will never come.
+rm -f /run/vmangos/console.pending
+
+# The admin agent for the data host (port 8091), restarted when it stops, unless it found the code
+# unusable (exit 3, said once). It starts before fd 3 opens, so it holds no end of the FIFO; it alone
+# keeps the code (not tee, not mangosd).
+if [ -n "${INILLA_ADMIN_CODE:-}" ]; then
+    (
+        while :; do
+            rc=0
+            python3 -u /usr/local/bin/vanillish-admin serve || rc=$?
+            [ "$rc" != 3 ] || exit 0
+            log "the admin agent stopped (exit $rc): restarting it in 5 s"
+            sleep 5
+        done
+    ) </dev/null &
+fi
+unset INILLA_ADMIN_CODE
+
 exec 3<>"$fifo"
 : >/run/vmangos/console.log
 exec mangosd -c "$conf" <&3 > >(exec tee -a /run/vmangos/console.log) 2>&1

@@ -11,7 +11,13 @@
 #   3. accounts_e2e.py open: /server.json, POST /accounts (created, replay, taken, invalid, rate
 #      limit), then an SRP6 logon with the account the data host made;
 #   4. accounts_e2e.py token and closed: the data host again with INILLA_DATA_TOKEN set, then with
-#      INILLA_SIGNUP=off.
+#      INILLA_SIGNUP=off;
+#   5. admin_e2e.py on and off: the admin menu's door with ADMIN_CODE set (server.json's admin
+#      section, nonces, the MAC: missing, wrong, replayed, right, which is 503 with no mangosd), then
+#      with INILLA_ADMIN=off.
+#
+# Before it starts anything, compose.yaml with an ADMIN_CODE: mangosd and the data host get it,
+# mangosd keeps the database settings beside it, and no other service gets it.
 #
 # --no-datahost stops after 2 (for a data host without /server.json yet). The images are whatever
 # compose.yaml names: pulled, already here, or built. It runs as its own compose project
@@ -37,6 +43,16 @@ base="http://127.0.0.1:$datahost_port/"
 token="ci-token-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
 secret() { python3 -c 'import secrets; print(secrets.token_hex(16))'; }
 signup_password="$(secret)"
+# The admin code as the setup makes it (setup-mac.sh's admin_code): 16 bytes of /dev/urandom, each
+# masked to 5 bits, one of 32 letters each, in fours.
+admin_code() {
+    local c
+    c="$(od -An -N16 -tu1 /dev/urandom |
+        awk -v a=ABCDEFGHJKLMNPQRSTUVWXYZ23456789 '{ for (i = 1; i <= NF; i++) printf "%s", substr(a, $i % 32 + 1, 1) }')"
+    printf '%s-%s-%s-%s\n' "${c:0:4}" "${c:4:4}" "${c:8:4}" "${c:12:4}"
+}
+admin="$(admin_code)"
+[[ "$admin" =~ ^[A-HJ-NP-Z2-9]{4}(-[A-HJ-NP-Z2-9]{4}){3}$ ]] || { echo "FAIL: no admin code made" >&2; exit 1; }
 
 envfile="$(mktemp)"
 cat >"$envfile" <<EOF
@@ -51,6 +67,8 @@ REALMD_PORT=$realmd_port
 DATAHOST_PORT=$datahost_port
 INILLA_SIGNUP=lan
 INILLA_DATA_TOKEN=
+ADMIN_CODE=$admin
+INILLA_ADMIN=lan
 EOF
 
 compose() { docker compose -p "$project" --env-file "$envfile" "$@"; }
@@ -91,6 +109,24 @@ step "compose files"
 compose config --quiet
 docker compose -f compose.datahost.yaml --env-file "$envfile" config --quiet
 echo "  ok  compose.yaml and compose.datahost.yaml"
+# Who gets the admin code, read from the resolved files (key names only: the code is never printed).
+# CI never starts mangosd, so this is where an environment that lost its database settings shows.
+compose config --format json | ADMIN_CODE="$admin" python3 -I -c '
+import json, os, sys
+code, s = os.environ["ADMIN_CODE"], json.load(sys.stdin)["services"]
+env = {n: v.get("environment") or {} for n, v in s.items()}
+bad = [f"{n} gets it" for n in ("db", "db-init", "extract", "realmd") if "INILLA_ADMIN_CODE" in env[n]]
+bad += [f"{n} does not get it" for n in ("mangosd", "datahost") if env[n].get("INILLA_ADMIN_CODE") != code]
+bad += [f"mangosd lost {k}" for k in ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "REALM_TYPE", "TZ")
+        if not env["mangosd"].get(k)]
+if env["datahost"].get("INILLA_ADMIN_AGENT") != "mangosd:8091":
+    bad.append("the data host does not ask mangosd:8091")
+if "/vmangos/admin" not in [v.get("target") for v in s["mangosd"].get("volumes", [])]:
+    bad.append("mangosd does not mount /vmangos/admin")
+if bad:
+    sys.exit("FAIL: the admin code: " + "; ".join(bad))
+'
+echo "  ok  the admin code goes to mangosd (beside its database settings) and the data host, no one else"
 
 step "start: db, db-init, realmd$([ "$datahost" = 1 ] && echo ', datahost') (no game data)"
 services=(realmd)
@@ -167,5 +203,11 @@ INILLA_DATA_TOKEN="$token" compose up -d --no-deps datahost
 python3 ci/accounts_e2e.py token --base "$base" --token "$token"
 INILLA_SIGNUP=off compose up -d --no-deps datahost
 python3 ci/accounts_e2e.py closed --base "$base"
+
+step "5. the admin menu's door (ADMIN_CODE set, no mangosd), then INILLA_ADMIN=off"
+compose up -d --no-deps datahost
+ADMIN_CODE="$admin" python3 -I ci/admin_e2e.py on --base "$base"
+INILLA_ADMIN=off compose up -d --no-deps datahost
+python3 -I ci/admin_e2e.py off --base "$base"
 
 printf '\nchecks passed\n'

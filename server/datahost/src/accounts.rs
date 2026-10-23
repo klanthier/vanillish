@@ -44,7 +44,7 @@ pub const PASSWORD_MAX: usize = 16;
 /// The 1.12 SRP6 modulus N, big-endian hex. A verifier is `g^x mod N`, so it is below N.
 const N_HEX: &str = "894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7";
 
-/// Who may sign up.
+/// Who may sign up, or use the admin menu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -235,7 +235,7 @@ pub struct Limiter {
 }
 
 /// How long until fewer than `n` of `times` (oldest first) fall within `window` of `now`.
-fn wait_for(times: &[Instant], n: usize, window: Duration, now: Instant) -> Duration {
+pub fn wait_for(times: &[Instant], n: usize, window: Duration, now: Instant) -> Duration {
     let recent: Vec<&Instant> = times
         .iter()
         .filter(|t| now.saturating_duration_since(**t) < window)

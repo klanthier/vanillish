@@ -1,0 +1,1009 @@
+#!/usr/bin/env python3
+"""vanillish-admin: the app's admin menu, beside mangosd (python3, standard library only).
+
+  vanillish-admin render   /run/vmangos/mangosd.conf = mangosd.base.conf + the menu's rates
+  vanillish-admin serve    the API the data host forwards signed requests to, on :8091
+
+inilla-mangosd renders before mangosd starts and keeps `serve` running beside it. The rates live
+in /vmangos/admin/rates.conf (the `admin` volume) and reach mangosd through the file it reads with
+-c and the console's `reload config`; gold goes out by mail with `send money`. Every request
+carries `Authorization: Bearer <INILLA_ADMIN_CODE>` (read normalised), the code only the data host
+sends.
+
+  GET  /status       the rates (live and the server's own), who is online, whether the world is up
+  POST /rates        {"id"?, "rates": {key: number}, "announce": bool}
+  POST /rates/reset  {"id"?, "announce": bool}: back to the server's own settings
+  POST /gold         {"id", "to": ["Name", ...] | "online", "copper": int}
+
+The INILLA_ADMIN_RUN_DIR, _STATE_DIR, _PATCHES, _PROC_NET and _MARIADB variables move what the
+agent reads and runs, for server/ci/admin_test.py; the image never sets them.
+"""
+import collections
+import contextlib
+import fcntl
+import hmac
+import http.server
+import json
+import math
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+# Request handling: socket reads and writes, requests at once, body size, the per-request deadline
+# (under the data host's 25 s and the app's 30 s).
+HANDLER_TIMEOUT = 10
+MAX_REQUESTS = 8
+MAX_BODY = 64 * 1024
+DEADLINE = 20.0
+# The agent's lock and console.lock; the console's `mangos>` (as vmangos-console waits); the prompt
+# console.pending says is due; the poll of console.log; a console line's least time left.
+LOCK_WAIT = 5.0
+CONSOLE_TIMEOUT = 15.0
+SUSPECT_WAIT = 5.0
+POLL = 0.1
+MIN_COMMAND = 1.0
+# The world port has to listen this long before the world counts as up; the database query time.
+WORLD_GRACE = 2.0
+DB_TIMEOUT = 5.0
+REPLIES_KEPT = 32
+
+# The rates the menu sets (exact key case, as mangosd looks them up) and the range the API takes.
+# mangosd's own default for each is 1.
+SPEED = "Rate.MoveSpeed.Player"
+SPEED_PATCH = "0001-move-speed"
+XP = ("Rate.XP.Kill", "Rate.XP.Quest", "Rate.XP.Explore")
+LOOT = tuple(
+    f"Rate.Drop.Item.{q}"
+    for q in ("Poor", "Normal", "Uncommon", "Rare", "Epic", "Legendary", "Referenced")
+)
+KNOBS = {**{k: (0, 20) for k in XP + LOOT + ("Rate.Drop.Money",)}, SPEED: (0.5, 3)}
+# How the chat announcement names them.
+GROUPS = (("XP", XP), ("loot", LOOT), ("gold", ("Rate.Drop.Money",)), ("speed", (SPEED,)))
+
+MAX_COPPER = 1_000_000_000
+MAX_NAMES = 50
+MAX_PLAYERS = 200
+GIFT = '"A gift from the realm" "Sent with the server\'s admin menu."'
+RATES_HEADER = (
+    "# The admin menu's rates (vanillish-admin): each wins over config/mangosd.conf until the\n"
+    '# menu\'s "Server defaults".\n'
+)
+REQUEST_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+# A rates.conf value: plain digits, so mangosd's std::stof reads exactly what was checked.
+PLAIN_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# std::stof's reading of a config value: its leading decimal number.
+LEADING_NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+COMMENT = re.compile(rb"[ \t]*[#;]")
+# What mangosd's console prints when a command is done (CliRunnable.cpp's commandFinished).
+PROMPT = b"mangos>"
+# What `send money` answers once the mail is out: LANG_MAIL_SENT (Language.h), mangos_string entry
+# 169 in the world database, in the language of the realm's DBCs; the English one when none is read.
+MAIL_SENT = 169
+MAIL_SENT_ENGLISH = "Mail sent to %s"
+LOCALES = ("content_default",) + tuple(f"content_loc{i}" for i in range(1, 9))
+# The world port, 8085 = 0x1F95, listening: the compose healthcheck's pattern, tcp6 too.
+LISTENING = re.compile(r":1F95 0+:0000 0A")
+# ASCII whitespace as the data host and the app read it (no vertical tab).
+CODE_SPACE = " \t\n\x0c\r-"
+# The random codes the menu takes, 80 bits each: 16 of the setup's symbols (no 0, 1, I or O), or 20
+# hex digits (openssl rand -hex 10).
+SETUP_SYMBOLS = frozenset("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+HEX_DIGITS = frozenset("0123456789ABCDEF")
+
+
+def log(message):
+    print(f"[admin] {message}", flush=True)
+
+
+def run_path(name):
+    return os.path.join(os.environ.get("INILLA_ADMIN_RUN_DIR") or "/run/vmangos", name)
+
+
+def rates_path():
+    return os.path.join(os.environ.get("INILLA_ADMIN_STATE_DIR") or "/vmangos/admin", "rates.conf")
+
+
+def patches_path():
+    return os.environ.get("INILLA_ADMIN_PATCHES") or "/opt/vmangos/vanillish-patches"
+
+
+def proc_net_path(name):
+    return os.path.join(os.environ.get("INILLA_ADMIN_PROC_NET") or "/proc/net", name)
+
+
+# ---- the code ------------------------------------------------------------------------------------
+
+
+def normalized_code(code):
+    """The code as the data host and the app read it: whitespace and '-' dropped, uppercase; None
+    when it holds any other character that is not an ASCII letter or digit."""
+    out = []
+    for c in code:
+        if c in CODE_SPACE:
+            continue
+        if not (c.isascii() and c.isalnum()):
+            return None
+        out.append(c.upper())
+    return "".join(out)
+
+
+def usable_code(code):
+    """A random code, not the example: 16 or more of the setup's symbols, or 20 or more hex digits.
+    A hand-picked word turns the menu off: the wrong-code limit never stops a guesser."""
+    n = normalized_code(code or "")
+    if n is None or n.startswith("CHANGEME"):
+        return False
+    return (len(n) >= 16 and set(n) <= SETUP_SYMBOLS) or (len(n) >= 20 and set(n) <= HEX_DIGITS)
+
+
+def authorized(header, code):
+    """Whether header is `Bearer <code>`, both normalised (the form the data host sends)."""
+    scheme, _, given = (header or "").partition(" ")
+    got = normalized_code(given) if scheme == "Bearer" else None
+    return got is not None and hmac.compare_digest(got.encode(), normalized_code(code).encode())
+
+
+# ---- mangosd's config ----------------------------------------------------------------------------
+
+
+def fmt(value):
+    return "%g" % value
+
+
+def clean(value):
+    """Rounded to 0.01, -0 made 0: what goes into a config file."""
+    return round(value, 2) + 0.0
+
+
+def num(value):
+    """A JSON number: 2, not 2.0."""
+    return int(value) if float(value).is_integer() else value
+
+
+def read_file(path):
+    """The bytes of path, or b"" when it does not exist."""
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return b""
+
+
+def write_atomic(path, data, tmp=None):
+    tmp = tmp or path + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def available():
+    """The knobs this image's mangosd reads: the speed one only where its patch went in."""
+    try:
+        with open(patches_path(), encoding="utf-8", errors="replace") as f:
+            patches = {line.strip() for line in f}
+    except FileNotFoundError:
+        patches = set()
+    return [k for k in KNOBS if k != SPEED or SPEED_PATCH in patches]
+
+
+def conf_values(data):
+    """Each `name = value` as mangosd reads a config (Config::ProcessLine): blanks skipped in the
+    name, '#' or '[' in it drops the line, '"' dropped from the value, '#' ends it; the first line
+    of a name wins, and names are case-sensitive."""
+    values = {}
+    for raw in data.split(b"\n"):
+        if b"=" not in raw or raw.lstrip(b" \t")[:1] in (b"#", b"["):
+            continue
+        name, value, stage = [], [], "name"
+        for ch in raw.decode("latin-1"):
+            if ch in "\0\r":
+                break
+            if stage == "name":
+                if ch in "#[":
+                    name = []
+                    break
+                if ch in " \t":
+                    continue
+                if ch == "=":
+                    if not name:
+                        break
+                    stage = "find"
+                    continue
+                name.append(ch)
+            else:
+                if ch == "#":
+                    break
+                if ch == '"':
+                    stage = "value"
+                    continue
+                if ch in " \t" and stage == "find":
+                    continue
+                value.append(ch)
+                stage = "value"
+        if name and value:
+            values.setdefault("".join(name), "".join(value))
+    return values
+
+
+def rate_values(data):
+    """Each knob's value in a config as mangosd takes it: std::stof's leading number, 1 (mangosd's
+    default) when the key is absent or holds none."""
+    read = conf_values(data)
+    out = {}
+    for key in KNOBS:
+        m = LEADING_NUMBER.match(read.get(key, ""))
+        value = float(m.group()) if m else 1.0
+        out[key] = value if math.isfinite(value) else 1.0
+    return out
+
+
+def read_overrides(knobs, say=None):
+    """The menu's rates in rates.conf, key -> value: only lines with a knob of this image and a
+    plain number in its range; say() hears why each other line is dropped."""
+    data = read_file(rates_path()).decode("utf-8", "replace")
+    out = {}
+    for n, raw in enumerate(data.split("\n"), 1):
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        key, eq, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not eq:
+            why = "no '='"
+        elif key not in knobs:
+            why = "this vmangos lacks it" if key in KNOBS else "not a rate the menu sets"
+        elif not PLAIN_NUMBER.fullmatch(value):
+            why = "not a plain number"
+        elif not KNOBS[key][0] <= float(value) <= KNOBS[key][1]:
+            why = f"outside {fmt(KNOBS[key][0])} to {fmt(KNOBS[key][1])}"
+        else:
+            out[key] = clean(float(value))
+            continue
+        if say:
+            say(f"rates.conf line {n} dropped ({why}): {line[:60]!r}")
+    return out
+
+
+def write_overrides(overrides):
+    if not overrides:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(rates_path())
+        return
+    lines = "".join(f"{k} = {fmt(overrides[k])}\n" for k in KNOBS if k in overrides)
+    write_atomic(rates_path(), (RATES_HEADER + lines).encode())
+
+
+def merge(base, overrides):
+    """conf_set's rules (inilla-lib.sh) for each override: the first uncommented line whose key
+    matches in any case becomes `Key = value`, else the line is appended; every other line stays
+    byte for byte."""
+    left = {key.lower().encode(): key for key in overrides}
+    lines = base.split(b"\n")
+    for i, line in enumerate(lines):
+        if not left:
+            break
+        text = line[:-1] if line.endswith(b"\r") else line
+        if COMMENT.match(text) or b"=" not in text:
+            continue
+        key = left.pop(text.split(b"=", 1)[0].strip(b" \t").lower(), None)
+        if key:
+            lines[i] = f"{key} = {fmt(overrides[key])}".encode()
+    out = b"\n".join(lines)
+    extra = "".join(f"{key} = {fmt(overrides[key])}\n" for key in left.values())
+    if extra and out and not out.endswith(b"\n"):
+        out += b"\n"
+    return out + extra.encode()
+
+
+def render(apply, say=None):
+    """The live mangosd.conf: the base, with the menu's rates written in when admin is on."""
+    with open(run_path("mangosd.base.conf"), "rb") as f:
+        base = f.read()
+    overrides = read_overrides(available(), say)
+    if not apply:
+        if overrides and say:
+            say(f"{len(overrides)} admin override(s) not applied (admin off: ADMIN_CODE unusable)")
+        overrides = {}
+    if say:
+        server = rate_values(base)
+        for key, value in overrides.items():
+            say(f"{key} = {fmt(value)} from the admin menu (the server's own: {fmt(server[key])})")
+    live = merge(base, overrides)
+    write_atomic(run_path("mangosd.conf"), live, run_path("mangosd.conf.admin-tmp"))
+
+
+# ---- requests ------------------------------------------------------------------------------------
+
+
+class Fail(Exception):
+    """An answer other than success; keep: the reply stands for its request id (something ran)."""
+
+    def __init__(self, status, error, message, keep=False):
+        super().__init__(message)
+        self.status, self.error, self.message, self.keep = status, error, message, keep
+
+    def body(self):
+        return encode({"ok": False, "error": self.error, "message": self.message})
+
+
+def encode(doc):
+    return json.dumps(doc, separators=(",", ":")).encode()
+
+
+def world_starting():
+    return Fail(503, "world_starting", "The world server is starting: try again in a minute.")
+
+
+def console_busy():
+    return Fail(503, "console_busy", "The world server's console is busy: try again in a moment.")
+
+
+def name_ok(name):
+    """A character name the menu takes: 2 to 12 letters, nothing else."""
+    return isinstance(name, str) and 2 <= len(name) <= 12 and all(c.isalpha() for c in name)
+
+
+def no_constants(word):
+    raise ValueError(f"{word} is not a number")
+
+
+def number(value):
+    """A finite JSON number (not a bool) as a float, or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        value = float(value)
+    except OverflowError:
+        return math.inf
+    return value
+
+
+class World:
+    """Whether mangosd's world port listens (/proc/net/tcp, as the healthcheck reads it): up once it
+    has for WORLD_GRACE, so the console is taking commands."""
+
+    def __init__(self):
+        self.since = None
+        self.lock = threading.Lock()
+
+    def listening(self):
+        for name in ("tcp", "tcp6"):
+            try:
+                with open(proc_net_path(name), encoding="ascii", errors="replace") as f:
+                    if any(LISTENING.search(line) for line in f):
+                        return True
+            except OSError:
+                pass
+        return False
+
+    def up(self):
+        now, on = time.monotonic(), self.listening()
+        with self.lock:
+            if not on:
+                self.since = None
+            elif self.since is None:
+                self.since = now
+            return self.since is not None and now - self.since >= WORLD_GRACE
+
+    def watch(self, stop):
+        while not stop.wait(0.5):
+            self.up()
+
+
+class Console:
+    """mangosd's console through its FIFO, one command at a time (console.lock, shared with
+    vmangos-console): truncate console.log, write the line, read the answer up to `mangos>`.
+
+    A command whose prompt did not come still runs and prints it later. Its writer leaves
+    console.pending, also shared with vmangos-console, holding the offset in console.log past which
+    that prompt will come; the next holder of console.lock waits for it before truncating."""
+
+    @contextlib.contextmanager
+    def session(self, deadline):
+        """console.lock held, and no earlier command still running: else 503 console_busy."""
+        path = run_path("console.lock")
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        except PermissionError:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            end = min(time.monotonic() + LOCK_WAIT, deadline)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= end:
+                        raise console_busy() from None
+                    time.sleep(0.05)
+            self.settle(deadline)
+            yield self
+        finally:
+            os.close(fd)
+
+    def prompt(self, end, offset=0):
+        """console.log once it holds a `mangos>` past offset (anywhere once the log is shorter:
+        truncated since), or None when none came by end."""
+        while True:
+            data = read_file(run_path("console.log"))
+            if data.find(PROMPT, offset if offset <= len(data) else 0) >= 0:
+                return data
+            if time.monotonic() >= end:
+                return None
+            time.sleep(POLL)
+
+    def mark(self):
+        """console.pending (inside a session): the command written has no prompt yet, and it will
+        come anywhere in console.log (truncated before the write)."""
+        write_atomic(run_path("console.pending"), b"0\n")
+
+    def settle(self, deadline):
+        """Wait for the prompt console.pending says is still to come (the log untouched since), then
+        clear it; when it does not come, 503 console_busy and the next one waits again."""
+        path = run_path("console.pending")
+        try:
+            with open(path, "rb") as f:
+                text = f.read(32).strip()
+        except FileNotFoundError:
+            return
+        offset = int(text) if text.isdigit() else 0
+        if self.prompt(min(time.monotonic() + SUSPECT_WAIT, deadline), offset) is None:
+            raise console_busy()
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+
+    def command(self, line, deadline):
+        """One console line, inside a session: its answer without the prompts, or None when no
+        prompt came in time (the command may still run: console.pending says so)."""
+        data = line.encode()
+        # fgets(256) reads 255 bytes with the newline: a longer line splits into two commands.
+        if len(data) > 254 or b"\n" in data or b"\r" in data:
+            raise ValueError("a console line over 254 bytes")
+        self.settle(deadline)
+        log_path = run_path("console.log")
+        with open(log_path, "ab") as f:
+            f.truncate(0)
+        try:
+            fd = os.open(run_path("console.fifo"), os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
+            raise world_starting() from None
+        try:
+            os.write(fd, data + b"\n")
+        except BlockingIOError:
+            raise console_busy() from None
+        finally:
+            os.close(fd)
+        answer = self.prompt(min(time.monotonic() + CONSOLE_TIMEOUT, deadline))
+        if answer is None:
+            self.mark()
+            return None
+        text = answer.decode("utf-8", "replace").replace("mangos>", "")
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def db_rows(sql, timeout, database="characters"):
+    """Rows of a query on a database of the stack's (the mariadb client, the password in MYSQL_PWD),
+    or None when it fails."""
+    if timeout < 0.5:
+        return None
+    cmd = [
+        os.environ.get("INILLA_ADMIN_MARIADB") or "mariadb",
+        "--default-character-set=utf8mb4",
+        "--batch",
+        "--raw",
+        "--skip-column-names",
+        f"--host={os.environ.get('DB_HOST') or 'db'}",
+        f"--port={os.environ.get('DB_PORT') or '3306'}",
+        f"--user={os.environ.get('DB_USER') or 'mangos'}",
+        database,
+        "-e",
+        sql,
+    ]
+    env = {k: v for k, v in os.environ.items() if k not in ("INILLA_ADMIN_CODE", "DB_PASSWORD")}
+    env["MYSQL_PWD"] = os.environ.get("DB_PASSWORD", "")
+    try:
+        r = subprocess.run(
+            cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"{database} database: {type(e).__name__}")
+        return None
+    if r.returncode != 0:
+        first = r.stderr.decode("utf-8", "replace").strip().split("\n")[0]
+        log(f"{database} database: exit {r.returncode}: {first[:120]!r}")
+        return None
+    return [line.split("\t") for line in r.stdout.decode("utf-8", "replace").split("\n") if line]
+
+
+def announcement(values, knobs):
+    """`announce Server rates: XP x2, loot x1.5, gold x1, speed x1.2`: ASCII, numbers only."""
+    parts = []
+    for label, keys in GROUPS:
+        vs = [values[k] for k in keys if k in knobs]
+        if vs:
+            lo, hi = min(vs), max(vs)
+            parts.append(f"{label} x{fmt(lo)}" + (f" to x{fmt(hi)}" if hi != lo else ""))
+    return "announce Server rates: " + ", ".join(parts)
+
+
+def same(a, b):
+    return abs(a - b) < 1e-9
+
+
+class Agent:
+    """The API's state: the lock every mutation and console use takes, the console, the world, and
+    the replies to the last request ids."""
+
+    def __init__(self, code):
+        self.code = code
+        self.lock = threading.Lock()
+        self.console = Console()
+        self.world = World()
+        self.replies = collections.OrderedDict()
+        self.stop = threading.Event()
+        # The realm's LANG_MAIL_SENT texts, once the world database has given them.
+        self.mail_sent = None
+
+    def handle(self, method, path, body, deadline):
+        """(status, reply bytes, what the log line says) for an authorized request."""
+        if (method, path) == ("GET", "/status"):
+            return 200, encode(self.status(deadline)), ""
+        if (method, path) == ("POST", "/rates"):
+            return self.rates(body, deadline)
+        if (method, path) == ("POST", "/rates/reset"):
+            return self.reset(body, deadline)
+        if (method, path) == ("POST", "/gold"):
+            return self.gold(body, deadline)
+        raise Fail(404, "not_found", "No such admin route.")
+
+    def status(self, deadline):
+        knobs = available()
+        server = rate_values(read_file(run_path("mangosd.base.conf")))
+        live = rate_values(read_file(run_path("mangosd.conf")))
+        rates = {
+            k: {"value": num(live[k]), "server": num(server[k]), "min": lo, "max": hi}
+            for k, (lo, hi) in KNOBS.items()
+            if k in knobs
+        }
+        rows = db_rows(
+            "SELECT name, level, race, class FROM characters WHERE online = 1"
+            f" ORDER BY name LIMIT {MAX_PLAYERS}",
+            min(DB_TIMEOUT, deadline - time.monotonic()),
+        )
+        players = []
+        for row in rows or []:
+            with contextlib.suppress(ValueError):
+                name, level, race, cls = row
+                players.append(
+                    {"name": name, "level": int(level), "race": int(race), "class": int(cls)}
+                )
+        return {
+            "ok": True,
+            "world": "up" if self.world.up() else "starting",
+            # Every rate saved, a kept one too: what "Server defaults" drops.
+            "overrides": len(read_overrides(KNOBS)),
+            "rates": rates,
+            "players": players,
+            "players_ok": rows is not None,
+        }
+
+    @contextlib.contextmanager
+    def locked(self, deadline):
+        if not self.lock.acquire(timeout=max(0, min(LOCK_WAIT, deadline - time.monotonic()))):
+            raise console_busy()
+        try:
+            yield
+        finally:
+            self.lock.release()
+
+    def once(self, path, rid, deadline, work, *args):
+        """work(*args) under the lock, unless request id rid has a reply already: then that again."""
+        with self.locked(deadline):
+            if rid and (path, rid) in self.replies:
+                status, reply = self.replies[(path, rid)]
+                return status, reply, "the reply to an earlier request with this id"
+            try:
+                status, doc, note = work(*args)
+                reply, keep = encode(doc), True
+            except Fail as e:
+                status, reply, note, keep = e.status, e.body(), e.error, e.keep
+            if rid and keep:
+                self.replies[(path, rid)] = (status, reply)
+                while len(self.replies) > REPLIES_KEPT:
+                    self.replies.popitem(last=False)
+            return status, reply, note
+
+    def rates(self, body, deadline):
+        rid, announce = request_id(body), flag(body, "announce")
+        wanted = body.get("rates")
+        if not isinstance(wanted, dict):
+            raise Fail(400, "bad_request", '"rates" must be an object of rate: number.')
+        knobs = available()
+        checked = {}
+        for key, value in wanted.items():
+            if key not in knobs:
+                why = "not a rate the admin menu sets"
+                if key in KNOBS:
+                    why = "this server's vmangos has no such setting"
+                raise Fail(400, "unknown_key", f"{key[:64]}: {why}.")
+            v = number(value)
+            if v is None:
+                raise Fail(400, "bad_request", f"{key}: the value must be a number.")
+            lo, hi = KNOBS[key]
+            if not (math.isfinite(v) and lo <= v <= hi):
+                message = f"{key}: the value must be from {fmt(lo)} to {fmt(hi)}."
+                raise Fail(400, "out_of_range", message)
+            checked[key] = clean(v)
+        return self.once("/rates", rid, deadline, self.apply, checked, announce, deadline)
+
+    def reset(self, body, deadline):
+        rid, announce = request_id(body), flag(body, "announce")
+        return self.once("/rates/reset", rid, deadline, self.apply, None, announce, deadline)
+
+    def apply(self, wanted, announce, deadline):
+        """The overrides with wanted in them (None: none at all), rendered, reloaded when a live
+        value moves, then announced when asked."""
+        if not self.world.up():
+            raise world_starting()
+        knobs = available()
+        server = rate_values(read_file(run_path("mangosd.base.conf")))
+        saved = read_overrides(KNOBS)
+        current = {k: v for k, v in saved.items() if k in knobs}
+        # Rates for knobs this image lacks (speed without its patch) stay in rates.conf, unapplied,
+        # for the image that has them; only "Server defaults" drops them.
+        kept = {k: v for k, v in saved.items() if k not in knobs}
+        new = {} if wanted is None else dict(current)
+        for key, value in (wanted or {}).items():
+            if same(value, server[key]):
+                new.pop(key, None)
+            else:
+                new[key] = value
+        target = {k: new.get(k, server[k]) for k in knobs}
+        live = rate_values(read_file(run_path("mangosd.conf")))
+        changed = [k for k in knobs if not same(target[k], live[k])]
+        # What rates.conf is to hold: a reset drops the kept rates too.
+        stored = new if wanted is None else {**kept, **new}
+        if not changed and stored == saved:
+            return 200, dict(self.status(deadline), changed=[]), "no change"
+        note = "changed " + (", ".join(f"{k}={fmt(target[k])}" for k in changed) or "nothing live")
+        with self.console.session(deadline) as console:
+            before = read_file(rates_path()) if os.path.exists(rates_path()) else None
+            write_overrides(stored)
+            try:
+                render(True)
+            except BaseException:
+                if before is None:
+                    write_overrides({})
+                else:
+                    write_atomic(rates_path(), before)
+                raise
+            if changed:
+                answer = console.command("reload config", deadline)
+                if answer is None:
+                    raise Fail(
+                        503,
+                        "console_timeout",
+                        "The world server did not answer in time: the rates are saved and apply "
+                        "once it does. Refresh before trying again.",
+                        keep=True,
+                    )
+                if "World config settings reloaded." not in answer:
+                    log(f"reload config answered {answer[:80]!r}")
+                if announce:
+                    if console.command(announcement(target, knobs), deadline) is None:
+                        log("announce: no prompt in time")
+                    note += ", announced"
+        return 200, dict(self.status(deadline), changed=changed), note
+
+    def gold(self, body, deadline):
+        rid = request_id(body, required=True)
+        copper, to = body.get("copper"), body.get("to")
+        if type(copper) is not int:
+            raise Fail(400, "bad_request", '"copper" must be a whole number.')
+        if not 1 <= copper <= MAX_COPPER:
+            raise Fail(400, "out_of_range", '"copper" must be from 1 to 1000000000 (100000 gold).')
+        if to == "online":
+            names = None
+        elif isinstance(to, list) and 1 <= len(to) <= MAX_NAMES and all(map(name_ok, to)):
+            # Each name once, in any case (str.lower, as send() reads them).
+            names = []
+            for n in to:
+                if all(n.lower() != m.lower() for m in names):
+                    names.append(n)
+        else:
+            message = '"to" must be "online" or 1 to 50 character names (2 to 12 letters).'
+            raise Fail(400, "bad_request", message)
+        return self.once("/gold", rid, deadline, self.send, names, copper, deadline)
+
+    def send(self, names, copper, deadline):
+        """`send money` to each character the database knows, until the deadline."""
+        if not self.world.up():
+            raise world_starting()
+        timeout = min(DB_TIMEOUT, deadline - time.monotonic())
+        # A deleted character keeps its row with deleted_time set (vmangos' Player::DeleteFromDB).
+        if names is None:
+            where = "online = 1"
+        else:
+            hexed = (f"CONVERT(UNHEX('{n.encode().hex()}') USING utf8mb4)" for n in names)
+            where = f"name IN ({', '.join(hexed)})"
+        rows = db_rows(
+            f"SELECT name FROM characters WHERE {where} AND deleted_time IS NULL"
+            f" ORDER BY name LIMIT {MAX_PLAYERS}",
+            min(DB_TIMEOUT, deadline - time.monotonic()),
+        )
+        if rows is None:
+            raise Fail(500, "internal", "The characters database did not answer: nothing was sent.")
+        # The database's own spelling, held to the same rule before it reaches the console. A name
+        # counts in any case (str.lower): mangosd's name maps are exact once normalizePlayerName
+        # has spelled it (first letter upper, the rest lower), so Weiß and Weiss are two
+        # characters, which str.casefold would make one.
+        known = [row[0] for row in rows if row and name_ok(row[0])]
+        if names is None:
+            found, missing = known, []
+        else:
+            spelled = {}
+            for n in known:
+                spelled.setdefault(n.lower(), n)
+            found = [spelled[n.lower()] for n in names if n.lower() in spelled]
+            missing = [n for n in names if n.lower() not in spelled]
+        texts = self.mail_texts(deadline) if found else ()
+        sent, unsure, not_sent = [], [], []
+        for i, name in enumerate(found):
+            if deadline - time.monotonic() < MIN_COMMAND:
+                not_sent = found[i:]
+                break
+            try:
+                with self.console.session(deadline) as console:
+                    answer = console.command(f"send money {name} {GIFT} {copper}", deadline)
+            except Fail:
+                not_sent = found[i:]
+                break
+            # The console names the receiver as normalizePlayerName spells it (playerLink, on the
+            # console: Mcfly for a McFly row), so a line counts in any case (str.lower: "Mail sent
+            # to Weiss" is not Weiß's); anything else (Player not found!, no prompt in time, a log
+            # line run into it) is unsure.
+            own = {t.replace("%s", name).strip().lower() for t in texts}
+            lines = [] if answer is None else answer.splitlines()
+            (sent if any(x.lower() in own for x in lines) else unsure).append(name)
+        note = (
+            f"{copper} copper to {len(found)}: sent {len(sent)}, unsure {len(unsure)}, "
+            f"not sent {len(not_sent)}, missing {len(missing)}"
+        )
+        doc = {"ok": True, "sent": sent, "missing": missing, "unsure": unsure, "not_sent": not_sent}
+        return 200, doc, note
+
+    def mail_texts(self, deadline):
+        """The realm's LANG_MAIL_SENT in each language it has (the console speaks the DBCs'), read
+        from the world database once; the English one while that query fails."""
+        if self.mail_sent is None:
+            columns = ", ".join(f"HEX(CONVERT(IFNULL({c}, '') USING utf8mb4))" for c in LOCALES)
+            rows = db_rows(
+                f"SELECT {columns} FROM mangos_string WHERE entry = {MAIL_SENT}",
+                min(DB_TIMEOUT, deadline - time.monotonic()),
+                os.environ.get("DB_WORLD") or "mangos",
+            )
+            if rows is None:
+                return (MAIL_SENT_ENGLISH,)
+            texts = []
+            for value in rows[0] if rows else ():
+                with contextlib.suppress(ValueError):
+                    text = bytes.fromhex(value).decode("utf-8", "replace").strip()
+                    if text and text not in texts:
+                        texts.append(text)
+            self.mail_sent = tuple(texts) or (MAIL_SENT_ENGLISH,)
+        return self.mail_sent
+
+
+def request_id(body, required=False):
+    rid = body.get("id")
+    if rid is None and not required:
+        return None
+    if not isinstance(rid, str) or not REQUEST_ID.fullmatch(rid):
+        raise Fail(400, "bad_request", '"id" must be 1 to 64 letters, digits and dashes.')
+    return rid
+
+
+def flag(body, key):
+    value = body.get(key, False)
+    if not isinstance(value, bool):
+        raise Fail(400, "bad_request", f'"{key}" must be true or false.')
+    return value
+
+
+# ---- HTTP ----------------------------------------------------------------------------------------
+
+ROUTE_NAMES = {"/status": "status", "/rates": "rates", "/rates/reset": "reset", "/gold": "gold"}
+
+
+def raw_reply(status, reason, body):
+    head = (
+        f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+    )
+    return head.encode() + body
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    timeout = HANDLER_TIMEOUT
+
+    def version_string(self):
+        return "vanillish-admin"
+
+    def log_message(self, format, *args):
+        """The one line per request is answer()'s."""
+
+    def do_GET(self):
+        self.answer("GET")
+
+    def do_POST(self):
+        self.answer("POST")
+
+    def answer(self, method):
+        deadline = time.monotonic() + DEADLINE
+        agent = self.server.agent
+        self.body_read = False
+        try:
+            # Before the body is read, and before anything says which routes exist.
+            if not authorized(self.headers.get("Authorization"), agent.code):
+                raise Fail(401, "admin_auth", "This request does not carry the agent's admin code.")
+            body = self.read_json() if method == "POST" else None
+            status, reply, note = agent.handle(method, self.path, body, deadline)
+        except Fail as e:
+            status, reply, note = e.status, e.body(), e.error
+        except Exception as e:
+            status, note = 500, f"internal: {type(e).__name__}: {str(e)[:120]!r}"
+            message = "The admin agent failed: see docker compose logs mangosd."
+            reply = Fail(500, "internal", message).body()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(reply)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(reply)
+        self.drain()
+        route = ROUTE_NAMES.get(self.path, "unknown")
+        log(f"{method} {route} {status}" + (f" {note}" if note else ""))
+
+    def read_json(self):
+        if self.headers.get("Transfer-Encoding"):
+            raise Fail(400, "bad_request", "Send the body with a Content-Length.")
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            length = -1
+        if length < 0:
+            raise Fail(400, "bad_request", "A POST needs a Content-Length.")
+        if length > MAX_BODY:
+            raise Fail(400, "bad_request", "The body is over 64 KiB.")
+        try:
+            data = self.rfile.read(length)
+        except OSError:
+            data = b""
+        self.body_read = True
+        if len(data) != length:
+            raise Fail(400, "bad_request", "The body ended early.")
+        try:
+            doc = json.loads(data.decode("utf-8"), parse_constant=no_constants)
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise Fail(400, "bad_request", "The body is not JSON.") from None
+        if not isinstance(doc, dict):
+            raise Fail(400, "bad_request", "The body is not a JSON object.")
+        return doc
+
+    def drain(self):
+        """Read a refused request's small body after the answer: a close with unread bytes resets
+        the connection, and the data host would lose the answer."""
+        if self.body_read or self.command != "POST":
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if 0 < length <= MAX_BODY:
+            with contextlib.suppress(OSError):
+                self.connection.settimeout(1)
+                self.rfile.read(length)
+
+
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, address, agent):
+        self.agent = agent
+        self.slots = threading.BoundedSemaphore(MAX_REQUESTS)
+        super().__init__(address, Handler)
+
+    def process_request(self, request, client_address):
+        """A thread per request while fewer than MAX_REQUESTS run; past that, 503 busy at once."""
+        if not self.slots.acquire(blocking=False):
+            message = "The admin agent is busy with other requests: try again."
+            body = Fail(503, "busy", message).body()
+            with contextlib.suppress(OSError):
+                request.setblocking(False)
+                with contextlib.suppress(BlockingIOError):
+                    request.recv(MAX_BODY)
+                request.setblocking(True)
+                request.settimeout(1)
+                request.sendall(raw_reply(503, "Service Unavailable", body))
+                request.shutdown(socket.SHUT_WR)
+            self.shutdown_request(request)
+            log("busy: refused a request")
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def handle_error(self, request, client_address):
+        log(f"a connection failed: {sys.exc_info()[0].__name__}")
+
+
+def make_server(address, code):
+    agent = Agent(code)
+    server = Server(address, agent)
+    threading.Thread(target=agent.world.watch, args=(agent.stop,), daemon=True).start()
+    return server
+
+
+# ---- the commands --------------------------------------------------------------------------------
+
+USAGE = "usage: vanillish-admin render | serve"
+# serve's exit status when the code is not usable: inilla-mangosd does not restart it then.
+NO_CODE = 3
+
+
+def serve():
+    code = os.environ.get("INILLA_ADMIN_CODE", "")
+    if not usable_code(code):
+        print(
+            "[admin] admin menu off: INILLA_ADMIN_CODE is not a usable code (the setup's 16 "
+            "symbols, or 20 or more hex digits from openssl rand -hex 10; not the example)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return NO_CODE
+    port = int(os.environ.get("INILLA_ADMIN_PORT") or 8091)
+    server = make_server(("0.0.0.0", port), code)
+    log(f"listening on port {port}")
+    server.serve_forever()
+    return 0
+
+
+def main(argv):
+    if len(argv) != 2 or argv[1] not in ("render", "serve"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        if argv[1] == "render":
+            render(usable_code(os.environ.get("INILLA_ADMIN_CODE", "")), log)
+            return 0
+        return serve()
+    except KeyboardInterrupt:
+        return 130
+    except Exception as e:
+        log(f"{argv[1]} failed: {type(e).__name__}: {str(e)[:200]}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

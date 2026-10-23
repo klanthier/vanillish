@@ -4,3 +4,6 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
 *.png binary
+
+# Patches to vmangos keep vmangos' own line endings byte for byte (Unit.cpp is CRLF).
+docker/vmangos/patches/*.patch -text

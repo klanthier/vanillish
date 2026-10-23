@@ -4,9 +4,10 @@
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/klanthier/vanillish/klanthier/inilla-android-port/server/setup-mac.sh)"
 #
 # In order: the server's files, in ~/Vanillish-server; this Mac and its Docker (Docker Desktop,
-# OrbStack or Colima); this Mac's address on the network; .env (passwords once, the address on every
-# run); your World of Warcraft 1.12.1 archives, copied once into the Docker volume vanillish-wowdata;
-# the prebuilt images, started and followed until the realm is up; and what to type on the phone.
+# OrbStack or Colima); this Mac's address on the network; .env (passwords and the admin code once,
+# the address on every run); your World of Warcraft 1.12.1 archives, copied once into the Docker
+# volume vanillish-wowdata; the prebuilt images, started and followed until the realm is up; and
+# what to type on the phone.
 # Running it again updates the server and picks up a new address.
 #
 # Linux and WSL run this same file (setup-linux.sh hands over to it), so the two never drift.
@@ -495,6 +496,61 @@ env_get() { # env_get KEY — its value in .env ("" when absent), surrounding qu
     awk -v k="$1" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) }
         END { sub(/\r$/, "", v); if (v ~ /^".*"$/ || v ~ /^'\''.*'\''$/) v = substr(v, 2, length(v) - 2); print v }' "$ENV_FILE"
 }
+# env_compose KEY — KEY's value as compose reads it from .env, for a rule that must see what the
+# containers get (the admin code's): blanks before it dropped; a quoted value up to its closing
+# quote, anything after that left out; an unquoted one cut at a " #" comment (a space, then #: a
+# tab's # is kept, as compose keeps it), blanks after it dropped. ("" when absent.) The blanks are
+# compose's: before it space, tab, VT, FF, CR, U+0085 and U+00A0; after it those and Go's other
+# unicode.IsSpace ones. The non-ASCII ones are matched as their UTF-8 bytes, alike in any awk.
+env_compose() {
+    [ -f "$ENV_FILE" ] || return 0
+    LC_ALL=C awk -v k="$1" '
+        # v without the blanks at its start: the ASCII ones and b[1..n].
+        function ltrim(v, b, n,   i, again) {
+            do {
+                again = sub(/^[ \t\v\f\r]+/, "", v)
+                for (i = 1; i <= n; i++)
+                    if (substr(v, 1, length(b[i])) == b[i]) {
+                        v = substr(v, length(b[i]) + 1)
+                        again = 1
+                    }
+            } while (again)
+            return v
+        }
+        # The same at its end.
+        function rtrim(v, b, n,   i, l, again) {
+            do {
+                again = sub(/[ \t\v\f\r]+$/, "", v)
+                for (i = 1; i <= n; i++) {
+                    l = length(v) - length(b[i])
+                    if (l >= 0 && substr(v, l + 1) == b[i]) {
+                        v = substr(v, 1, l)
+                        again = 1
+                    }
+                }
+            } while (again)
+            return v
+        }
+        index($0, k "=") == 1 { v = substr($0, length(k) + 2) }
+        END {
+            # U+0085 and U+00A0 (the two before a value too), U+1680, U+2000 to U+200A, U+2028,
+            # U+2029, U+202F, U+205F and U+3000.
+            s = "\302\205:\302\240:\341\232\200"
+            s = s ":\342\200\200:\342\200\201:\342\200\202:\342\200\203:\342\200\204:\342\200\205"
+            s = s ":\342\200\206:\342\200\207:\342\200\210:\342\200\211:\342\200\212"
+            s = s ":\342\200\250:\342\200\251:\342\200\257:\342\201\237:\343\200\200"
+            n = split(s, blank, ":")
+            v = ltrim(v, blank, 2)
+            q = substr(v, 1, 1)
+            if (q == "\"" || q == "'\''") {
+                if ((e = index(substr(v, 2), q)) > 0) v = substr(v, 2, e - 1)
+            } else {
+                if ((c = index(v, " #")) > 0) v = substr(v, 1, c - 1)
+                v = rtrim(v, blank, n)
+            }
+            print v
+        }' "$ENV_FILE"
+}
 env_set() { # env_set KEY VALUE — rewrite KEY's line or append it (no sed -i: BSD and GNU differ)
     awk -v k="$1" -v v="$2" 'BEGIN { done = 0 }
         index($0, k "=") == 1 { if (!done) print k "=" v; done = 1; next }
@@ -514,6 +570,40 @@ secret() {
     if [ "${#s}" -ne 32 ]; then s="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; fi
     [ "${#s}" -eq 32 ] || die "could not make a random password"
     printf '%s' "$s"
+}
+# The admin code's 32 letters: no I, O, 0 or 1, which look alike.
+CODE_LETTERS=ABCDEFGHJKLMNPQRSTUVWXYZ23456789
+code_letters() { # decimal bytes on stdin -> a letter each: the low 5 bits (256 = 8 x 32, so uniform)
+    awk -v a="$CODE_LETTERS" '{ for (i = 1; i <= NF; i++) printf "%s", substr(a, $i % 32 + 1, 1) }'
+}
+admin_code() { # the app's admin code: 16 random letters (80 bits), as ABCD-EFGH-JKLM-NPQR
+    local c
+    c="$(od -An -N16 -tu1 /dev/urandom | code_letters)"
+    [ "${#c}" -eq 16 ] || die "could not make an admin code"
+    printf '%s-%s-%s-%s' "${c:0:4}" "${c:4:4}" "${c:8:4}" "${c:12:4}"
+}
+# code_norm CODE — CODE as the data host, the agent and the app read it: no ASCII whitespace (Rust's
+# is_ascii_whitespace: space, tab, LF, FF, CR; a vertical tab is kept, and refused) or dashes, upper case
+code_norm() {
+    printf '%s' "$1" | LC_ALL=C tr -d ' \t\n\r\f-' | LC_ALL=C tr '[:lower:]' '[:upper:]'
+}
+# code_problem CODE — why the data host and the agent refuse CODE (so the admin menu is off), or
+# nothing when they take it: a random code, 16 or more of CODE_LETTERS or 20 or more hex digits
+# (openssl rand -hex 10), not the example's change-me. Never the code itself.
+code_problem() {
+    local n
+    n="$(code_norm "$1")"
+    if [ -n "$(printf '%s' "$n" | LC_ALL=C tr -d 'A-Z0-9')" ]; then
+        printf 'it holds a character other than letters, digits, dashes and spaces'
+    elif [ "${n#CHANGEME}" != "$n" ]; then
+        printf "it is still the example's change-me"
+    elif [ "${#n}" -ge 16 ] && [ -z "$(printf '%s' "$n" | LC_ALL=C tr -d "$CODE_LETTERS")" ]; then
+        :
+    elif [ "${#n}" -ge 20 ] && [ -z "$(printf '%s' "$n" | LC_ALL=C tr -d '0-9A-F')" ]; then
+        :
+    else
+        printf "it is not a random code (the setup's 16 letters, or 20 or more hex digits from openssl rand -hex 10): a hand-picked one can be guessed"
+    fi
 }
 host_tz() { # this machine's time zone (the realm's clock: day and night, resets), else UTC
     local z
@@ -546,8 +636,11 @@ orphan_database() {
       run this again and answer yes, or: docker volume rm ${PROJECT}_db (with its containers removed)"
 }
 
+# ADMIN_NEW: the admin code this run made ("" when it kept one), for the summary to show once.
+# ADMIN_BAD=1: the code it kept is one the data host and the agent refuse (code_problem).
 write_env() {
-    local key cur old db=0 p1 p2 p3
+    local key cur norm old why db=0 p1 p2 p3
+    ADMIN_NEW="" ADMIN_BAD=0
     say "Settings (.env)"
     if docker_ok && docker volume inspect "${PROJECT}_db" >/dev/null 2>&1; then db=1; fi
     if [ ! -f "$ENV_FILE" ] || [ -z "$(env_get DB_ROOT_PASSWORD)" ]; then
@@ -557,6 +650,7 @@ write_env() {
         p1="$(secret)"
         p2="$(secret)"
         p3="$(secret)"
+        ADMIN_NEW="$(admin_code)"
         (umask 077 && : >"$ENV_FILE")
         cat >>"$ENV_FILE" <<EOF
 # The Vanillish server's settings, written by its setup; .env.example explains every one.
@@ -575,8 +669,14 @@ TZ=$(host_tz)
 
 # Accounts made from the app: lan (phones on this network; the default), off, or open.
 INILLA_SIGNUP=lan
+
+# The app's admin menu (the N button, then Settings → Server): the realm's rates, and gold for
+# players. Whoever has the code can use it: keep it to yourself. Empty = no admin menu.
+ADMIN_CODE=$ADMIN_NEW
+# Where the admin menu answers: lan (phones on this network; the default), open, or off.
+INILLA_ADMIN=lan
 EOF
-        info "new database passwords, in $(disp_dir)/.env"
+        info "new database passwords and an admin code, in $(disp_dir)/.env"
     else
         for key in DB_ROOT_PASSWORD DB_PASSWORD SIGNUP_DB_PASSWORD; do
             cur="$(env_get "$key")"
@@ -597,6 +697,26 @@ EOF
                     ;;
             esac
         done
+        # The admin code: made when .env has no ADMIN_CODE line, or still a change-me (read as
+        # compose hands it to the data host, and as the data host reads it: any case, dashes and
+        # spaces left out); an empty one means the menu is off, and stays so.
+        cur="$(env_compose ADMIN_CODE)"
+        norm="$(code_norm "$cur")"
+        if ! grep -q '^ADMIN_CODE=' "$ENV_FILE"; then
+            ADMIN_NEW="$(admin_code)"
+            env_set ADMIN_CODE "$ADMIN_NEW"
+            info "added an admin code for the app's admin menu (an empty ADMIN_CODE= turns it off)"
+        elif [ "${norm#CHANGEME}" != "$norm" ]; then
+            ADMIN_NEW="$(admin_code)"
+            env_set ADMIN_CODE "$ADMIN_NEW"
+            info "replaced the example ADMIN_CODE with a new one"
+        elif [ -n "$cur" ]; then
+            why="$(code_problem "$cur")"
+            if [ -n "$why" ]; then
+                ADMIN_BAD=1
+                warn "the ADMIN_CODE in .env is not usable, so the admin menu is off: $why"
+            fi
+        fi
         if [ -z "$(env_get REALM_NAME)" ]; then env_set REALM_NAME Vanillish; fi
         if [ -z "$(env_get TZ)" ]; then env_set TZ "$(host_tz)"; fi
         old="$(env_get REALM_ADDRESS)"
@@ -1128,8 +1248,10 @@ extract_env() {
         sed -n "s/^$1=//p" | sed -n 1p || true
 }
 
+# STACK_APPLIED=1: this run's `docker compose up` ran, so the containers have this run's .env.
 start_stack() {
     local st later_mm log pid rc=0
+    STACK_APPLIED=0
     say "Starting the server"
     if [ "$DRY" = 1 ]; then
         note "(dry run: would run: docker compose pull, then docker compose up -d --wait, and follow it)"
@@ -1154,8 +1276,11 @@ start_stack() {
             if all_up "$st"; then
                 :
             elif has_marker .inilla-vmaps; then
-                docker compose up -d --no-deps db realmd mangosd datahost >/dev/null 2>&1 ||
+                if docker compose up -d --no-deps db realmd mangosd datahost >/dev/null 2>&1; then
+                    STACK_APPLIED=1
+                else
                     warn "could not start the realm beside it: docker compose ps"
+                fi
                 watch_start ready "" "" 900 || warn "the realm is slow to come up: docker compose ps"
             else
                 warn "the world server waits for the map extraction: run this again in a few minutes"
@@ -1205,6 +1330,7 @@ start_stack() {
         diagnose
         die "the server did not come up. Its logs: cd $(disp_dir) && docker compose logs"
     fi
+    STACK_APPLIED=1
     info "${G}up${N}: realmd (logon), mangosd (the world) and the data host all answer"
 }
 
@@ -1328,6 +1454,27 @@ box() { # box LINE… — a frame around the lines (ASCII inside, so the width c
     printf '  %s%s%s%s%s\n' "$G" "$bl" "$bar" "$br" "$N"
 }
 
+# The admin code's line: the code itself only when this run made it, and never in a dry run (its
+# output is for sharing); else where it is, or why the data host refuses it. A code made on a run
+# that started nothing (the pathfinding still runs) is live from the next run. Nothing when .env
+# has none (no admin menu).
+admin_note() {
+    local says="Admin code (in Vanillish: the N button, then Settings → Server):"
+    if [ "${ADMIN_BAD:-0}" = 1 ]; then
+        printf '\n  %s ADMIN_CODE in %s/.env is not usable, so the admin menu is off:\n' "$says" "$(disp_dir)"
+        printf '  %s.\n' "$(code_problem "$(env_compose ADMIN_CODE)")"
+        printf '  For a new one, set ADMIN_CODE=change-me there and run the setup again (ADMIN_CODE= keeps it off).\n'
+    elif [ -n "${ADMIN_NEW:-}" ] && [ "$DRY" = 0 ]; then
+        printf '\n  %s %s%s%s\n' "$says" "$B" "$ADMIN_NEW" "$N"
+        printf "  It sets the realm's rates and gives gold: keep it to yourself (ADMIN_CODE in %s/.env).\n" "$(disp_dir)"
+        if [ "${STACK_APPLIED:-0}" = 0 ]; then
+            printf '  It takes effect after the next run of the setup, once the pathfinding is done.\n'
+        fi
+    elif [ -n "${ADMIN_NEW:-}" ] || [ -n "$(env_compose ADMIN_CODE)" ]; then
+        printf '\n  %s ADMIN_CODE in %s/.env\n' "$says" "$(disp_dir)"
+    fi
+}
+
 summary() {
     local dd setup also=""
     dd="$(disp_dir)"
@@ -1350,6 +1497,7 @@ summary() {
     if [ -n "$KEEP" ]; then
         printf '\n  %sTo keep it reachable:%s\n%s' "$B" "$N" "$KEEP"
     fi
+    admin_note
     cat <<EOF
 
   ${B}Everyday${N} (in a Terminal):
@@ -1358,6 +1506,7 @@ summary() {
     update it, or after the
     address changed           $setup
     make an account a GM      cd $dd && docker compose exec mangosd vmangos-console account set gmlevel NAME 6
+    see the admin code        cd $dd && grep ADMIN_CODE .env
     the world server's log    cd $dd && docker compose logs -f mangosd
     remove everything         $setup --uninstall
 
@@ -1388,6 +1537,13 @@ uninstall() {
     say "Done."
 }
 
+# masked_env FILE — the .env as a dry run shows it: the passwords, the admin code and the data token
+# hidden (an empty code or token shown, as the switch it is).
+masked_env() {
+    sed -e 's/^\([A-Z_]*PASSWORD\)=.*/\1=…/' -e 's/^\(ADMIN_CODE\)=..*/\1=…/' \
+        -e 's/^\(INILLA_DATA_TOKEN\)=..*/\1=…/' "$1"
+}
+
 # ---- main --------------------------------------------------------------------------------------
 
 main() {
@@ -1401,7 +1557,8 @@ main() {
     mkdir "$TMP/empty"
     trap 'rm -rf "$TMP"' EXIT
     trap on_interrupt INT
-    DOCKER_OK=0 RUNTIME="" LOCALNAME="" KEEP="" STAGE="" UPPID="" PORT=8099
+    DOCKER_OK=0 RUNTIME="" LOCALNAME="" KEEP="" STAGE="" UPPID="" PORT=8099 ADMIN_NEW="" ADMIN_BAD=0
+    STACK_APPLIED=0
     if [ "$UNINSTALL" = 1 ]; then
         uninstall
         return 0
@@ -1435,8 +1592,8 @@ main() {
     start_mmaps
     after_checks
     if [ "$DRY" = 1 ]; then
-        say "The .env it would write (passwords hidden)"
-        sed -e 's/^\([A-Z_]*PASSWORD\)=.*/\1=…/' "$ENV_FILE" | sed 's/^/    /'
+        say "The .env it would write (secrets hidden)"
+        masked_env "$ENV_FILE" | sed 's/^/    /'
     fi
     summary
 }

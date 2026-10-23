@@ -12,8 +12,9 @@
 # Published on BIND_ADDR (all interfaces by default), for the phone:
 #   3724  realmd    — logon
 #   8085  mangosd   — world (handed out by realmd as REALM_ADDRESS:MANGOSD_PORT)
-#   8099  datahost  — what the app reads first (/server.json), "Create account", and the game data
-# The database is never published.
+#   8099  datahost  — what the app reads first (/server.json), "Create account", the game data, and
+#                     the app's admin menu (ADMIN_CODE)
+# The database and the admin agent beside mangosd (8091) are never published.
 
 name: vanillish
 
@@ -21,7 +22,7 @@ x-vmangos: &vmangos
   # Pulled when the registry has this tag, built from docker/vmangos/ when it does not: compose does
   # that by itself for a service with both image and build and no pull_policy. The -rN suffix moves
   # whenever docker/vmangos/ changes (server-images.yml refuses to republish a tag with other inputs).
-  image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-vmangos:${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}-r1
+  image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-vmangos:${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}-r2
   build:
     context: .
     dockerfile: docker/vmangos/Dockerfile
@@ -120,10 +121,19 @@ services:
         condition: service_completed_successfully
       extract:
         condition: service_completed_successfully
+    # The admin menu's agent (vanillish-admin, started beside mangosd on 8091, for the data host
+    # alone) takes requests signed with ADMIN_CODE; mangosd itself runs without it. Here, not in
+    # x-vmangos: realmd, db-init and extract never get it.
+    environment:
+      <<: *db-env
+      INILLA_ADMIN_CODE: ${ADMIN_CODE:-}
     volumes:
       - ./config:/config:ro
       - serverdata:/vmangos/data:ro
       - logs:/vmangos/logs
+      # The rates the admin menu set: they win over config/mangosd.conf, across restarts, until its
+      # "Server defaults".
+      - admin:/vmangos/admin
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${MANGOSD_PORT:-8085}:8085"
     # mangosd saves every character on SIGTERM; never cut that short.
@@ -144,7 +154,7 @@ services:
   # your own (see addons/README.md). It starts without any game data: server.json and sign-up work
   # before the archives are imported.
   datahost:
-    image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-datahost:0.3.0
+    image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-datahost:0.4.0
     build:
       context: datahost
     restart: unless-stopped
@@ -192,6 +202,15 @@ services:
       INILLA_SIGNUP_DB_USER: vanillish_signup
       INILLA_SIGNUP_DB_PASSWORD: ${SIGNUP_DB_PASSWORD:?set SIGNUP_DB_PASSWORD in .env}
       INILLA_SIGNUP_DB_NAME: realmd
+      # The app's admin menu (the N button, then Settings → Server): the XP, loot, gold and speed
+      # rates, live, and gold for players. Off while ADMIN_CODE is empty. The code never travels:
+      # each request is signed with it, and the data host hands only the good ones on to the agent
+      # in mangosd. lan = asked from a private network, open = from anywhere 8099 reaches, off = no
+      # menu. Docker Desktop, OrbStack and a proxy show every client at a private address, so there
+      # lan lets everyone try: the code is the guard.
+      INILLA_ADMIN_CODE: ${ADMIN_CODE:-}
+      INILLA_ADMIN: ${INILLA_ADMIN:-lan}
+      INILLA_ADMIN_AGENT: mangosd:8091
     depends_on:
       # The sign-up user. Not extract or mangosd: no game data needed.
       db-init:
@@ -217,6 +236,8 @@ volumes:
   serverdata:
   logs:
   datahost:
+  # The admin menu's rates (mangosd's /vmangos/admin/rates.conf).
+  admin:
   # The player's own archives, imported once by the setup script (never in an image). External, so
   # `docker compose down -v` (a fresh realm) keeps them; `docker volume rm vanillish-wowdata` removes
   # them. Unused when WOW_DATA_DIR names a folder; without one, `up` needs the volume to exist, even

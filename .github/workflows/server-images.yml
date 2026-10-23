@@ -16,7 +16,9 @@
 #           never pull the change. Move the tag (-rN for vmangos, the version for the datahost), or
 #           run this by hand with `republish` to overwrite it.
 # Either way, before anything is tagged, each platform runs server/ci/check.sh on its own images: the
-# stack with no game data, sign-up and an SRP6 logon (server-check.yml leaves these branches to this).
+# stack with no game data, sign-up, an SRP6 logon and the admin menu's door (server-check.yml leaves
+# these branches to this). prepare first runs the tests of the admin agent the vmangos image carries,
+# and the vmangos build is strict: a Vanillish patch that does not apply to the pinned commit fails it.
 #
 # Nothing from a WoW client is ever in a build context (server/.dockerignore).
 name: server-images
@@ -65,6 +67,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: The admin agent (vanillish-admin, in the vmangos image)
+        run: |
+          python3 -I -m py_compile server/docker/vmangos/bin/vanillish-admin
+          python3 -I server/ci/admin_test.py
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -188,6 +195,7 @@ jobs:
             VMANGOS_COMMIT=${{ needs.prepare.outputs.vmangos_commit }}
             VMANGOS_DB_URL=${{ needs.prepare.outputs.db_url }}
             VMANGOS_DB_SHA256=${{ needs.prepare.outputs.db_sha256 }}
+            VANILLISH_PATCHES=strict
           # source names this repository (GHCR links the package to it); revision stays the vmangos
           # commit the image packages, this repository's commit is vanillish.revision.
           labels: |

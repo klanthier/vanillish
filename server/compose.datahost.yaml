@@ -1,6 +1,7 @@
 # Only the data host, for a mangos server you already run (vmangos, cMaNGOS, anything 1.12.1 with
 # Warden off). It hands the Vanillish and iNilla apps the game data and pfQuest; your server does
-# the rest, accounts included (sign-up is off here: this host has no database to add them to).
+# the rest, accounts included (sign-up is off here: this host has no database to add them to), and
+# there is no admin menu (it needs compose.yaml's mangosd).
 #
 #   WOW_DATA_DIR="/path/to/WoW 1.12.1/Data" docker compose -f compose.datahost.yaml up -d
 #
@@ -12,7 +13,7 @@ name: vanillish-datahost
 
 services:
   datahost:
-    image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-datahost:0.3.0
+    image: ${VANILLISH_REGISTRY:-ghcr.io/klanthier}/vanillish-datahost:0.4.0
     build:
       context: datahost
     restart: unless-stopped

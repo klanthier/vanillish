@@ -2,12 +2,15 @@
 # on its own architecture (ubuntu-24.04, ubuntu-24.04-arm: no QEMU):
 #
 # - lint: shellcheck over the images' scripts and server/ci, the Python tools compile and match
-#   benilla-srp's golden verifier, both compose files resolve, compose.yaml's pins agree (pins.sh),
-#   and image-state.sh and pins.sh give the right verdicts on made-up cases (test_ci_tools.sh);
+#   benilla-srp's golden verifier and the admin MAC's shared vectors, the admin agent compiles and
+#   passes its tests (admin_test.py), both compose files resolve, compose.yaml's pins agree
+#   (pins.sh), and image-state.sh and pins.sh give the right verdicts on made-up cases
+#   (test_ci_tools.sh);
 # - stack: compose.yaml's db, db-init, realmd and data host on an empty Data folder, then
 #   server/ci/check.sh: the sign-up user's grants (what it can and cannot do), GET /server.json,
 #   POST /accounts (created, replay, name taken, invalid bodies, the rate limit, a token, sign-up
-#   off) and an SRP6 logon to realmd with the account the data host made, the realm in its list.
+#   off), an SRP6 logon to realmd with the account the data host made, the realm in its list, and
+#   the admin menu's door (a nonce, the MAC missing, wrong, replayed and right, INILLA_ADMIN=off).
 #
 # The images: the published tag when it holds exactly this checkout's files (image-state.sh), else
 # built here. Pushes to main and klanthier/** run the same check in server-images.yml, before it
@@ -45,6 +48,7 @@ jobs:
 
       - name: Shell scripts
         # -x: the roles source inilla-lib.sh (installed at /usr/local/bin, found beside them here).
+        # vanillish-admin, beside them, is Python: inilla-* leaves it to the steps below.
         run: |
           shellcheck --version | sed -n 2p
           shellcheck -x -P SCRIPTDIR -S warning \
@@ -52,8 +56,14 @@ jobs:
 
       - name: Python tools (standard library only)
         run: |
-          python3 -I -m py_compile server/ci/srp6.py server/ci/accounts_e2e.py
+          python3 -I -m py_compile server/ci/srp6.py server/ci/accounts_e2e.py server/ci/admin_e2e.py
           python3 server/ci/srp6.py golden
+          python3 -I server/ci/admin_e2e.py vectors
+
+      - name: The admin agent (vanillish-admin, in the vmangos image)
+        run: |
+          python3 -I -m py_compile server/docker/vmangos/bin/vanillish-admin
+          python3 -I server/ci/admin_test.py
 
       - name: Compose files resolve
         working-directory: server
@@ -117,11 +127,13 @@ jobs:
           context: server
           file: server/docker/vmangos/Dockerfile
           platforms: ${{ matrix.platform }}
-          # compose.yaml's pins, as a local `up` builds it (empty dump pins: db_latest now).
+          # compose.yaml's pins, as a local `up` builds it (empty dump pins: db_latest now); strict:
+          # a Vanillish patch that does not apply to the pinned commit fails the build.
           build-args: |
             VMANGOS_COMMIT=${{ steps.images.outputs.vmangos_commit }}
             VMANGOS_DB_URL=${{ steps.images.outputs.db_url }}
             VMANGOS_DB_SHA256=${{ steps.images.outputs.db_sha256 }}
+            VANILLISH_PATCHES=strict
           provenance: false
           load: true
           tags: ${{ steps.images.outputs.vmangos_ref }}

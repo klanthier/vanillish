@@ -1,25 +1,29 @@
 //! **`GET /server.json`**: what this server is, for the app's one-field Connect: the logon port,
-//! the realm, the core, the game data it serves and whether it takes sign-ups. Always open, like
-//! `/`: it holds no secret, and it is how the app learns that the data needs a token.
+//! the realm, the core, the game data it serves, whether it takes sign-ups and has an admin menu.
+//! Always open, like `/`: it holds no secret, and it is how the app learns that the data needs a
+//! token.
 //!
 //! ```json
-//! {"format":1,"name":"Vanillish","software":"vanillish-datahost 0.3.0","core":"vmangos","build":5875,
+//! {"format":1,"name":"Vanillish","software":"vanillish-datahost 0.4.0","core":"vmangos","build":5875,
 //!  "auth":{"port":3724},
 //!  "realms":[{"name":"Vanillish","kind":"pve","world":{"address":"192.168.1.20","port":8085,"same_host":true}}],
 //!  "data":{"url":"","token":false,"default":"enUS","locales":[{"locale":"enUS","path":"enUS/","bytes":5400000000,"addons":1}]},
 //!  "registration":{"open":true,"url":"accounts","token":false,"credentials":"srp6",
 //!                  "name_min":3,"name_max":16,"password_min":6,"password_max":16},
+//!  "admin":{"url":"admin/","open":true},
 //!  "message":"optional sentence"}
 //! ```
 //!
 //! Only what the operator said is written: no `auth` without a realm or a logon port (a data host
-//! alone), no `data` without archives, no `registration` with sign-up off. The `url`s are relative
-//! to where the app fetched this document, so a reverse proxy or another port can host either.
+//! alone), no `data` without archives, no `registration` with sign-up off, no `admin` with the
+//! admin menu off. The `url`s are relative to where the app fetched this document, so a reverse
+//! proxy or another port can host any of them.
 //! The app reads it as `inilla_core::connect::ServerInfo`; a change of shape lands there too.
 
 use serde::Serialize;
 
 use crate::accounts::Registration;
+use crate::admin::Section;
 use crate::manifest::CLIENT_BUILD;
 
 /// The layout of the document. The app refuses another number ("update the app").
@@ -99,6 +103,8 @@ struct Document<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     registration: Option<&'a Registration>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    admin: Option<&'a Section>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'a str>,
 }
 
@@ -136,12 +142,13 @@ struct Data<'a> {
 
 /// The document. `locales` are the languages this host serves game data in (none: no `data`),
 /// `data_token` whether the data needs the host's token, `registration` the sign-up block when
-/// sign-up is on.
+/// sign-up is on, `admin` the admin menu's when it is on.
 pub fn server_json(
     realm: &Realm,
     locales: &[Locale],
     data_token: bool,
     registration: Option<&Registration>,
+    admin: Option<&Section>,
 ) -> String {
     let knows_logon =
         realm.realm_name.is_some() || realm.auth_port.is_some() || realm.auth_host.is_some();
@@ -180,6 +187,7 @@ pub fn server_json(
             locales: l.locales,
         }),
         registration,
+        admin,
         message: realm.message.as_deref(),
     };
     serde_json::to_string(&doc).unwrap_or_default()
@@ -237,28 +245,32 @@ mod tests {
             &en(),
             false,
             Some(&Registration::srp6(true, false)),
+            Some(&Section {
+                url: "admin/",
+                open: true,
+            }),
         );
         assert_eq!(
             text,
-            r#"{"format":1,"name":"Vanillish","software":"vanillish-datahost 0.3.0","core":"vmangos","build":5875,"auth":{"port":3724},"realms":[{"name":"Vanillish","kind":"pve","world":{"address":"192.168.1.20","port":8085,"same_host":true}}],"data":{"url":"","token":false,"default":"enUS","locales":[{"locale":"enUS","path":"enUS/","bytes":5400000000,"addons":1}]},"registration":{"open":true,"url":"accounts","token":false,"credentials":"srp6","name_min":3,"name_max":16,"password_min":6,"password_max":16},"message":"optional sentence"}"#
+            r#"{"format":1,"name":"Vanillish","software":"vanillish-datahost 0.4.0","core":"vmangos","build":5875,"auth":{"port":3724},"realms":[{"name":"Vanillish","kind":"pve","world":{"address":"192.168.1.20","port":8085,"same_host":true}}],"data":{"url":"","token":false,"default":"enUS","locales":[{"locale":"enUS","path":"enUS/","bytes":5400000000,"addons":1}]},"registration":{"open":true,"url":"accounts","token":false,"credentials":"srp6","name_min":3,"name_max":16,"password_min":6,"password_max":16},"admin":{"url":"admin/","open":true},"message":"optional sentence"}"#
         );
     }
 
     #[test]
     fn a_data_host_alone_says_only_what_it_knows() {
-        let v = parse(&server_json(&Realm::default(), &en(), true, None));
+        let v = parse(&server_json(&Realm::default(), &en(), true, None, None));
         assert_eq!(v["name"], "Vanillish");
         assert_eq!(v["build"], 5875);
         assert_eq!(v["data"]["token"], true);
         assert_eq!(v["data"]["default"], "enUS");
-        for absent in ["core", "auth", "realms", "registration", "message"] {
+        for absent in ["core", "auth", "realms", "registration", "admin", "message"] {
             assert!(v.get(absent).is_none(), "{absent}: {v}");
         }
     }
 
     #[test]
     fn without_archives_there_is_no_data_block() {
-        let v = parse(&server_json(&stack(), &[], false, None));
+        let v = parse(&server_json(&stack(), &[], false, None, None));
         assert!(v.get("data").is_none());
         assert_eq!(v["realms"][0]["name"], "Vanillish");
         assert!(Locales::of(&[]).is_none());
@@ -272,7 +284,7 @@ mod tests {
             realm_name: Some("Elsewhere".into()),
             ..Realm::default()
         };
-        let v = parse(&server_json(&realm, &[], false, None));
+        let v = parse(&server_json(&realm, &[], false, None, None));
         assert_eq!(
             v["name"], "Kevin's",
             "the server's name wins over the realm's"
@@ -286,7 +298,7 @@ mod tests {
             auth_port: Some(3725),
             ..Realm::default()
         };
-        let v = parse(&server_json(&port_only, &[], false, None));
+        let v = parse(&server_json(&port_only, &[], false, None, None));
         assert_eq!(v["auth"], json!({"port": 3725}));
         assert!(v.get("realms").is_none());
     }

@@ -5,31 +5,136 @@
 #   docker compose exec mangosd vmangos-console account set gmlevel NAME 6
 #   docker compose exec mangosd vmangos-console announce Restart in 5 minutes
 #
-# Without arguments, reads one command per line from stdin.
+# Without arguments, reads one command per line from stdin (a CRLF line ending is fine, a blank line
+# is skipped, the last one needs no newline), and exits 1 when any of them failed.
+#
+# A command waits for the world to be up, as the admin agent does: within its 20 s, else it exits 1
+# unsent ("the world is still loading"), the commands after it too.
 set -euo pipefail
-fifo=/run/vmangos/console.fifo
-out=/run/vmangos/console.log
+# INILLA_ADMIN_RUN_DIR and INILLA_ADMIN_PROC_NET move the folder and /proc/net for
+# server/ci/admin_test.py, as for the agent; the image never sets them.
+dir="${INILLA_ADMIN_RUN_DIR:-/run/vmangos}"
+net="${INILLA_ADMIN_PROC_NET:-/proc/net}"
+fifo=$dir/console.fifo
+out=$dir/console.log
+# One command at a time, shared with the admin agent (vanillish-admin): each truncates $out.
+lock=$dir/console.lock
+# A command whose prompt did not come still runs and prints it later. Its writer (this script or the
+# agent) leaves this file, holding the offset in $out past which that prompt will come, and the next
+# holder of the lock waits for it before truncating $out.
+pending=$dir/console.pending
+written=
+# Set once this run has seen the world up: a later command only checks that its port still listens.
+up=
 
 [ -p "$fifo" ] || { echo "vmangos-console: mangosd's console is not running in this container" >&2; exit 1; }
 
-run() {
-    local cmd="$1"
-    # mangosd's output is appended (O_APPEND) to $out, so after truncating it the answer to this
-    # command starts at byte 0. The console prints its `mangos>` prompt when the command is done.
-    : >"$out"
-    printf '%s\n' "$cmd" >"$fifo"
-    for _ in $(seq 1 150); do
-        sleep 0.1
-        grep -q 'mangos>' "$out" && break
+# Whether mangosd's world port, 8085 (0x1F95), listens: the healthcheck's pattern, tcp6 too.
+listening() {
+    grep -Eqs ':1F95 0+:0000 0A' "$net/tcp" "$net/tcp6"
+}
+
+# Whether the world is up by second $1 (of $SECONDS): its port listening for 2 s, as the agent
+# counts it (WORLD_GRACE). mangosd opens the port once the world has loaded, just after its console
+# printed its first `mangos>`, which is no command's answer.
+world_up() {
+    local seen=0
+    while [ "$SECONDS" -lt "$1" ]; do
+        if ! listening; then
+            seen=0 up=
+        elif [ -n "$up" ] || [ "$seen" -ge 4 ]; then
+            up=1
+            return 0
+        else
+            seen=$((seen + 1))
+        fi
+        sleep 0.5
     done
-    sed -e 's/mangos>//g' "$out" | sed -e '/^[[:space:]]*$/d'
-    grep -q 'mangos>' "$out" || echo "vmangos-console: no prompt after 15 s — is the world still loading?" >&2
+    return 1
+}
+
+# Whether $out holds a `mangos>` past byte $1 (anywhere once it is shorter: truncated since).
+prompted() {
+    local from=$(($1 + 1))
+    [ "$(wc -c <"$out")" -ge "$1" ] || from=1
+    [[ "$(tail -c +"$from" "$out")" == *'mangos>'* ]]
+}
+
+# The command written has no prompt yet (inside the lock): the next holder waits for it.
+mark() {
+    rm -f "$pending"
+    echo 0 >"$pending"
+}
+
+# Stopped (Ctrl-C) between the write and the prompt: the command still runs.
+stopped() {
+    [ -z "$written" ] || mark
+    exit "$1"
+}
+trap 'stopped 130' INT
+trap 'stopped 143' TERM
+trap 'stopped 129' HUP
+
+# The length of $1 in bytes, not characters.
+bytes() {
+    local LC_ALL=C
+    echo "${#1}"
+}
+
+run() {
+    local cmd="$1" end=$((SECONDS + 20)) off left
+    # mangosd's console reads a line with fgets(256), 255 bytes with its newline: the rest of a
+    # longer one, or a second line, would run later, inside the next writer's answer.
+    if [ "$(bytes "$cmd")" -gt 254 ] || [[ "$cmd" == *$'\n'* ]]; then
+        echo "vmangos-console: a command is one line of at most 254 bytes" >&2
+        return 1
+    fi
+    # Before the lock, which the agent may want meanwhile; the rest of the 20 s goes to the lock.
+    if ! world_up "$end"; then
+        echo "vmangos-console: the world is still loading: try again in a minute" >&2
+        exit 1
+    fi
+    left=$((end - SECONDS))
+    [ "$left" -ge 1 ] || left=1
+    {
+        flock -w "$left" 9 || { echo "vmangos-console: the console stayed busy for 20 s" >&2; return 1; }
+        if [ -e "$pending" ]; then
+            off="$(cat "$pending" 2>/dev/null)" || off=0
+            [[ "$off" =~ ^[0-9]{1,15}$ ]] || off=0
+            until prompted "$off"; do
+                if [ "$SECONDS" -ge "$end" ]; then
+                    echo "vmangos-console: an earlier command is still running: try again later" >&2
+                    return 1
+                fi
+                sleep 0.1
+            done
+            rm -f "$pending"
+        fi
+        # mangosd's output is appended (O_APPEND) to $out, so after truncating it the answer to this
+        # command starts at byte 0. The console prints its `mangos>` prompt when the command is done.
+        : >"$out"
+        printf '%s\n' "$cmd" >"$fifo"
+        written=1
+        for _ in $(seq 1 150); do
+            sleep 0.1
+            grep -q 'mangos>' "$out" && break
+        done
+        sed -e 's/mangos>//g' "$out" | sed -e '/^[[:space:]]*$/d'
+        if ! grep -q 'mangos>' "$out"; then
+            mark
+            echo "vmangos-console: no prompt after 15 s: the command still runs (docker compose logs mangosd)" >&2
+        fi
+        written=
+    } 9>>"$lock"
 }
 
 if [ $# -gt 0 ]; then
     run "$*"
 else
-    while IFS= read -r line; do
-        [ -n "$line" ] && run "$line"
+    rc=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [ -z "$line" ] || run "$line" || rc=$?
     done
+    exit "$rc"
 fi

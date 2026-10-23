@@ -1,9 +1,11 @@
-# The vmangos image's build context is this directory, and it copies docker/vmangos/bin/ alone. So
-# the context is that folder and nothing else: no Blizzard file (a Data folder or an archive dropped
-# in here by mistake), no .env with the database passwords, no build output. The lines after the
-# exception keep those out even of docker/vmangos/bin/ itself.
+# The vmangos image's build context is this directory, and it copies docker/vmangos/bin/ and
+# docker/vmangos/patches/ alone. So the context is those two folders and nothing else: no Blizzard
+# file (a Data folder or an archive dropped in here by mistake), no .env with the database passwords
+# and the admin code, no build output. The lines after the exceptions keep those out even of the two
+# folders themselves, and Python's bytecode cache too (py_compile of vanillish-admin leaves one).
 *
 !docker/vmangos/bin/
+!docker/vmangos/patches/
 **/*.MPQ
 **/*.mpq
 # Any case, and a download's partial file (`dbc.MPQ.part`), as in datahost/.dockerignore.
@@ -13,3 +15,4 @@
 .env
 **/.env
 **/target/
+**/__pycache__/

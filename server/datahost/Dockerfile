@@ -2,8 +2,9 @@
 #
 # inilla-datahost (vanillish-datahost): serves the client's Data folder, and the addons that go with
 # it, to the app; describes the server in /server.json; creates player accounts in realmd's
-# database (see src/main.rs). A static musl binary, pure Rust (no TLS, no C libraries), so it
-# builds natively on amd64 and arm64 alike. Build context is this directory: never a Data folder.
+# database; passes the owner's admin menu on to the world server (see src/main.rs). A static musl
+# binary, pure Rust (no TLS, no C libraries), so it builds natively on amd64 and arm64 alike. Build
+# context is this directory: never a Data folder.
 
 FROM rust:1-alpine AS build
 RUN apk add --no-cache musl-dev
