@@ -3,12 +3,12 @@
 This repository is **Vanillish**, iNilla built for Android (the Galaxy Z Fold8 Ultra first). Ours:
 `crates/vanillish-android` (the app's `libvanillish.so` and its JNI exports), `android/` (the Gradle
 project, the Java side, the build scripts), `crates/inilla-platform/src/android/`, the new Android
-modules in iNilla's crates (`inilla-core`'s `fold`, `import` and `connect`, `inilla-platform`'s
-`gamepad/android`, `pointer`, `picker`, `benilla-app`'s
-`inilla::{android,screen,host_pointer,connect}` and `inilla/ui/{words,connect}.rs`), `server/`
-(iNilla-server, taken in at 990cc15) and the `vanillish-*` and `server-*` workflows. Everything
-else is iNilla's or upstream benilla's, merged in (`docs/UPSTREAM.md`). Read `docs/ANDROID.md`
-first, then `docs/ANDROID-BUILD.md`, and `server/README.md` for the server.
+modules in iNilla's crates (`inilla-core`'s `fold`, `import`, `connect` and `admin`,
+`inilla-platform`'s `gamepad/android`, `pointer`, `picker`, `benilla-app`'s
+`inilla::{android,screen,host_pointer,connect,admin}` and `inilla/ui/{words,connect,admin}.rs`),
+`server/` (iNilla-server, taken in at 990cc15) and the `vanillish-*` and `server-*` workflows.
+Everything else is iNilla's or upstream benilla's, merged in (`docs/UPSTREAM.md`). Read
+`docs/ANDROID.md` first, then `docs/ANDROID-BUILD.md`, and `server/README.md` for the server.
 
 - Rust → Java: static methods on `io.github.klanthier.vanillish.Bridge`, through
   `inilla_platform::android::{call_bridge, call_bridge_void, with_env}`; never `FindClass`, never a

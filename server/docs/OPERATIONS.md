@@ -66,15 +66,23 @@ docker compose exec mangosd vmangos-console announce Server restarts in 10 minut
 docker compose exec mangosd vmangos-console help
 ```
 
-The world has to be loaded first. When `docker compose ps` shows mangosd as `healthy`, it is.
+Given no command, it reads them from stdin, one per line (a blank line is skipped), and exits
+non-zero only when one of them failed:
+`docker compose exec -T mangosd vmangos-console < commands.txt`.
+
+The world has to be loaded first. When `docker compose ps` shows mangosd as `healthy`, it is. A
+command waits up to 20 s for it, then gives up with nothing sent ("the world is still loading").
+Each run of `vmangos-console` takes 2 s before its first command even then: the world port has to
+have listened that long.
 
 ## Settings
 
 | what | where | apply with |
 |---|---|---|
-| realm name and type (pve/pvp/rp/rppvp), ports, sign-up, the data token | `.env` | the setup, or `docker compose up -d` |
+| realm name and type (pve/pvp/rp/rppvp), ports, sign-up, the data token, the admin code (`ADMIN_CODE`) and where the admin menu answers (`INILLA_ADMIN`) | `.env` | the setup, or `docker compose up -d` |
 | the address the phone reaches | `.env` (`REALM_ADDRESS`), written by the setup | the setup |
-| rates, MOTD, content patch, player limits, … | `config/mangosd.conf` | `docker compose restart mangosd` |
+| the XP, item drop, gold and player speed rates | the app's admin menu (Settings → Server), or `config/mangosd.conf` | **Apply** in the app, live; the file with `docker compose restart mangosd` |
+| MOTD, content patch, player limits, the other rates, … | `config/mangosd.conf` | `docker compose restart mangosd` |
 | logon throttling, … | `config/realmd.conf` | `docker compose restart realmd` |
 
 The override files hold `Key = Value` lines, applied over vmangos' defaults on every start. The
@@ -86,11 +94,69 @@ key with its documentation:
 docker compose exec mangosd cat /opt/vmangos/etc/mangosd.conf.dist
 ```
 
-To see what mangosd actually runs with: `docker compose exec mangosd cat /run/vmangos/mangosd.conf`.
+To see what mangosd actually runs with: `docker compose exec mangosd cat /run/vmangos/mangosd.conf`
+(the admin menu's rates included; `/run/vmangos/mangosd.base.conf` is the same without them).
+
+A rate the admin menu set wins over `config/mangosd.conf`, across restarts, until the menu's
+**Server defaults**. Its **Apply** reloads mangosd's settings (`reload config`), which puts the
+message of the day and the player limit back to the file's as well: a MOTD set in the game with
+`.server set motd` is lost then.
 
 The database passwords in `.env` were made for this machine. Keep `DB_ROOT_PASSWORD` as it is:
 MariaDB keeps the one it was created with. `db-init` gives the `mangos` user the password in
 `.env` on every start, and the sign-up's user (`vanillish_signup`) `SIGNUP_DB_PASSWORD`.
+
+## The admin menu
+
+The app's admin menu ([README](../README.md#the-admin-menu)) answers while `ADMIN_CODE` in `.env`
+holds a random code: the setup's (16 letters, `ABCD-EFGH-JKLM-NPQR`), or 20 or more hex digits
+(`openssl rand -hex 10`); dashes, spaces and case do not count. A code picked by hand, or the
+example's `change-me`, leaves the menu off: the setup warns, and the data host's log says why.
+
+```sh
+grep ADMIN_CODE .env                                       # the code
+docker compose exec mangosd cat /vmangos/admin/rates.conf  # the rates the menu set (none: no file)
+docker compose logs mangosd | grep '\[admin\]'             # the agent: each request, each change
+docker compose logs datahost | grep ' admin '              # the door: each request and its status
+```
+
+**Where the rates are.** `rates.conf`, in the Docker volume `vanillish_admin` (mounted at
+`/vmangos/admin` in mangosd), `Key = value` lines. They outlive restarts, `docker compose down`
+and updates; `docker compose down -v` deletes them with the database. The database backup
+([below](#backups)) does not hold them. They are a few lines, so to keep them:
+
+```sh
+docker compose exec mangosd cat /vmangos/admin/rates.conf > admin-rates.conf
+# and back, later:
+docker compose exec -T mangosd sh -c 'cat > /vmangos/admin/rates.conf' < admin-rates.conf
+docker compose restart mangosd
+```
+
+A line the menu does not set, or whose value is not a plain number in its range, is dropped when
+mangosd starts, with a line in its log.
+
+**A new code** (one somebody else has seen): set `ADMIN_CODE` in `.env` to a random one
+(`openssl rand -hex 10`) and run `docker compose up -d`; or set it to `change-me` (any case,
+dashes or not) and run the setup again, which makes a new one, prints it and applies it (during
+the creature pathfinding it applies it on the run after). Either way the data host and mangosd
+restart with it, so the world restarts too: the players are logged out for a minute or two. In
+the app, the old code is refused ("That is not this server's admin code.", or "Too many wrong codes
+from here lately: …" once ten wrong ones came from that address), forgotten, and the tab asks for
+the new one.
+
+**Turning the menu off**: `INILLA_ADMIN=off` in `.env`, then `docker compose up -d`; only the data
+host restarts. The rates the menu set stay applied: tap **Server defaults** first to drop them. An
+empty `ADMIN_CODE=` turns it off everywhere instead (mangosd restarts): the rates stay in the volume,
+unapplied, mangosd's log counts them, and a code brings them back. The setup leaves an empty code
+empty.
+
+**Where it answers**: `INILLA_ADMIN=lan` (the default) from the private addresses the sign-up's
+`lan` takes ([above](#accounts-and-gm-levels)), `open` from anywhere 8099 reaches. On Docker Desktop
+and OrbStack every phone arrives from the same gateway address, so `lan` cannot tell your Wi-Fi from
+the internet there, and the code is the only real guard. After ten wrong codes in ten minutes,
+the wrong codes from that address get a "too many" answer instead, which promises no wait: the app
+says to check the code. The right code always gets in, so the limit stops no one who keeps
+guessing: the code's randomness does.
 
 ## The game files
 
@@ -193,7 +259,8 @@ docker compose up -d
 ```
 
 `docker compose up -d` at the end also re-applies the realm row from `.env`, which the backup
-overwrote.
+overwrote. The admin menu's rates are not in the database: [The admin menu](#the-admin-menu) keeps
+them.
 
 ## Updating
 
@@ -210,6 +277,14 @@ mangosd restarts on the new core.
 3. Run `docker compose up -d`. No published image has that commit, so compose builds one here
    (about 10 minutes on an M4). Then `db-init` applies the new migrations and mangosd restarts on
    the new core.
+
+The admin menu's player speed is Vanillish's patch to vmangos (`docker/vmangos/patches/`). The
+build applies it when it still fits the commit, and otherwise builds without it, with a `WARNING:
+0001-move-speed.patch does not apply` in its output: the app then has no speed setting, and a speed
+the menu had set is left out of mangosd's config (its log says so) but kept in `rates.conf`, for an
+image that has the patch again. The menu counts such a line among the rates it set, so **Server
+defaults** shows, and drops it with the rest. The patches that went in:
+`docker compose exec mangosd cat /opt/vmangos/vanillish-patches`.
 
 A new image also means a new world-database dump, but only a *fresh* database imports it. An
 existing one is brought forward by the core's migrations, which is how vmangos is meant to be
@@ -230,7 +305,7 @@ docker compose up -d
 ```sh
 docker compose logs -f mangosd          # console output
 docker compose logs --since 1h realmd
-docker compose logs datahost            # the data host, sign-ups included
+docker compose logs datahost            # the data host, sign-ups and admin requests included
 docker compose exec mangosd ls /vmangos/logs   # Server.log, DBErrors.log, Chat.log, weekly honor, …
 ```
 
@@ -249,8 +324,8 @@ docker compose exec mangosd ls /vmangos/logs   # Server.log, DBErrors.log, Chat.
 ./setup-mac.sh --uninstall      # or ./setup-linux.sh --uninstall
 ```
 
-It asks before each step: the containers, the database and the map data; the images; the game
-files' volume; the folder with its `.env`.
+It asks before each step: the containers, the database, the map data and the admin menu's rates;
+the images; the game files' volume; the folder with its `.env`.
 
 ## Troubleshooting
 
@@ -306,8 +381,40 @@ instance: stop it in its folder (`docker compose stop`) and run the setup again.
 or more. Docker Desktop → Settings → Resources; OrbStack → Settings → System; Colima:
 `colima stop && colima start --cpu 4 --memory 6`.
 
-**`vmangos-console` says there was no prompt after 15 s.** The world is still loading.
+**`vmangos-console` says "the world is still loading".** mangosd has not opened its world port (for
+2 s) within the command's 20 s: the world takes a minute or two to load after a start, and
+`docker compose ps` shows mangosd `healthy` once it has. Nothing was sent, nor the commands after
+it; try again then. "No prompt after 15 s": the world is up but has not got to the command yet (a
+long command, or a world that hangs); it still runs, and its answer shows in
+`docker compose logs mangosd`. "The console stayed busy for 20 s": the admin menu's agent held it (a
+gold send to many players); try again. "An earlier command is still running": a command before it
+(its own, or the admin menu's) got no prompt in time, or its `vmangos-console` was stopped first,
+and the world has not finished it yet; try again later. "A command is one line of at most
+254 bytes": a longer one, or one with a line break, is refused unsent (mangosd would run its rest as
+a second command).
+
+**The app's admin menu (Settings → Server) says:**
+
+- "This server has no admin menu": `ADMIN_CODE` is empty, picked by hand (not the setup's 16
+  letters or 20 or more hex digits) or still `change-me`, or the data host is older than the
+  menu. Set it to `change-me` and run the setup again (or a random code and
+  `docker compose up -d`). `docker compose logs datahost | grep 'admin menu'` says why it is off.
+- "The admin menu answers only on the server's own network": `INILLA_ADMIN=lan`, and the phone is
+  not on a private network (mobile data).
+- "The admin menu is off on this server": `INILLA_ADMIN=off`.
+- "Too many wrong codes from here lately": the code the app held is wrong, and ten wrong ones came
+  from that address in ten minutes (on Docker Desktop and OrbStack, from any phone). The app has
+  forgotten it: type the one in `.env`, which gets in whatever the count.
+- "Maybe sent to …: the server did not say": the console's answer was not the realm's own "mail
+  sent" sentence, or came too late. Check a mailbox before sending to them again.
+- "No answer in time": the request reached the server and no answer came back (for a change or a
+  gold send, a reverse proxy's error page in its place counts as none), so it may still have been
+  done. Refresh (after a gold send, check a mailbox) before trying again.
+- "The world server is starting…": mangosd, or the agent beside it, does not answer yet:
+  `docker compose ps`, `docker compose logs mangosd`.
+- "The data host and the world server disagree on ADMIN_CODE": `.env` changed, and only one of
+  them has restarted since: `docker compose up -d`.
 
 **Start over from nothing.** `docker compose down -v` deletes the database (accounts and
-characters) and the extracted server data. The next `up` rebuilds both. The game files' volume
-stays.
+characters), the extracted server data and the admin menu's rates. The next `up` rebuilds the
+first two. The game files' volume stays.

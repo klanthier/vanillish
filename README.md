@@ -81,9 +81,9 @@ The whole APK builds on Linux or macOS, and on CI on a single Linux runner — s
 
 | read | for |
 |---|---|
-| [docs/ANDROID.md](docs/ANDROID.md) | what Vanillish adds on Android: quick connect, the Fold8 Ultra's screens and tabletop, input, the frame rate, the settings that differ, where the files are, known limits |
+| [docs/ANDROID.md](docs/ANDROID.md) | what Vanillish adds on Android: quick connect, the server admin menu, the Fold8 Ultra's screens and tabletop, input, the frame rate, the settings that differ, where the files are, known limits |
 | [docs/ANDROID-DATA.md](docs/ANDROID-DATA.md) | getting the game data onto the phone |
-| [server/README.md](server/README.md) | your own server: one command on a Mac, Linux or Windows |
+| [server/README.md](server/README.md) | your own server: one command on a Mac, Linux or Windows, and its admin menu (rates and gold from the app) |
 | [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md) | building, signing and installing the APK, CI, debugging on Android |
 | [docs/INILLA.md](docs/INILLA.md) | the touch controls, the controller, the launcher and the settings, which Vanillish shares |
 | [docs/DEBUGGING.md](docs/DEBUGGING.md) | the remote console, logs, the desktop rehearsal |

@@ -131,6 +131,94 @@ data host (port 8099) does not, so the game files and sign-up wait until it is r
   Connect set up has **Create account**, which opens Connect's sign-up for another account (as
   **Use another account** on Connect does).
 
+## The server admin menu
+
+On a server of your own ([`server/`](../server/README.md#the-admin-menu)), **Settings → Server** is
+its owner's admin menu: the realm's experience, loot, gold and speed rates, for everyone, changed
+while you play and kept when the server restarts, and gold for players. Open Settings with the
+**N** button in the top strip of the touch controls, then the **Server** tab (iOS has none). It is
+for the launcher's current server, under its name and the address it is asked at.
+
+- **The admin code, once per server.** The tab first says "The admin code is in the server's .env
+  (ADMIN_CODE), and at the end of its setup." Type it (dashes and capitals do not matter; a plain
+  keyboard, no suggestions) and **Continue**: nothing is sent before. A code that cannot be one is
+  refused on the phone ("An admin code is 16 letters and digits, as the setup prints it (or 20 hex
+  digits).", "The admin code takes letters and digits only, …", "That is the example's placeholder:
+  …"), and one of the setup's length with a 0, 1, I or O in it (a misread letter) is told so:
+  "The setup's codes have no 0, 1, I or O: check those letters (an O is a Q or D, an I is an L or
+  J)." The code is sealed with the Android Keystore key, as the passwords are
+  ([Passwords](#passwords)), one per server, and never sent: each request carries a signature made
+  with it over a one-time number from the server. **Forget the code** at the bottom drops it; a
+  code the server refuses (as wrong, or as one of too many wrong ones from here) is dropped and
+  asked for again; deleting the server in the launcher deletes it too. When the Keystore refuses
+  it: "The admin code was not saved: the Android Keystore refused it. Vanillish keeps it until it
+  closes."
+- **The status line**, with **Refresh**: "The world server is up: 2 players online." (or the reason
+  it is not, below). The tab asks when it comes up and again 15 seconds after each answer while it
+  shows, and a refresh never moves a slider you moved and have not applied (the others follow the
+  server).
+- **Experience**: **All experience** sets kills, quests and exploration together; **Separately**
+  opens them one by one (Kills, Quests, Exploration).
+- **Loot**: **Item drops** sets every quality together; **Separately**: Grey (poor), White (and
+  quest items), Green, Blue, Purple, Orange, and Shared loot tables (how often one is rolled).
+  **Gold from loot and quest rewards** is a slider of its own. Under them: "From the next kill. Boss
+  and dungeon loot that drops one item from a list does not change." (vmangos rolls those lists with
+  no rate.)
+- **Movement**: **Player speed**, walking, running, swimming and mounted (taxis keep their own).
+  A server whose vmangos lacks Vanillish's speed patch has none: "This server's vmangos has no speed
+  setting: run its setup again to update it."
+- **The sliders** run from ×0.5 to ×10 (speed ×0.75 to ×2), on a log scale, in steps of 0.05 (speed
+  0.01); a rate the server already holds outside that range widens it, and is never moved. A group
+  slider whose rates differ says "mixed", its handle between them, and moving it sets them all.
+  Under a rate the menu changed, the server's own value: "server ×1". While the world server is not
+  up or a change is on its way, the sliders are read-only.
+- **Apply** and **Undo** show once a slider moved, with "Applying also resets the message of the day
+  and the player limit to the server's settings." (the server reloads its settings to apply). Then
+  "Applied: live now, and kept when the server restarts." **Tell the players in chat** (on) has the
+  server announce the new rates in chat (`Server rates: XP x2, loot x1.5, gold x1, speed x1.2`).
+  **Server defaults**, while a rate the menu set is saved on the server (a speed saved before its
+  vmangos lost the speed patch counts too), takes two taps ("Tap again to go back to the server's
+  settings") and puts every rate back to the server's own `config/mangosd.conf`, such a speed
+  dropped too: "Back to the server's own settings."
+- **Give gold**: the players online as buttons (name · level), **Everyone online**, and **Other
+  name** for anyone else, online or not (2 to 12 letters); at most 50 names at a time ("Pick up to
+  50 players, or Everyone online."). An amount of 1g, 10g, 100g or 1000g, or the slider between 1
+  and 1000 gold. **Send** takes two taps ("Send 100g to 3 players? Tap again"). The gold
+  comes **by mail**, "A gift from the realm": "Sent by mail to Thrall, Jaina: they collect it at any
+  mailbox." (the world server answered with its own "mail sent" sentence, in the realm's
+  language); "No character named Arthas."; "Maybe sent to …: the server did not say. Check a
+  mailbox before sending to them again." (any other answer, or none in time); "Not sent to …: the
+  server ran out of time.", with **Send to the N not sent**, which sends the same amount to those
+  names alone, in batches of at most 50. With no answer at all (or a proxy's error page in its
+  place): "No answer in time: the gold may still arrive. Check a mailbox before sending again.", and
+  **Send** for the same players and amount goes again as the very same request, which the server
+  answers without paying twice (unless its world server restarted meanwhile, which forgets the
+  request: hence the mailbox).
+- **Its fields keep their keys.** While a field on Vanillish's screens has the keyboard (the code,
+  **Other name**, any other), the keys typed are the field's alone: in the world, typing there moves
+  nobody and its Enter opens no chat. A key already held when the field took the keyboard still
+  lets go.
+
+The tab asks the server's data host, at the address Connect found it (a server entered by hand: its
+host, on port 8099): `server.json` first, which says whether the server has the menu, then, with a
+code, a one-time number and the signed request (4 s to connect, 30 s to answer, no redirects).
+
+| the tab says | what it means |
+|---|---|
+| "This server has no admin menu: update it (run its setup again), and set ADMIN_CODE." | its `server.json` has no `admin`: no usable `ADMIN_CODE`, or a data host older than the menu |
+| "The admin menu answers only on the server's own network." | `INILLA_ADMIN=lan`, and this phone is not on a private network (mobile data) |
+| "The admin menu is off on this server." | `INILLA_ADMIN=off` |
+| "That is not this server's admin code." | the code was refused, and forgotten: type it again |
+| "Too many wrong codes from here lately: check the admin code (ADMIN_CODE in the server's .env)." | the code is wrong, after ten wrong codes from this address in ten minutes (behind Docker Desktop, from anyone): forgotten, type it again; the right code still gets in |
+| "Too many requests from here lately: wait a moment and try again." | a 429 that is not the data host's own (a proxy in front of it limiting requests): the code is kept |
+| "The world server is starting…" | the world server is not up yet, or stopped; the sliders wait |
+| "No answer in time: it may still have been done. Refresh before trying again." | the request reached the server and no answer came (none in time, the world server stopped or restarted meanwhile, or for a change, a proxy's error page in its place): Refresh shows what took |
+| the server's own sentences: "The data host and the world server disagree on ADMIN_CODE: run `docker compose up -d` on the server.", "The world server's console is busy: try again in a moment.", … | as they say; the error's code shows under them |
+| "This server is older than the admin menu: update it (run its setup again)." | an answer that is not the menu's, where the menu should be |
+| "The server did not see this request's signature: a proxy in front of it may drop the Authorization header." | a reverse proxy that drops `Authorization` |
+| "Nothing answers at \<host\>. …" | as on Connect, the network's own reason under it |
+| "No server yet: add one in Servers first." | the launcher has no current server |
+
 ## Where it lives
 
 | path | what |
@@ -141,6 +229,8 @@ data host (port 8099) does not, so the game files and sign-up wait until it is r
 | `crates/inilla-core/src/{fold,import}.rs` | the screen classes, their layouts, the tabletop split, the interface scale per screen; copying the game data in from a picked folder. Engine-free, unit-tested. |
 | `crates/inilla-core/src/connect.rs` | quick connect: the address typed, `server.json`, the server profile it makes, the game files' next step, the sign-up's checks, body and reply. Engine-free (the network and SRP6 are the caller's), unit-tested. |
 | `crates/benilla-app/src/inilla/{connect,ui/connect}.rs` | quick connect's jobs (the probe, the manifest-then-download chain, the sign-up with benilla's SRP6, the account saved) and its screen. |
+| `crates/inilla-core/src/admin.rs` | the server admin menu's engine-free half: the admin code's rule, the request's HMAC-SHA256 signature, the data host's replies and refusals, the rates and their groups, the sliders' draft and ranges, gold in whole gold, the request bodies. Unit-tested (the HMAC against RFC 4231, and the vectors the data host's tests share). |
+| `crates/benilla-app/src/inilla/{admin,ui/admin}.rs` | the admin menu's requests (`server.json`, the nonce, the signed request, on one worker thread; the code read from the Keystore once per server; a gold send's id kept after no answer) and Settings → Server. |
 | `crates/benilla-app/src/inilla/android.rs` | the Bevy side: the soft keyboard's text, Back, the native window's size, leaving and coming back to the screen, the frame-rate vote, Game Dashboard's modes, the session service. |
 | `crates/benilla-app/src/inilla/screen.rs` | which screen the game is on, its layout, the world above the hinge, the orientation, the edges the back swipe holds off. |
 | `crates/benilla-app/src/inilla/host_pointer.rs` | a hardware mouse and a hovering pen, into iNilla's virtual mouse. |
@@ -372,6 +462,8 @@ login and character screens the **⌨ Keyboard** button at the top right raises 
   them; address fields (the realmlist, the data URL) get the URL layout. The keyboard never takes
   the whole screen in landscape.
 - A Bluetooth or DeX keyboard types too, also while the on-screen keyboard is up.
+- While a field on Vanillish's own screens has the keyboard, the keys typed are the field's alone:
+  in the world, typing in one moves nobody and its Enter opens no chat.
 
 ## Back
 
@@ -478,6 +570,7 @@ Everything else is iNilla's ([INILLA.md](INILLA.md#settings)).
 | Audio | no silent-switch row: Android has no switch, and Mute or Vibrate mode does not silence the game (the volume keys set its volume). **Let music and podcasts from other apps keep playing** off asks Android for the audio focus, which pauses them. |
 | Debug | the console's addresses list Wi-Fi first, then the phone's hotspot or USB tethering, then any other network, a VPN's last (cellular data's never), and **Copy address** takes the first; its hint adds the hotspot and `adb forward`; the session log row says where the log is; **Share session log…**. |
 | About | **Vanillish — benilla for Android**, the credit to benilla and iNilla, **Reset all Vanillish settings** (every screen's layout too; the Game Dashboard mode last seen is kept). |
+| Server | the server admin menu ([above](#the-server-admin-menu)), on a desktop too; iOS has no Server tab. |
 
 In `benilla-config/inilla/settings.toml` the Android-only settings are `tabletop_split`,
 `inner_any_orientation`, `stay_connected` and `hide_touch_with_mouse`, and `last_game_mode` is
@@ -496,7 +589,7 @@ build, which is a separate app with its own folders.
 | `…/files/benilla-config/` | benilla's state, as on every platform: `config.toml`, key bindings, macros, saved variables, `AddOns/`, `Screenshots/`, and `Diagnostics/` (session logs, crash reports). |
 | `…/files/benilla-config/inilla/` | iNilla's files: `settings.toml`, `servers.toml`, `controller.toml`, and the touch layouts `touch.toml` (cover), `touch-tablet.toml` (inner), `touch-tabletop.toml` (tabletop). |
 | `…/files/.vanillish/Data/` | the game data, once imported or downloaded. Beside the drop box on the same storage, so importing a copied folder is a rename, not a second 5 GB copy. |
-| `/data/user/0/<package>/files/secrets.bin` | the saved passwords and access codes, sealed (private storage: nothing else can read it); `secrets.bin.unreadable` beside it is one whose key is gone ([Passwords](#passwords)). |
+| `/data/user/0/<package>/files/secrets.bin` | the saved passwords, access codes and admin codes, sealed (private storage: nothing else can read it); `secrets.bin.unreadable` beside it is one whose key is gone ([Passwords](#passwords)). |
 | `/data/user/0/<package>/cache/vanillish/` | caches and temporary files; Android may clear them. |
 
 Shared storage can be away for a moment at launch (right after a system update, while Android
@@ -521,7 +614,7 @@ elsewhere. If the key is gone (a reinstall, *Clear storage*), the passwords are 
 for again at the next login; the file that can no longer be read is set aside as
 `secrets.bin.unreadable`, not deleted, and the next password saved starts a new `secrets.bin`.
 Quick connect saves an account's password the same way, and a server's access code beside it
-(`data-token:<server id>`).
+(`data-token:<server id>`); the admin menu, a server's admin code (`admin-code:<server id>`).
 
 A Keystore that is only busy (right after the phone starts, under load) forgets nothing: Vanillish
 tries again after a moment, and if it still fails, keeps the file as it is. That login asks for
@@ -593,6 +686,11 @@ lost mid-frame, which Bevy cannot recover from.
   ([server/docs/OPERATIONS.md](../server/docs/OPERATIONS.md#accounts-and-gm-levels)).
 - **The automatic download**: Android counts most Wi-Fi as unmetered, and a phone's hotspot too
   unless it is marked metered, so on such a hotspot Connect starts 5 GB with no tap.
+- **The admin menu**: a boss's or a dungeon's loot that drops one item from a list does not follow
+  the item drop rates (vmangos rolls those lists with no rate). Behind Docker Desktop or OrbStack,
+  as for sign-up, `INILLA_ADMIN=lan` lets anyone who reaches port 8099 try a code: there the code
+  is the only guard, and the wrong-code limit slows no one who keeps guessing, which is why the
+  server takes only a random code (the setup's, or `openssl rand -hex 10`).
 - **A `.local` name** resolves on Wi-Fi only, not over mobile data or a VPN; the IP the server
   printed always works.
 - **iOS**: Vanillish keeps iOS's behaviour by construction (the Android arms are `cfg`-gated, iOS's
@@ -638,3 +736,21 @@ first device runs should check, on the Fold8 Ultra:
     download starting by itself on Wi-Fi and waiting for a tap on mobile data; Create account,
     then the first login after **Restart Vanillish now**; a second Connect to the same server
     keeping one server; an access code; Android 17 with targetSdk 36.
+14. The server admin menu, against that server, with two characters in the world (two phones, or a
+    phone and a desktop client), the owner's on the phone:
+    - kill a mob at ×1 and note the XP; set **All experience** to ×2, **Apply**, kill another of
+      the same kind and level: twice the XP, and the other character read the announcement in chat;
+    - set **Player speed** to ×1.2: both run faster at once, and still after mounting, dismounting,
+      a taxi flight (its own speed while it flies), zoning through an instance portal and a relog
+      (`.unit speedinfo`, from a GM account, reads the speeds);
+    - give 10g to the other character by name, and then to **Everyone online**: "Sent by mail to …",
+      and a mailbox opened holds "A gift from the realm" with 10g;
+    - **Server defaults**, two taps: every rate back to ×1, the "server ×1" hints and the button
+      gone, the message of the day back to the server's;
+    - a wrong code: "That is not this server's admin code." and the field again (the eleventh in
+      ten minutes: "Too many wrong codes from here lately: …", and the field again); the right
+      code still taken after ten wrong ones;
+    - `docker compose restart mangosd` with the tab open: "The world server is starting…" with the
+      sliders read-only, then up again with the rates as they were;
+    - with a hardware keyboard, typing the code or a name in the world moves nobody and opens no
+      chat.
