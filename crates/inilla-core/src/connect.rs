@@ -4,7 +4,7 @@
 //! and the app falls back to the manual server form ([`manual_profile`], [`Probe`]).
 //!
 //! ```text
-//! GET  <base>server.json   {"format":1,"name","core","auth":{"port"},"realms":[…],"data":{…},"registration":{…}}
+//! GET  <base>server.json   {"format":1,"name","core","auth":{"port"},"realms":[…],"data":{…},"registration":{…},"admin":{…}}
 //! POST <base>accounts      {"username","salt","verifier"} → 201 {"ok":true,"username"} | 4xx/5xx {"ok":false,"error","message"}
 //! ```
 //!
@@ -181,7 +181,7 @@ fn origin(url: &str) -> String {
 
 /// A field that may be absent or `null` (an unset value in the server's environment): its default
 /// either way, so one empty setting never makes the whole document unreadable.
-fn or_default<'de, D, T>(d: D) -> Result<T, D::Error>
+pub(crate) fn or_default<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Default + Deserialize<'de>,
@@ -221,6 +221,9 @@ pub struct ServerInfo {
     /// A line from the operator (the message of the day, a website), kept as the profile's notes.
     #[serde(default)]
     pub message: Option<String>,
+    /// The server admin menu (`crate::admin`). Absent: none (an older data host, no `ADMIN_CODE`).
+    #[serde(default)]
+    pub admin: Option<AdminInfo>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,6 +361,18 @@ impl DataInfo {
     fn has(&self, locale: &str) -> bool {
         self.locales.iter().any(|l| l.locale == locale)
     }
+}
+
+/// The server admin menu, as `server.json` announces it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminInfo {
+    /// Where its routes are, relative to `<base>` (`admin/`; see `admin::admin_url`).
+    #[serde(default, deserialize_with = "or_default")]
+    pub url: String,
+    /// It answers this requester: `false` from outside the server's network under
+    /// `INILLA_ADMIN=lan`.
+    #[serde(default, deserialize_with = "or_default")]
+    pub open: bool,
 }
 
 /// The only sign-up credentials this client sends: the SRP6 salt and verifier.
@@ -1243,6 +1258,29 @@ mod tests {
             parse_server_info(r#"{"format":1,"registration":{"open":true,"credentials":"SRP6"}}"#)
                 .unwrap();
         assert!(upper.sign_up_rules().is_some());
+    }
+
+    /// The admin menu is announced or not; an empty section reads as its defaults.
+    #[test]
+    fn the_admin_section_is_read_when_there() {
+        assert_eq!(stack().admin, None);
+        let empty = parse_server_info(r#"{"format":1,"admin":{}}"#).unwrap();
+        assert_eq!(empty.admin, Some(AdminInfo::default()));
+        let nulls = parse_server_info(r#"{"format":1,"admin":{"url":null,"open":null,"later":1}}"#)
+            .unwrap();
+        assert_eq!(nulls.admin, Some(AdminInfo::default()));
+        let full =
+            parse_server_info(r#"{"format":1,"admin":{"url":"admin/","open":true}}"#).unwrap();
+        assert_eq!(
+            full.admin,
+            Some(AdminInfo {
+                url: "admin/".into(),
+                open: true
+            })
+        );
+        let closed =
+            parse_server_info(r#"{"format":1,"admin":{"url":"admin/","open":false}}"#).unwrap();
+        assert!(closed.admin.is_some_and(|a| !a.open));
     }
 
     #[test]

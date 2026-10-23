@@ -7,6 +7,8 @@
 //! focused field holds ([`ime`]). On Android the first screen is [`connect`]'s — the server's
 //! address, then its game files and an account — rather than the game-data setup.
 
+/// Vanillish: the server admin menu, Settings → Server (`SettingsTab::Server`).
+mod admin;
 /// Vanillish: quick connect's screen (`Panel::Connect`).
 mod connect;
 mod editor;
@@ -17,8 +19,11 @@ mod setup;
 /// Vanillish: the platform's and the app's words (iNilla's on iOS, Vanillish's on Android).
 pub(crate) mod words;
 
+use bevy::ecs::message::MessageCursor;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input::ButtonState;
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
+use bevy_egui::{egui, EguiContexts, EguiPreUpdateSet, EguiPrimaryContextPass};
 
 use super::data::DataState;
 use super::hud::GOLD;
@@ -51,6 +56,8 @@ pub(crate) enum SettingsTab {
     Audio,
     Debug,
     About,
+    /// Vanillish: the server admin menu (off iOS).
+    Server,
 }
 
 #[derive(Resource, Default)]
@@ -128,7 +135,48 @@ impl Plugin for UiPlugin {
                     .chain()
                     .run_if(super::lane_up),
             );
+        // Vanillish: a field typed in keeps its keys from the game (iOS unchanged).
+        if !cfg!(target_os = "ios") {
+            app.add_systems(
+                PreUpdate,
+                keyboard_to_the_screens.after(EguiPreUpdateSet::ProcessInput),
+            );
+        }
     }
+}
+
+/// Vanillish: while a field on these screens has the keyboard, its key presses are the field's
+/// alone — taken from the game's queue once egui has read them, so typing in the world moves
+/// nobody and its Enter opens no chat. Releases stay, so a key held into a screen still lets go.
+fn keyboard_to_the_screens(
+    overlay: Res<Overlay>,
+    lane: Res<super::EguiWanted>,
+    mut egui: Query<&mut bevy_egui::EguiContext, With<bevy_egui::PrimaryEguiContext>>,
+    mut keys: ResMut<Messages<KeyboardInput>>,
+    mut cursor: Local<MessageCursor<KeyboardInput>>,
+) {
+    // Since the last run: what no reader after this one has had yet.
+    let fresh: Vec<KeyboardInput> = cursor.read(&keys).cloned().collect();
+    // A read: `get_mut` is the only getter bevy_egui offers without its `immutable_ctx` feature.
+    let typing = overlay.panel.is_some()
+        && lane.0
+        && egui.iter_mut().any(|mut ctx| {
+            ctx.bypass_change_detection()
+                .get_mut()
+                .wants_keyboard_input()
+        });
+    if !typing || !fresh.iter().any(|k| k.state == ButtonState::Pressed) {
+        return;
+    }
+    // Messages cannot be removed one by one: drop the buffers (every reader has had the older
+    // ones) and write this frame's releases back.
+    keys.drain().for_each(drop);
+    for k in fresh {
+        if k.state == ButtonState::Released {
+            keys.write(k);
+        }
+    }
+    cursor.clear(&keys);
 }
 
 fn tick_clock(mut overlay: ResMut<Overlay>, time: Res<Time<Real>>) {
@@ -274,6 +322,8 @@ fn draw_panels(
     build: Res<benilla_world::build_id::BuildId>,
     mut ime_purpose: ResMut<ImePurpose>,
     mut quick: ResMut<super::connect::Connect>,
+    // Vanillish: the Server tab's state and requests.
+    mut admin: ResMut<super::admin::Admin>,
 ) -> Result {
     let Some(panel) = overlay.panel else {
         ime_purpose.set_if_neq(ImePurpose::Text);
@@ -304,9 +354,15 @@ fn draw_panels(
                     Panel::Launcher => {
                         launcher::show(ui, &mut overlay, &mut inilla, &mut queue, &data)
                     }
-                    Panel::Settings => {
-                        settings::show(ui, &mut overlay, &mut inilla, &data, &pad, &build)
-                    }
+                    Panel::Settings => settings::show(
+                        ui,
+                        &mut overlay,
+                        &mut inilla,
+                        &data,
+                        &pad,
+                        &build,
+                        &mut admin,
+                    ),
                     Panel::Logs => logs::show(ui, &mut overlay),
                     Panel::Connect => connect::show(
                         ui,
@@ -585,6 +641,9 @@ mod tests {
             include_str!("connect.rs"),
             include_str!("../connect.rs"),
             include_str!("../../../../inilla-core/src/connect.rs"),
+            include_str!("admin.rs"),
+            include_str!("../admin.rs"),
+            include_str!("../../../../inilla-core/src/admin.rs"),
             include_str!("../console.rs"),
             include_str!("../../../../inilla-core/src/import.rs"),
             include_str!("../../../../inilla-platform/src/picker.rs"),

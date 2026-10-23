@@ -11,6 +11,8 @@
 //!   verified download from a server the player runs.
 //! - [`connect`] — Vanillish: quick connect, Android's first screen: the server's address, then
 //!   its profile, its game files and an account, from what the server says about itself.
+//! - [`admin`] — Vanillish: the server admin menu (Settings → Server): the realm's rates and
+//!   gold for players, signed with the owner's admin code.
 //! - [`session`] — the launcher's account and server reaching benilla's login, the realm address
 //!   override, the automatic realm and character pick.
 //! - [`platform`] — the iOS host: window options, screen-awake, the audio session, the on-screen
@@ -24,6 +26,8 @@
 //! Android's hardware mouse comes through [`mouse`] too ([`host_pointer`]), since winit has none
 //! there.
 
+/// Vanillish: the server admin menu — Settings → Server's requests to the data host.
+mod admin;
 /// Vanillish: the Android host's Bevy side (soft keyboard, Back, the native window, lifecycle).
 mod android;
 pub(crate) mod boot;
@@ -127,6 +131,7 @@ impl Plugin for InillaPlugin {
             screen::ScreenPlugin,
             host_pointer::HostPointerPlugin,
             connect::ConnectPlugin,
+            admin::AdminPlugin,
         ));
 
         // The seams. The mouse lands before Bevy's input systems so every reader sees it as a

@@ -450,9 +450,10 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
                     for account in inilla.launcher.remove_server(&id) {
                         inilla_platform::keychain::delete(&format!("account:{account}"));
                     }
-                    // Vanillish: and the access code Connect saved for its data, so no secret
-                    // outlives the server it was for.
+                    // Vanillish: and the access code Connect saved for its data, and the admin
+                    // code, so no secret outlives the server it was for.
                     inilla_platform::keychain::delete(&DataSource::token_key(&id));
+                    inilla_platform::keychain::delete(&inilla_core::admin::code_key(&id));
                     done = true;
                 }
             }

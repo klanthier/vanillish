@@ -4,7 +4,8 @@
 //!
 //! Vanillish: the platform's words come from [`words`]; Android adds the frame rates to the
 //! graphics presets, the inner screen's orientation and the background connection, hides the
-//! silent switch it has none of, and shares the session log.
+//! silent switch it has none of, and shares the session log. Off iOS, the Server tab is the server
+//! admin menu (`super::admin`).
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use inilla_core::pad::{Layer, PadBinding, PadButton, PadProfile, Special};
 use inilla_core::settings::Quality;
 
 use super::{hint, row, words, Overlay, Panel, SettingsTab};
+use crate::inilla::admin::Admin;
 use crate::inilla::data::DataState;
 use crate::inilla::hud::GOLD;
 use crate::inilla::pad::PadHud;
@@ -29,6 +31,7 @@ pub(super) fn show(
     data: &DataState,
     pad: &PadHud,
     build: &BuildId,
+    admin: &mut Admin,
 ) {
     ui.horizontal_wrapped(|ui| {
         for (tab, label) in [
@@ -38,7 +41,12 @@ pub(super) fn show(
             (SettingsTab::Audio, "Audio"),
             (SettingsTab::Debug, "Debug"),
             (SettingsTab::About, "About"),
-        ] {
+            // Vanillish: the server admin menu (iOS keeps iNilla's tabs).
+            (SettingsTab::Server, "Server"),
+        ]
+        .into_iter()
+        .filter(|(tab, _)| *tab != SettingsTab::Server || !cfg!(target_os = "ios"))
+        {
             if ui
                 .add(egui::Button::selectable(
                     overlay.tab == tab,
@@ -58,6 +66,8 @@ pub(super) fn show(
         SettingsTab::Audio => audio(ui, inilla),
         SettingsTab::Debug => debug(ui, overlay, inilla),
         SettingsTab::About => about(ui, inilla, data, build),
+        // Vanillish: the server admin menu.
+        SettingsTab::Server => super::admin::show(ui, admin),
     });
 }
 

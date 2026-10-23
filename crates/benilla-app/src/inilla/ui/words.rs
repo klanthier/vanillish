@@ -518,6 +518,28 @@ pub(crate) fn play_as(name: &str) -> String {
     format!("▶ Play as {name}")
 }
 
+// ── admin.rs (Vanillish) ──
+
+/// Vanillish: under the admin code's field — where it is kept, and that it is never sent.
+pub(crate) const ADMIN_CODE_KEPT: &str = if ANDROID {
+    "It is saved on this phone, sealed with an Android Keystore key; only a signature made with it \
+     is sent."
+} else {
+    "It is saved on this device; only a signature made with it is sent."
+};
+
+/// Vanillish: the code was refused by the secret store, so it lasts until the app closes.
+pub(crate) const ADMIN_CODE_NOT_SAVED: &str = if ANDROID {
+    "The admin code was not saved: the Android Keystore refused it. Vanillish keeps it until it \
+     closes."
+} else {
+    concat!(
+        "The admin code was not saved. ",
+        app!(),
+        " keeps it until it closes."
+    )
+};
+
 // ── logs.rs ──
 
 pub(crate) const LOG_COPIED: &str = "Log copied";
@@ -593,5 +615,31 @@ mod tests {
         );
         assert!(unreachable("10.0.0.5").contains("3724, 8085 and 8099"));
         assert!(unusable("it is for client build 6005").ends_with("build 6005."));
+    }
+
+    /// Vanillish: where the admin menu says the code is kept.
+    #[test]
+    fn admin_says_where_the_code_is() {
+        if ANDROID {
+            assert_eq!(
+                ADMIN_CODE_KEPT,
+                "It is saved on this phone, sealed with an Android Keystore key; only a \
+                 signature made with it is sent."
+            );
+            assert_eq!(
+                ADMIN_CODE_NOT_SAVED,
+                "The admin code was not saved: the Android Keystore refused it. Vanillish keeps \
+                 it until it closes."
+            );
+        } else {
+            assert_eq!(
+                ADMIN_CODE_KEPT,
+                "It is saved on this device; only a signature made with it is sent."
+            );
+            assert_eq!(
+                ADMIN_CODE_NOT_SAVED,
+                "The admin code was not saved. iNilla keeps it until it closes."
+            );
+        }
     }
 }
