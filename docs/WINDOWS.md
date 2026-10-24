@@ -52,8 +52,11 @@ as on the phone, in the PC's words. There are three ways to bring the 1.12.1 gam
   - When the server runs on this same PC, type `localhost`.
 - **A copy.** Either:
   - *Import from folder…* copies a client's archives in;
-  - or copy its `Data` folder into the Vanillish folder yourself (it becomes `…\Vanillish\Data`)
-    and then choose *Check for copied data*.
+  - or copy (not move) its `Data` folder into the Vanillish folder yourself, so that it becomes
+    `…\Vanillish\Data`, and restart Vanillish.
+
+  A client's own folder (with `WoW.exe`) is never moved out of, not even from inside the
+  Vanillish folder.
 
 The game opens its archives when it starts. So after any of these, **Restart Vanillish now**
 starts a new Vanillish and closes this one, and the saved account logs in by itself.

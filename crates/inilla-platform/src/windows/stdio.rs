@@ -123,9 +123,14 @@ pub(crate) fn capture(log_file: Option<&Path>) -> Result<(), String> {
             GetStdHandle(STD_ERROR_HANDLE) as isize,
         )
     };
-    let unset = |h: isize| h == 0 || h == INVALID_HANDLE_VALUE as isize;
-    // Standard error, as the unix arm passes through; standard output when that is all there is.
-    let mut pass = Pass::of(if unset(err) { out } else { err });
+    // A redirect first (`> out.txt` leaves standard error at the console), standard error's
+    // before standard output's as the unix arm passes through; then a console; then the debugger.
+    let mut pass = match (Pass::of(err), Pass::of(out)) {
+        (e @ Pass::File(_), _) => e,
+        (_, o @ Pass::File(_)) => o,
+        (e @ Pass::Console(_), _) => e,
+        (_, o) => o,
+    };
     let (reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
     let restore = Restore { out, err };
     std::thread::Builder::new()

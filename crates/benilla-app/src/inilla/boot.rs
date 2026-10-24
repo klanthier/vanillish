@@ -130,11 +130,13 @@ fn import_from_documents(docs: &Path, data_dir: &Path) {
     if current.complete() {
         return;
     }
-    // Vanillish: never the data folder itself (on Windows it sits inside the drop box).
-    let Some(found) = data::find_imports(docs)
-        .into_iter()
-        .find(|c| c.status.complete() && !c.dir.starts_with(data_dir))
-    else {
+    // Vanillish: never the data folder itself (on Windows it sits inside the drop box), nor, on
+    // Windows, a client's own folder, whose files are never moved out (`paths::in_wow_install`).
+    let Some(found) = data::find_imports(docs).into_iter().find(|c| {
+        c.status.complete()
+            && !c.dir.starts_with(data_dir)
+            && !(paths::root().is_some() && paths::in_wow_install(&c.dir))
+    }) else {
         return;
     };
     if !cfg!(target_os = "ios") {

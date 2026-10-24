@@ -58,16 +58,21 @@ fn rehearsal() -> Option<String> {
     std::env::var("INILLA_PICK").ok().filter(|v| !v.is_empty())
 }
 
-/// Whether this platform can pick a folder: Android and Windows yes; the desktop when
-/// `$INILLA_PICK` is set.
+/// Whether this platform can pick a folder: Android yes; Windows in Vanillish's own folder
+/// (`paths::root`: benilla's own desktop run on Windows imports nothing into its install); the
+/// desktop when `$INILLA_PICK` is set.
 pub fn available() -> bool {
-    #[cfg(any(target_os = "android", windows))]
+    #[cfg(target_os = "android")]
     {
         true
     }
     #[cfg(target_os = "ios")]
     {
         false
+    }
+    #[cfg(windows)]
+    {
+        crate::paths::root().is_some() || rehearsal().is_some()
     }
     #[cfg(not(any(target_os = "android", target_os = "ios", windows)))]
     {
@@ -99,6 +104,9 @@ pub fn pick() -> bool {
         }
         #[cfg(windows)]
         {
+            if crate::paths::root().is_none() {
+                return false;
+            }
             // One dialog at a time: a second press while it is open asks nothing new.
             let mut s = state();
             if s.waiting {

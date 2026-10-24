@@ -69,8 +69,10 @@ done
 # llvm-readobj reads the exe: on PATH, LLVM's installer's folder (preinstalled on GitHub's Windows
 # runners), or rustup's llvm-tools.
 READOBJ=""
-host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' | tr -d '\r')"
-sysroot="$(rustc --print sysroot 2>/dev/null | tr -d '\r')"
+# rustc only says where llvm-tools would be: without it (VANILLISH_EXE on a bare PC) the search
+# goes on.
+host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' | tr -d '\r')" || host=""
+sysroot="$(rustc --print sysroot 2>/dev/null | tr -d '\r')" || sysroot=""
 for r in "$(command -v llvm-readobj || true)" "/c/Program Files/LLVM/bin/llvm-readobj.exe" \
     "${sysroot:+$(unix "$sysroot")/lib/rustlib/$host/bin/llvm-readobj}" \
     "${sysroot:+$(unix "$sysroot")/lib/rustlib/$host/bin/llvm-readobj.exe}"; do
@@ -86,6 +88,7 @@ if [ -z "${VANILLISH_EXE:-}" ]; then
         MINGW* | MSYS* | CYGWIN*) ;;
         *) fail "the MSVC build links with Visual Studio's linker: run this in Git Bash on Windows (or VANILLISH_EXE=… to check and package an exe built there)" ;;
     esac
+    command -v cargo >/dev/null || fail "no Rust toolchain: install rustup (https://rustup.rs)"
     rustup target add "$TRIPLE" >/dev/null 2>&1 || true
     feature_args=()
     if [ -n "$FEATURES" ]; then

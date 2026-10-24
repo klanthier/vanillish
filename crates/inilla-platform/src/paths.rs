@@ -81,6 +81,13 @@ pub fn default_root() -> Option<PathBuf> {
     choose_root(exe_dir, local.as_deref())
 }
 
+/// Vanillish (Windows): `dir` is a 1.12.1 client's own folder or lies anywhere inside one: a
+/// folder the player plays from, whose files are never moved out (a copy is the most an import
+/// takes).
+pub fn in_wow_install(dir: &Path) -> bool {
+    dir.ancestors().any(is_wow_install)
+}
+
 /// A 1.12.1 client's own folder: its `WoW.exe` (any case) beside a `Data` folder.
 fn is_wow_install(dir: &Path) -> bool {
     let has_exe = std::fs::read_dir(dir).is_ok_and(|rd| {
@@ -430,6 +437,20 @@ mod tests {
         assert_eq!(choose_root(Some(&wow), None), None);
         let _ = std::fs::remove_dir_all(&wow);
         let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn a_client_and_its_data_are_an_install() {
+        let wow = scratch("install");
+        std::fs::create_dir(wow.join("Data")).unwrap();
+        assert!(!in_wow_install(&wow.join("Data")));
+        std::fs::write(wow.join("wow.EXE"), "").unwrap();
+        assert!(in_wow_install(&wow));
+        assert!(in_wow_install(&wow.join("Data")));
+        assert!(in_wow_install(&wow.join("Data").join("enUS")));
+        assert!(in_wow_install(&wow.join("Backup").join("Data")));
+        assert!(!in_wow_install(wow.parent().unwrap()));
+        let _ = std::fs::remove_dir_all(&wow);
     }
 
     #[test]

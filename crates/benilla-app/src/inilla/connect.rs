@@ -531,7 +531,7 @@ fn chain_download(mut connect: ResMut<Connect>, inilla: Res<Inilla>, mut data: R
         return;
     };
     // Vanillish (Windows): nothing is downloaded into the player's own client, read in place.
-    if data.wow_folder().is_some() {
+    if data.reads_in_place() {
         connect.pending = None;
         return;
     }

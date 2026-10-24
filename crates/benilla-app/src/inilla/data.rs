@@ -163,6 +163,12 @@ impl DataState {
         self.in_place_next.as_deref()
     }
 
+    /// Vanillish (Windows): this run or the next reads the player's own client in place: until a
+    /// relaunch, nothing is downloaded, copied or moved into the data folder, which may be it.
+    pub(crate) fn reads_in_place(&self) -> bool {
+        self.in_place.is_some() || self.in_place_next.is_some()
+    }
+
     /// Vanillish (Windows): the next start reads another folder than this one: a relaunch is
     /// needed for it.
     pub(crate) fn switches_folder(&self) -> bool {
@@ -182,8 +188,8 @@ impl DataState {
     fn use_wow_folder(&mut self, tree: &str, label: &str) {
         picker::forget(tree);
         let data = inilla_platform::paths::wow_data_in(Path::new(tree));
-        // Vanillish's own folder is where its own copy lives, not a client to play in place.
-        if inilla_platform::paths::root().is_some_and(|r| data.starts_with(r)) {
+        // Vanillish's own Data folder is where its own copy lives, not a client to play in place.
+        if inilla_platform::paths::root().is_some_and(|r| data.starts_with(r.join("Data"))) {
             self.message = Some((false, words::WOW_FOLDER_IS_OURS.into()));
             return;
         }
@@ -233,8 +239,11 @@ impl DataState {
             self.message = Some((false, words::STORAGE_UNAVAILABLE.into()));
             return;
         }
-        // Vanillish (Windows): the player's own client is read in place, and never written into.
-        if IN_PLACE.contains(&label) && inilla_platform::paths::data_in_place() {
+        // Vanillish (Windows): the player's own client is read in place, and never written into:
+        // this run's folder is it until a relaunch, even once the next start's is not.
+        if IN_PLACE.contains(&label)
+            && (self.reads_in_place() || inilla_platform::paths::data_in_place())
+        {
             self.message = Some((false, words::IN_PLACE_READ_ONLY.into()));
             return;
         }
@@ -264,14 +273,28 @@ impl DataState {
             ));
             return;
         };
+        // Vanillish (Windows): a Data folder copied straight into place is found at the next
+        // start, with nothing to move.
+        if inilla_platform::paths::root().is_some() {
+            self.refresh();
+            if self.status.complete() {
+                self.message = Some((true, words::NEEDS_RESTART.into()));
+                return;
+            }
+        }
         self.start("import", move |progress, _| {
             let found = kd::find_imports(&docs);
-            // Vanillish: never the data folder itself (on Windows it sits inside the drop box).
-            let Some(c) = found
+            // Vanillish: never the data folder itself (on Windows it sits inside the drop box),
+            // nor, on Windows, a client's own folder: its files are never moved out.
+            let windows = inilla_platform::paths::root().is_some();
+            let (clients, found): (Vec<_>, Vec<_>) = found
                 .into_iter()
                 .filter(|c| !c.dir.starts_with(&dir))
-                .max_by_key(|c| c.status.present.len())
-            else {
+                .partition(|c| windows && inilla_platform::paths::in_wow_install(&c.dir));
+            let Some(c) = found.into_iter().max_by_key(|c| c.status.present.len()) else {
+                if let Some(client) = clients.first() {
+                    return Err(words::client_not_moved(&client.dir));
+                }
                 return Ok(Outcome::NothingToImport);
             };
             // Vanillish: not a folder a PC is still copying into (the boot import's guard too).
@@ -741,11 +764,7 @@ fn poll_job(mut state: ResMut<DataState>) {
             let mut text = if done.copied == 0 {
                 format!("The {n} archives from {label} were already here.")
             } else {
-                format!(
-                    "Copied {n} archives from {label}. The original folder is still there; \
-                     delete it to free {:.1} GB.",
-                    original_bytes as f64 / 1e9
-                )
+                words::copied(n, &label, original_bytes as f64 / 1e9)
             };
             if !missing.is_empty() {
                 text.push_str(&format!(
@@ -842,6 +861,32 @@ mod tests {
             pick_for: PickFor::Copy,
             in_place: None,
             in_place_next: None,
+        }
+    }
+
+    /// Vanillish (Windows): a run that reads the player's own client in place writes nothing into
+    /// it, even after the player let it go for the next start.
+    #[test]
+    fn a_client_read_in_place_is_never_written() {
+        for (now, next) in [
+            (Some(PathBuf::from("C:/WoW/Data")), None),
+            (
+                Some(PathBuf::from("C:/WoW/Data")),
+                Some(PathBuf::from("C:/WoW/Data")),
+            ),
+            (None, Some(PathBuf::from("C:/WoW/Data"))),
+        ] {
+            for label in IN_PLACE {
+                let mut s = state(true, Vec::new());
+                s.in_place = now.clone();
+                s.in_place_next = next.clone();
+                s.start(label, |_, _| Ok(Outcome::NothingToImport));
+                assert!(s.job.is_none(), "{label} started");
+                assert_eq!(
+                    s.message.as_ref().map(|m| m.1.as_str()),
+                    Some(words::IN_PLACE_READ_ONLY)
+                );
+            }
         }
     }
 

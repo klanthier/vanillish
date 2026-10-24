@@ -276,7 +276,7 @@ fn files(
     );
     // Vanillish (Windows): the player's own client is the game data, and nothing the server
     // offers is downloaded into it.
-    if data.wow_folder().is_some() && step != DataStep::Have {
+    if data.reads_in_place() && step != DataStep::Have {
         super::setup::wow_folder(ui, inilla, data);
         data_message(ui, data);
         return;

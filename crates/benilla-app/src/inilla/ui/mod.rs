@@ -437,7 +437,17 @@ fn header(
             // Without the game data there is nothing behind the first screen to close it to.
             let can_close = !matches!(panel, Panel::Setup | Panel::Connect) || data_ready;
             if can_close && ui.button("× Close").clicked() {
-                overlay.panel = None;
+                // Vanillish: without the data and without the touch HUD's glue button, nothing
+                // leads back from a bare window: close to the first screen, as Back does.
+                overlay.panel = if !data_ready && !super::touch_device() {
+                    Some(if overlay.connect_home {
+                        Panel::Connect
+                    } else {
+                        Panel::Setup
+                    })
+                } else {
+                    None
+                };
             }
             if panel != Panel::Settings && ui.button("⚙ Settings").clicked() {
                 overlay.panel = Some(Panel::Settings);

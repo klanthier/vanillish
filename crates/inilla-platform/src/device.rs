@@ -323,16 +323,17 @@ pub fn quit() {
 }
 
 /// Start the app over in a fresh process, where the OS allows an app to (Android; Vanillish:
-/// Windows, the exe again with the same arguments). `false` where it does not: the caller then
-/// exits and the player opens the app again.
+/// Windows in Vanillish's own folder, the exe again with the same arguments). `false` where it
+/// does not: the caller then exits and the player opens the app again.
 pub fn relaunch() -> bool {
     #[cfg(target_os = "android")]
     {
         crate::android::device::relaunch()
     }
+    // Only the Windows product (a root its entry set); benilla's own run on Windows exits.
     #[cfg(windows)]
     {
-        crate::windows::device::relaunch()
+        crate::paths::root().is_some() && crate::windows::device::relaunch()
     }
     #[cfg(not(any(target_os = "android", windows)))]
     {

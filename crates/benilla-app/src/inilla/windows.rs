@@ -1,7 +1,7 @@
 //! Vanillish: **the Windows window** — Vanillish for Windows' name on the window, its icon (the
 //! exe's own, resource 1) in the title bar and the taskbar, and its `HWND` for the folder dialog
-//! to sit on. Everything here waits for benilla-app's `vanillish` feature: upstream's desktop run
-//! keeps benilla's window.
+//! to sit on. Everything here waits for benilla-app's `vanillish` feature: benilla's own desktop
+//! run (`cargo run -p benilla`) keeps benilla's window.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;

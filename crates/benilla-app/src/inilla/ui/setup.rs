@@ -125,7 +125,7 @@ pub(super) fn show(
         if words::WINDOWS {
             wow_folder(ui, inilla, data);
         }
-        if data.wow_folder().is_none() {
+        if !data.reads_in_place() {
             ui.label(words::from_computer());
             ui.label(words::on_device());
             // Vanillish: a folder outside the app, through the system's picker (Android;
@@ -214,9 +214,10 @@ pub(super) fn show(
                 } else {
                     "Download / resume"
                 };
+                // Vanillish (Windows): nothing is downloaded while a client is read in place.
                 if ui
                     .add_enabled(
-                        enough,
+                        enough && !data.reads_in_place(),
                         egui::Button::new(egui::RichText::new(label).color(GOLD))
                             .min_size(egui::vec2(180.0, 44.0)),
                     )

@@ -54,7 +54,9 @@ VANILLISH_FEATURES=dev windows/build-exe.sh  # benilla's dev instruments and a c
 ```
 
 For a quicker loop, `cargo run -p vanillish-windows --features dev` builds the dev exe in the dev
-profile and runs it with its console.
+profile and runs it with its console. benilla's own `cargo run -p benilla` stays benilla's desktop
+build; on a Windows host a `--workspace` build (upstream's gates) turns the `vanillish` feature on
+for every member through this crate, so run those with `--workspace --exclude vanillish-windows`.
 
 | knob | what |
 |---|---|

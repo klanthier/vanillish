@@ -16,7 +16,8 @@ use inilla_platform::paths::{self, Host};
 pub(crate) const ANDROID: bool = cfg!(target_os = "android");
 
 /// Vanillish: built as Vanillish for Windows — benilla-app's `vanillish` feature, which only the
-/// Windows entry (`vanillish-windows`) turns on; upstream's desktop run never has it.
+/// Windows entry (`vanillish-windows`) turns on, for a Windows target: `cargo run -p benilla` never
+/// has it (a `--workspace` build on a Windows host does, through the entry).
 pub(crate) const WINDOWS: bool = cfg!(feature = "vanillish");
 
 /// Vanillish: either Vanillish, Android's or Windows'.
@@ -126,9 +127,9 @@ pub(crate) fn on_device() -> String {
     if WINDOWS {
         let root = drop_box();
         format!(
-            "• Or copy it in (about 5 GB): the client's Data folder into {root}\\Data, or the whole \
-             World of Warcraft folder into {root}, then Check for copied data. {IMPORT_FOLDER} \
-             makes the copy for you."
+            "• Or copy it in (about 5 GB): the client's Data folder into {root} (copy, not move: \
+             your client keeps its own), so that it is {root}\\Data, then restart Vanillish. \
+             {IMPORT_FOLDER} makes the copy for you."
         )
     } else if ANDROID {
         "• On the phone: Import from folder… copies it from this phone's storage or a USB-C \
@@ -185,6 +186,29 @@ pub(crate) fn wow_folder_incomplete(label: &str, missing: &[&str]) -> String {
         "{label} is not a whole 1.12.1 client: {} missing. Pick the World of Warcraft folder (the \
          one with WoW.exe) or its Data folder.",
         missing.join(", ")
+    )
+}
+
+/// A folder import's copy is done. Vanillish (Windows): the original is often the client the
+/// player plays from, which is never theirs to delete for the room.
+pub(crate) fn copied(n: usize, label: &str, original_gb: f64) -> String {
+    if WINDOWS {
+        format!("Copied {n} archives from {label}; the original folder is untouched.")
+    } else {
+        format!(
+            "Copied {n} archives from {label}. The original folder is still there; delete it to \
+             free {original_gb:.1} GB."
+        )
+    }
+}
+
+/// Vanillish (Windows): "Check for copied data" found only a client's own folder, whose files are
+/// never moved out.
+pub(crate) fn client_not_moved(dir: &std::path::Path) -> String {
+    format!(
+        "{} is a World of Warcraft client's own folder: Vanillish never moves its files. \
+         {USE_WOW_FOLDER} plays it where it is, and {IMPORT_FOLDER} copies it.",
+        dir.display()
     )
 }
 
