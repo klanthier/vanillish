@@ -102,6 +102,12 @@ pub fn pick() -> bool {
     }
 }
 
+/// Vanillish (Windows): the game's window (its `HWND`), which owns the folder dialog [`pick`]
+/// opens, so the dialog comes up in front of the game and modal to it. Ignored elsewhere.
+pub fn set_owner_window(hwnd: isize) {
+    let _ = hwnd;
+}
+
 /// The picker is open: [`pick`] was answered with nothing yet.
 pub fn waiting() -> bool {
     state().waiting

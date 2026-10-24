@@ -234,6 +234,13 @@ pub fn open_url(url: &str) {
     let _ = url;
 }
 
+/// Vanillish (Windows): show the folder at `path` in the system's file manager (File Explorer).
+/// `false` where there is none to ask, or it could not be opened.
+pub fn open_folder(path: &std::path::Path) -> bool {
+    let _ = path;
+    false
+}
+
 /// The game has quit: close the app and end the process the way the OS wants it (Android: the
 /// task closes and the process ends from the UI thread). A no-op elsewhere — the caller returns.
 pub fn quit() {
