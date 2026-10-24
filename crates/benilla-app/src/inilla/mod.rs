@@ -50,6 +50,8 @@ mod store;
 mod synth;
 mod touch;
 mod ui;
+/// Vanillish: Vanillish for Windows' window — its title, its icon, its `HWND`.
+mod windows;
 
 use std::collections::BTreeMap;
 
@@ -132,7 +134,9 @@ impl Plugin for InillaPlugin {
             host_pointer::HostPointerPlugin,
             connect::ConnectPlugin,
             admin::AdminPlugin,
-        ));
+        ))
+        // Vanillish: past the tuple's fifteen.
+        .add_plugins(windows::WindowsPlugin);
 
         // The seams. The mouse lands before Bevy's input systems so every reader sees it as a
         // mouse; the commands land in the binding slot, as wenilla's bridge does.

@@ -230,9 +230,16 @@ fn first_screen(
     }
     // On a desktop the launcher waits for F10: benilla's own login screen (and `$WOW_USER`) is
     // the desktop workflow.
-    if super::touch_device() {
+    if launcher_at_login() {
         overlay.panel = Some(Panel::Launcher);
     }
+}
+
+/// Vanillish: the launcher opens by itself at the login screen on a touch device, and in
+/// Vanillish for Windows, a player's app rather than the desktop workflow — whose touch HUD stays
+/// off.
+fn launcher_at_login() -> bool {
+    super::touch_device() || words::WINDOWS
 }
 
 /// F10 opens iNilla's screens on a desktop, where there is no HUD button for them.
@@ -257,7 +264,7 @@ fn back_at_login(mut overlay: ResMut<Overlay>, data: Res<DataState>, mut seen: L
     if !std::mem::replace(&mut *seen, true) {
         return;
     }
-    if data.ready_at_boot && super::touch_device() && overlay.panel.is_none() {
+    if data.ready_at_boot && launcher_at_login() && overlay.panel.is_none() {
         overlay.panel = Some(Panel::Launcher);
     }
 }
@@ -645,6 +652,7 @@ mod tests {
             include_str!("../admin.rs"),
             include_str!("../../../../inilla-core/src/admin.rs"),
             include_str!("../console.rs"),
+            include_str!("../windows.rs"),
             include_str!("../../../../inilla-core/src/import.rs"),
             include_str!("../../../../inilla-platform/src/picker.rs"),
             include_str!("../../../../inilla-platform/src/paths.rs"),

@@ -530,6 +530,11 @@ fn chain_download(mut connect: ResMut<Connect>, inilla: Res<Inilla>, mut data: R
         connect.pending = None;
         return;
     };
+    // Vanillish (Windows): nothing is downloaded into the player's own client, read in place.
+    if data.wow_folder().is_some() {
+        connect.pending = None;
+        return;
+    }
     // A new chain for a new source or language (the player picked another one).
     let stale = connect
         .pending

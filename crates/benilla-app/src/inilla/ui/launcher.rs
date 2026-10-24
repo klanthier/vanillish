@@ -406,12 +406,8 @@ fn server_form(ui: &mut egui::Ui, f: &mut ServerForm, inilla: &mut Inilla) -> bo
                 let r = ui.add(egui::TextEdit::singleline(&mut f.realm_override).hint_text("leave empty to use the realm list's").desired_width(320.0));
                 ime(&r, ImePurpose::Url);
             });
-            hint(
-                ui,
-                "Use when the realm list hands out an address this phone cannot reach (a LAN IP \
-                 while you are outside, or a public IP inside a network without hairpin NAT). \
-                 host or host:port.",
-            );
+            // Vanillish: the platform's word for the device is `words`'.
+            hint(ui, words::REALM_OVERRIDE_HINT);
             row(ui, "Realm", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut f.realm_name).hint_text("pick automatically after login").desired_width(320.0));
             });

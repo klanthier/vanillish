@@ -46,6 +46,8 @@ pub(super) fn show(
         ]
         .into_iter()
         .filter(|(tab, _)| *tab != SettingsTab::Server || !cfg!(target_os = "ios"))
+        // Vanillish: Vanillish for Windows has the Touch tab on a touch screen only.
+        .filter(|(tab, _)| *tab != SettingsTab::Touch || !desktop())
         {
             if ui
                 .add(egui::Button::selectable(
@@ -71,6 +73,13 @@ pub(super) fn show(
     });
 }
 
+/// Vanillish: Vanillish for Windows without a touch screen, where the rows that drive the touch
+/// HUD, the phone's screen and its audio session do nothing (`platform::apply_cvar_settings`,
+/// `frame_cap`, `keyboard_policy`, `compact_stock_ui`, `audio::configure_session`).
+fn desktop() -> bool {
+    words::WINDOWS && !crate::inilla::touch_device()
+}
+
 /// Vanillish: the panel's highest refresh rate, asked of the display at most every two seconds
 /// (a JNI call; the cover and inner panels may differ). `None` where the OS does not say.
 fn panel_max_hz() -> Option<f32> {
@@ -91,6 +100,14 @@ fn panel_max_hz() -> Option<f32> {
 
 fn general(ui: &mut egui::Ui, k: &mut Inilla) {
     let s = &mut k.settings;
+    // Vanillish: on a desktop the screen-on row and the modern lighting are all there is; the
+    // stock Video Options own the window, the resolution and the details.
+    if desktop() {
+        ui.checkbox(&mut s.modern_lighting, words::MODERN_LIGHTING_ROW);
+        hint(ui, words::MODERN_LIGHTING_HINT);
+        ui.checkbox(&mut s.keep_screen_on, "Keep the screen on while playing");
+        return;
+    }
     let max_hz = panel_max_hz();
     row(ui, "Graphics", |ui| {
         for q in Quality::ALL {
@@ -131,8 +148,11 @@ fn general(ui: &mut egui::Ui, k: &mut Inilla) {
         &mut s.compact_stock_ui,
         "Compact stock interface (hide the action bar's gryphons)",
     );
-    ui.checkbox(&mut s.island_margin, words::ISLAND_ROW);
-    hint(ui, words::ISLAND_HINT);
+    // Vanillish: a PC's screen has no notch or camera cut-out to keep clear of.
+    if !words::WINDOWS {
+        ui.checkbox(&mut s.island_margin, words::ISLAND_ROW);
+        hint(ui, words::ISLAND_HINT);
+    }
     if words::ANDROID {
         ui.checkbox(&mut s.inner_any_orientation, words::INNER_PORTRAIT_ROW);
         hint(ui, words::INNER_PORTRAIT_HINT);
@@ -362,19 +382,22 @@ fn controller(ui: &mut egui::Ui, k: &mut Inilla, pad: &PadHud) {
 
 fn audio(ui: &mut egui::Ui, k: &mut Inilla) {
     let s = &mut k.settings;
-    ui.checkbox(
-        &mut s.mix_with_other_audio,
-        "Let music and podcasts from other apps keep playing",
-    );
-    // Vanillish: Android's media stream ignores Mute and Vibrate: no switch, so no row (the setting
-    // stays in the file for iOS).
-    if words::ANDROID {
-        hint(ui, words::NO_SILENT_SWITCH);
-    } else {
+    // Vanillish: a PC mixes every app's sound and has no silent switch: no audio session to set.
+    if !words::WINDOWS {
         ui.checkbox(
-            &mut s.ignore_silent_switch,
-            "Play sound even when the silent switch is on",
+            &mut s.mix_with_other_audio,
+            "Let music and podcasts from other apps keep playing",
         );
+        // Vanillish: Android's media stream ignores Mute and Vibrate: no switch, so no row (the
+        // setting stays in the file for iOS).
+        if words::ANDROID {
+            hint(ui, words::NO_SILENT_SWITCH);
+        } else {
+            ui.checkbox(
+                &mut s.ignore_silent_switch,
+                "Play sound even when the silent switch is on",
+            );
+        }
     }
     hint(
         ui,
@@ -414,9 +437,12 @@ fn debug(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
             }
         });
     }
-    ui.checkbox(&mut d.log_to_file, words::SESSION_LOG_ROW);
+    ui.checkbox(&mut d.log_to_file, words::session_log_row());
     ui.checkbox(&mut d.perf_overlay, "Show frame rate, memory and heat");
-    ui.checkbox(&mut d.show_touch_zones, "Show touch zones");
+    // Vanillish: no touch zones without a touch screen.
+    if !desktop() {
+        ui.checkbox(&mut d.show_touch_zones, "Show touch zones");
+    }
     ui.horizontal(|ui| {
         if ui
             .add(egui::Button::new("View session log").min_size(egui::vec2(180.0, 44.0)))
@@ -431,6 +457,8 @@ fn debug(ui: &mut egui::Ui, overlay: &mut Overlay, k: &mut Inilla) {
         if inilla_platform::picker::can_share() && ui.button(words::SHARE_LOG).clicked() {
             super::logs::share_session_log(overlay);
         }
+        // Vanillish (Windows): the logs, the settings and the AddOns in File Explorer.
+        super::logs::open_folder_button(ui, overlay);
     });
 }
 

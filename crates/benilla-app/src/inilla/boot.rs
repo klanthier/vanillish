@@ -13,7 +13,8 @@
 //! - the log filter and colour defaults a phone wants.
 //!
 //! Off iOS this does nothing unless `$INILLA_CONTAINER` asks the desktop build to play the
-//! container (`inilla_platform::paths`).
+//! container (`inilla_platform::paths`) — Vanillish: or the Windows entry named its folder
+//! (`paths::set_root`).
 
 use std::path::Path;
 
@@ -36,8 +37,13 @@ pub fn prepare() {
     ) else {
         return;
     };
+    // Vanillish (Windows): the player's own client, read in place, is never written into — not
+    // even a folder made in it (`paths::data_in_place`).
+    let in_place = paths::data_in_place();
     for d in [&docs, &config, &support, &data_dir] {
-        let _ = std::fs::create_dir_all(d);
+        if !(in_place && *d == data_dir) {
+            let _ = std::fs::create_dir_all(d);
+        }
     }
     let _ = device::exclude_from_backup(&support);
 
@@ -88,7 +94,9 @@ pub fn prepare() {
     println!("inilla: {}", device::describe());
     println!("inilla: state {}", config.display());
 
-    import_from_documents(&docs, &data_dir);
+    if !in_place {
+        import_from_documents(&docs, &data_dir);
+    }
 
     let st = data::status(&data_dir);
     if st.complete() {
@@ -122,9 +130,10 @@ fn import_from_documents(docs: &Path, data_dir: &Path) {
     if current.complete() {
         return;
     }
+    // Vanillish: never the data folder itself (on Windows it sits inside the drop box).
     let Some(found) = data::find_imports(docs)
         .into_iter()
-        .find(|c| c.status.complete())
+        .find(|c| c.status.complete() && !c.dir.starts_with(data_dir))
     else {
         return;
     };

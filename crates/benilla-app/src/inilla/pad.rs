@@ -71,6 +71,68 @@ struct PadCtl {
     /// Cursor mode was switched on by a window opening (and so closes with it).
     auto_cursor: bool,
     was_cursor: bool,
+    /// Vanillish: a desktop's pads by when each was last used ([`in_hand`]), and the frame count
+    /// that dates them.
+    used: Vec<(Entity, u64)>,
+    tick: u64,
+}
+
+/// Vanillish: a stick or trigger past this counts as the player using the pad (Android's
+/// `IN_USE`): a pad lying on the table with a drifting stick never takes over from the one in hand.
+const IN_USE: f32 = 0.5;
+
+/// Vanillish: the pad in hand among `pads` (the connected ones, in query order, each with whether
+/// it is used this frame): the one used last, else the first. `used` keeps each pad's last use
+/// across frames, as of `tick` (from 1), and drops the pads that went away.
+fn in_hand<K: Copy + PartialEq>(
+    pads: &[(K, bool)],
+    used: &mut Vec<(K, u64)>,
+    tick: u64,
+) -> Option<K> {
+    used.retain(|(k, _)| pads.iter().any(|(p, _)| p == k));
+    for &(k, now) in pads {
+        match used.iter_mut().find(|(u, _)| *u == k) {
+            Some(u) if now => u.1 = tick,
+            Some(_) => {}
+            None => used.push((k, if now { tick } else { 0 })),
+        }
+    }
+    let last = |k: &K| used.iter().find(|(u, _)| u == k).map_or(0, |u| u.1);
+    // The first of the most recent: pads never used keep the query order.
+    pads.iter()
+        .map(|(k, _)| *k)
+        .min_by_key(|k| std::cmp::Reverse(last(k)))
+}
+
+/// Vanillish: the player touched this pad this frame — a button went down, or a stick or a
+/// trigger is past [`IN_USE`].
+fn in_use(g: &Gamepad) -> bool {
+    let pushed = |v: Vec2| v.length() > IN_USE;
+    g.get_just_pressed().next().is_some()
+        || pushed(g.left_stick())
+        || pushed(g.right_stick())
+        || [GamepadButton::LeftTrigger2, GamepadButton::RightTrigger2]
+            .into_iter()
+            .any(|t| g.get(t).unwrap_or(0.0) > IN_USE)
+}
+
+/// Vanillish: a desktop pad's name with its glyph family from its USB ids
+/// (`inilla_core::pads::family`) when the name does not say it already: gilrs names a DualSense
+/// "PS5 Controller", which the name alone reads as Xbox.
+fn desktop_name(name: Option<&str>, vendor: Option<u16>, product: Option<u16>) -> String {
+    let name = name.unwrap_or("Controller");
+    let family = match (vendor, product) {
+        (Some(v), Some(p)) => inilla_core::pads::family(v, p),
+        _ => "",
+    };
+    if name
+        .to_ascii_lowercase()
+        .contains(&family.to_ascii_lowercase())
+    {
+        name.trim().to_string()
+    } else {
+        format!("{name} {family}").trim().to_string()
+    }
 }
 
 pub(crate) struct PadPlugin;
@@ -79,9 +141,9 @@ impl Plugin for PadPlugin {
     fn build(&self, app: &mut App) {
         // A desktop rehearsal reads pads through gilrs, which benilla's boot leaves out.
         // Vanillish: never where the platform reports the pads itself (gilrs has no Android
-        // backend).
+        // backend); always in Vanillish for Windows (Windows.Gaming.Input).
         if !inilla_platform::gamepad::NATIVE
-            && std::env::var("INILLA_PAD").as_deref() == Ok("1")
+            && (super::ui::words::WINDOWS || std::env::var("INILLA_PAD").as_deref() == Ok("1"))
             && !app.is_plugin_added::<bevy::gilrs::GilrsPlugin>()
         {
             app.add_plugins(bevy::gilrs::GilrsPlugin);
@@ -123,7 +185,8 @@ fn from_bevy(g: &Gamepad) -> PadState {
         (PadButton::Options, GamepadButton::Select),
         (PadButton::Home, GamepadButton::Mode),
     ] {
-        s.set(b, g.pressed(gb));
+        // Vanillish: a tap that went down and up within one frame is still a press.
+        s.set(b, g.pressed(gb) || g.just_pressed(gb));
     }
     s
 }
@@ -137,7 +200,7 @@ fn poll(
     mut synth: ResMut<Synth>,
     mut vm: ResMut<VirtualMouse>,
     mut actions: ResMut<HudActions>,
-    gamepads: Query<(&Gamepad, Option<&Name>)>,
+    gamepads: Query<(Entity, &Gamepad, Option<&Name>)>,
     windows: Query<&Window, With<PrimaryWindow>>,
     look_cfg: Option<Res<LookConfig>>,
     time: Res<Time<Real>>,
@@ -163,10 +226,17 @@ fn poll(
             None => (PadState::default(), None),
         }
     } else {
-        match gamepads.iter().next() {
-            Some((g, n)) => (
+        // Vanillish: the pad in hand, not the first in query order, named with its glyph family.
+        ctl.tick += 1;
+        let used: Vec<(Entity, bool)> = gamepads.iter().map(|(e, g, _)| (e, in_use(g))).collect();
+        match in_hand(&used, &mut ctl.used, ctl.tick).and_then(|e| gamepads.get(e).ok()) {
+            Some((_, g, n)) => (
                 from_bevy(g),
-                Some(n.map_or_else(|| "Controller".to_string(), |n| n.to_string())),
+                Some(desktop_name(
+                    n.map(Name::as_str),
+                    g.vendor_id(),
+                    g.product_id(),
+                )),
             ),
             None => (PadState::default(), None),
         }
@@ -183,7 +253,10 @@ fn poll(
 
     let in_world = *client.get() == ClientState::InWorld;
     // A iNilla screen is up: the controller drives egui's own focus instead (not the game).
-    let state = if overlay.blocks_game() {
+    // Vanillish: nor the game while a desktop window is out of focus — Windows.Gaming.Input stops
+    // reporting then, and a hold it last saw must not stay down.
+    let unfocused = !inilla_platform::gamepad::NATIVE && windows.single().is_ok_and(|w| !w.focused);
+    let state = if overlay.blocks_game() || unfocused {
         PadState::default()
     } else {
         state
@@ -434,5 +507,54 @@ fn run_actions(
                 synth.press(PadBinding::cmd("TARGETNEARESTFRIEND"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Vanillish: the pad last used drives; before any is used, the first; a pad that went away
+    /// is forgotten.
+    #[test]
+    fn the_pad_in_hand_drives() {
+        let mut used = Vec::new();
+        assert_eq!(in_hand::<u8>(&[], &mut used, 1), None);
+        assert_eq!(in_hand(&[(1, false), (2, false)], &mut used, 2), Some(1));
+        assert_eq!(in_hand(&[(1, false), (2, true)], &mut used, 3), Some(2));
+        // Still 2 while nobody touches anything, until 1 is used again.
+        assert_eq!(in_hand(&[(1, false), (2, false)], &mut used, 4), Some(2));
+        assert_eq!(in_hand(&[(1, true), (2, true)], &mut used, 5), Some(1));
+        assert_eq!(in_hand(&[(1, false), (2, true)], &mut used, 6), Some(2));
+        // 2 unplugged: 1 drives, and 2 comes back as a fresh pad.
+        assert_eq!(in_hand(&[(1, false)], &mut used, 7), Some(1));
+        assert_eq!(used.len(), 1);
+        assert_eq!(in_hand(&[(1, false), (2, false)], &mut used, 8), Some(1));
+    }
+
+    /// Vanillish: a desktop pad's name carries its family, so the glyphs follow the USB ids.
+    #[test]
+    fn a_desktop_pad_is_named_with_its_family() {
+        let name = desktop_name(Some("PS5 Controller"), Some(0x054C), Some(0x0CE6));
+        assert_eq!(name, "PS5 Controller DualSense");
+        assert_eq!(GlyphStyle::from_product(&name), GlyphStyle::PlayStation);
+        // A name that says its family already keeps it once.
+        assert_eq!(
+            desktop_name(Some("Xbox Wireless Controller"), Some(0x045E), Some(0x0B13)),
+            "Xbox Wireless Controller"
+        );
+        let switch = desktop_name(
+            Some("Nintendo Switch Pro Controller"),
+            Some(0x057E),
+            Some(0x2009),
+        );
+        assert_eq!(switch, "Nintendo Switch Pro Controller");
+        assert_eq!(GlyphStyle::from_product(&switch), GlyphStyle::Nintendo);
+        assert_eq!(
+            desktop_name(Some("Wireless Controller"), Some(0x054C), Some(0x09CC)),
+            "Wireless Controller DualShock 4"
+        );
+        assert_eq!(desktop_name(None, None, None), "Controller");
+        assert_eq!(desktop_name(Some("Pad"), Some(0x1234), Some(1)), "Pad");
     }
 }

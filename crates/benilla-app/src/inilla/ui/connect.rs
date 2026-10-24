@@ -19,7 +19,7 @@ use crate::inilla::connect::{
     files_step, make_verifier, room_for, save_account, still_needed, Busy, Chain, Connect, Found,
     Kept,
 };
-use crate::inilla::data::{DataState, SPARE};
+use crate::inilla::data::{DataState, PickFor, SPARE};
 use crate::inilla::hud::GOLD;
 use crate::inilla::platform::ImePurpose;
 use crate::inilla::session::{self, LoginQueue};
@@ -274,6 +274,13 @@ fn files(
         token.is_some(),
         connect.token_refused,
     );
+    // Vanillish (Windows): the player's own client is the game data, and nothing the server
+    // offers is downloaded into it.
+    if data.wow_folder().is_some() && step != DataStep::Have {
+        super::setup::wow_folder(ui, inilla, data);
+        data_message(ui, data);
+        return;
+    }
     match step {
         DataStep::Have => {
             let st = &data.status;
@@ -294,17 +301,34 @@ fn files(
                     restart(inilla);
                 }
                 hint(ui, super::relaunch_hint());
+            } else if data.switches_folder() {
+                // Vanillish (Windows): the player let their own client go.
+                super::setup::wow_folder(ui, inilla, data);
+                data_message(ui, data);
             }
         }
         DataStep::BringYourOwn => {
             ui.label(words::BRING_YOUR_OWN);
             if inilla_platform::picker::available() {
+                // Vanillish (Windows): the client already on this PC, read in place, first.
+                if words::WINDOWS {
+                    let button =
+                        egui::Button::new(egui::RichText::new(words::USE_WOW_FOLDER).color(GOLD))
+                            .min_size(egui::vec2(220.0, 44.0));
+                    if ui.add(button).clicked() {
+                        data.pick(PickFor::InPlace);
+                    }
+                }
                 let button =
                     egui::Button::new(egui::RichText::new(words::IMPORT_FOLDER).color(GOLD))
                         .min_size(egui::vec2(220.0, 44.0));
-                if ui.add(button).clicked() && !inilla_platform::picker::pick() {
-                    data.message = Some((false, "The folder picker could not open.".into()));
+                if ui.add(button).clicked() {
+                    data.pick(PickFor::Copy);
                 }
+            }
+            // Vanillish (Windows): a folder let go of takes a restart.
+            if words::WINDOWS {
+                super::setup::wow_folder(ui, inilla, data);
             }
             data_message(ui, data);
         }
