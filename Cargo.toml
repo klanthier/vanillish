@@ -104,3 +104,14 @@ debug = false
 strip = false
 incremental = false
 
+# Vanillish: the Windows PC game. Release optimisation, built as `Vanillish.exe` for MSVC
+# (`windows/build-exe.sh`). No LTO, as for Android and iOS. `strip = false` keeps the PDB whatever
+# `debug` says (a stripped MSVC link gets `/DEBUG:NONE` and writes none). Line tables, because on
+# Windows they go into that PDB and not the exe: a backtrace read against `vanillish.pdb` names
+# files and lines, and the exe is no bigger.
+[profile.windows]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
+incremental = false
+

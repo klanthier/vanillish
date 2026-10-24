@@ -27,6 +27,16 @@ dev = ["benilla-app/dev"]
 [target.'cfg(windows)'.dependencies]
 benilla-app = { path = "../benilla-app", default-features = false, features = ["vanillish"] }
 inilla-platform = { path = "../inilla-platform" }
+# `--console`: the parent's console and the standard handles (src/main.rs).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
 
 [build-dependencies]
 benilla-buildstamp = { path = "../benilla-buildstamp" }
+# The icon, manifest and version (windows/vanillish.rc), compiled for an MSVC target only: rc.exe
+# on Windows, llvm-rc on another host.
+embed-resource = "3"

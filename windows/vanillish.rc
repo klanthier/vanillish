@@ -1,0 +1,45 @@
+// Vanillish.exe's resources: its icon, its manifest and its version, compiled for the MSVC build
+// by crates/vanillish-windows/build.rs, which defines the VANILLISH_* version macros (rc.exe /D).
+// ASCII only: rc.exe reads this file in the build machine's code page.
+
+// Icon 1: Explorer and the taskbar show an exe's first icon group, and the app loads this one by
+// its ordinal for the window (winit's Icon::from_resource(1)).
+1 ICON "Vanillish.ico"
+
+// CREATEPROCESS_MANIFEST_RESOURCE_ID (1) of RT_MANIFEST (24): the loader reads it at start.
+1 24 "vanillish.manifest"
+
+// The numbers are VS_FFI_FILEFLAGSMASK, VOS_NT_WINDOWS32 and VFT_APP from <winver.h>, written out
+// so no SDK header is needed.
+1 VERSIONINFO
+FILEVERSION     VANILLISH_VERSION_MAJOR, VANILLISH_VERSION_MINOR, VANILLISH_VERSION_PATCH, VANILLISH_VERSION_BUILD
+PRODUCTVERSION  VANILLISH_VERSION_MAJOR, VANILLISH_VERSION_MINOR, VANILLISH_VERSION_PATCH, VANILLISH_VERSION_BUILD
+FILEFLAGSMASK   0x3FL
+FILEFLAGS       0x0L
+FILEOS          0x40004L
+FILETYPE        0x1L
+FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // U.S. English, UTF-16.
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Vanillish"
+            VALUE "FileDescription", "Vanillish"
+            VALUE "FileVersion", VANILLISH_VERSION_STR
+            VALUE "InternalName", "vanillish"
+            // \x2014 is an em dash, spelled as an escape to keep this file ASCII.
+            VALUE "LegalCopyright", L"MIT OR Apache-2.0 \x2014 no Blizzard content"
+            VALUE "OriginalFilename", "Vanillish.exe"
+            VALUE "ProductName", "Vanillish"
+            VALUE "ProductVersion", VANILLISH_VERSION_STR
+            VALUE "Comments", "A World of Warcraft 1.12.1 client (benilla). Not affiliated with Blizzard Entertainment."
+            VALUE "Commit", VANILLISH_COMMIT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -17,9 +17,12 @@
 fn main() -> std::process::ExitCode {
     use benilla_app::BuildId;
 
-    if std::env::args_os().skip(1).any(|a| a == "--console") {
-        attach_console();
-    }
+    // Held to the end of `main`: the terminal gets its code page back when the game ends.
+    let _console = std::env::args_os()
+        .skip(1)
+        .any(|a| a == "--console")
+        .then(attach_console)
+        .flatten();
     if let Some(root) = inilla_platform::paths::default_root() {
         inilla_platform::paths::set_root(root);
     }
@@ -42,9 +45,70 @@ fn main() -> std::process::ExitCode {
 }
 
 /// `--console`: print into the terminal that started the exe (a GUI-subsystem exe has none of its
-/// own).
+/// own). It runs before [`benilla_app::inilla_boot`], whose log capture then passes every line on
+/// to this console.
+///
+/// A GUI exe started from a terminal has no standard handles; once attached they are pointed at
+/// the console's own output, `CONOUT$`. A handle that is already valid is a redirect
+/// (`Vanillish.exe --console > log.txt`) and stays. The console's code page becomes UTF-8, for
+/// the bytes written to it as they are (Rust's own console writes are UTF-16); the console is the
+/// terminal's, so the returned guard puts its old code page back.
 #[cfg(windows)]
-fn attach_console() {}
+fn attach_console() -> Option<ConsoleCodePage> {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetConsoleOutputCP, GetStdHandle, SetConsoleOutputCP, SetStdHandle,
+        ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+    // SAFETY: Win32 calls on this process's own standard handles; `conout` is a NUL-terminated
+    // UTF-16 string that outlives the call reading it.
+    unsafe {
+        // Started from Explorer, or the parent has no console: nothing to attach to.
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return None;
+        }
+        let mut console = INVALID_HANDLE_VALUE;
+        for std in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = GetStdHandle(std);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                continue;
+            }
+            if console == INVALID_HANDLE_VALUE {
+                console = CreateFileW(
+                    conout.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                );
+            }
+            if console != INVALID_HANDLE_VALUE {
+                SetStdHandle(std, console);
+            }
+        }
+        let old = GetConsoleOutputCP();
+        (old != 0 && SetConsoleOutputCP(65001) != 0).then_some(ConsoleCodePage(old))
+    }
+}
+
+/// The attached console's code page before [`attach_console`], restored on drop.
+#[cfg(windows)]
+struct ConsoleCodePage(u32);
+
+#[cfg(windows)]
+impl Drop for ConsoleCodePage {
+    fn drop(&mut self) {
+        // SAFETY: a plain Win32 call on the console this process is attached to.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleOutputCP(self.0) };
+    }
+}
 
 #[cfg(not(windows))]
 fn main() -> std::process::ExitCode {
