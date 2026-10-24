@@ -16,6 +16,10 @@ default = ["dev"]
 # name `dep:bevy_egui`.
 dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev"]
 tracy = ["bevy/trace_tracy"]
+# Vanillish: the Vanillish product on a desktop — its name and sentences, Connect as the first
+# screen, the controller on by default. Only `vanillish-windows` turns it on, and only for a
+# Windows target, so no Linux gate (nor iOS, nor Android) ever builds the app with it.
+vanillish = []
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]
 # Links Bevy as a shared library so an incremental rebuild relinks faster. The binary then starts

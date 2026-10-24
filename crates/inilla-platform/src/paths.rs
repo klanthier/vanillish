@@ -23,8 +23,147 @@
 //! at launch; if it still does not, [`storage_unavailable`] says so, and the app asks the player
 //! to open it again rather than set up (or download 5 GB) in a private stand-in that the next
 //! launch would not use. The stand-in (`files/Documents`) only keeps the app running meanwhile.
+//!
+//! **Vanillish (Windows).** The Windows entry ([`set_root`], before the boot) names one folder
+//! that plays the whole container: `%LOCALAPPDATA%\Vanillish`, or the exe's own folder when a
+//! `portable.txt` (or an earlier `benilla-config`) sits beside it ([`choose_root`]). Inside it,
+//! one level each: `benilla-config\` (the state folder, as on every platform), `Data\` (the game
+//! data the app downloads or copies in) and `Cache\`. A player who already has 1.12.1 on this PC
+//! points Vanillish at it instead ([`set_wow_folder`]): the game data is then that folder, read in
+//! place and never written ([`data_in_place`]). Without a root (benilla's own `cargo play` on
+//! Windows) nothing here changes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// Vanillish (Windows): the folder that plays the app container, when the entry set one.
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Vanillish (Windows): play the app container in `root` from now on. Call once, before the boot
+/// (`benilla_app::inilla_boot`); a second call is ignored.
+pub fn set_root(root: PathBuf) {
+    let _ = ROOT.set(root);
+}
+
+/// Vanillish (Windows): the root [`set_root`] named, if any.
+pub fn root() -> Option<&'static Path> {
+    ROOT.get().map(PathBuf::as_path)
+}
+
+/// Vanillish (Windows): the root for an exe in `exe_dir`. Portable — the exe's own folder — when
+/// the player asked for it with a `portable.txt` beside the exe or a portable run already left
+/// its `benilla-config` there, but never inside a WoW install (the install is read-only:
+/// benilla's state is never written into it); otherwise `<local app data>\Vanillish`, and the
+/// exe's folder only when Windows names no local app data.
+pub fn choose_root(exe_dir: Option<&Path>, local_app_data: Option<&Path>) -> Option<PathBuf> {
+    let portable = exe_dir.filter(|d| {
+        (d.join("portable.txt").is_file() || d.join("benilla-config").is_dir())
+            && !is_wow_install(d)
+    });
+    if let Some(d) = portable {
+        return Some(d.to_path_buf());
+    }
+    local_app_data
+        .map(|l| l.join("Vanillish"))
+        .or_else(|| exe_dir.filter(|d| !is_wow_install(d)).map(Path::to_path_buf))
+}
+
+/// Vanillish (Windows): [`choose_root`] for this process — the exe's folder and
+/// `%LOCALAPPDATA%`.
+pub fn default_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(Path::parent);
+    let local = std::env::var_os("LOCALAPPDATA")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    choose_root(exe_dir, local.as_deref())
+}
+
+/// A 1.12.1 client's own folder: its `WoW.exe` (any case) beside a `Data` folder.
+fn is_wow_install(dir: &Path) -> bool {
+    let has_exe = std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("wow.exe"))
+    });
+    has_exe && dir.join("Data").is_dir()
+}
+
+/// Vanillish (Windows): the `Data` folder of the 1.12.1 client the player pointed at, which may
+/// be the client's folder (with `WoW.exe` and `Data\` in it) or its `Data` folder itself.
+pub fn wow_data_in(picked: &Path) -> PathBuf {
+    let data = picked.join("Data");
+    if data.is_dir() {
+        data
+    } else {
+        picked.to_path_buf()
+    }
+}
+
+/// Where the WoW-folder setting is kept: `benilla-config\inilla\install.toml`.
+fn install_file() -> Option<PathBuf> {
+    root().map(|r| r.join("benilla-config").join("inilla").join("install.toml"))
+}
+
+/// Vanillish (Windows): the `Data` folder of the player's own 1.12.1 client, read in place, when
+/// they pointed Vanillish at one ([`set_wow_folder`]); `None` without a root.
+pub fn wow_folder() -> Option<PathBuf> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let text = std::fs::read_to_string(install_file()?).ok()?;
+        let table: toml::Table = toml::from_str(&text).ok()?;
+        table
+            .get("wow_data")
+            .and_then(toml::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        None
+    }
+}
+
+/// Vanillish (Windows): read the game data from the player's own client in `data` (its `Data`
+/// folder, see [`wow_data_in`]) from the next launch on, or, with `None`, from Vanillish's own
+/// `Data` folder again. The archives are opened at launch, so this takes a restart.
+pub fn set_wow_folder(data: Option<&Path>) -> std::io::Result<()> {
+    let Some(file) = install_file() else {
+        return Err(std::io::Error::other("no Vanillish folder on this platform"));
+    };
+    match data {
+        None => match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+        #[cfg(not(target_os = "ios"))]
+        Some(dir) => {
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut table = toml::Table::new();
+            table.insert(
+                "wow_data".into(),
+                toml::Value::String(dir.to_string_lossy().into_owned()),
+            );
+            let text = format!(
+                "# Vanillish reads the game data from this folder, in place, and never writes \
+                 into it.\n{}",
+                toml::to_string(&table).map_err(std::io::Error::other)?
+            );
+            let tmp = file.with_extension("toml.tmp");
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, &file)
+        }
+        #[cfg(target_os = "ios")]
+        Some(_) => Err(std::io::Error::other("no Vanillish folder on this platform")),
+    }
+}
+
+/// Vanillish (Windows): the game data is the player's own client, read in place: nothing may be
+/// downloaded, copied or moved into [`data_dir`].
+pub fn data_in_place() -> bool {
+    root().is_some() && wow_folder().is_some()
+}
 
 /// Vanillish: the Android roots, `(documents, app_support, caches)`. Without shared storage, a
 /// private stand-in, flagged by [`storage_unavailable`].
@@ -80,11 +219,11 @@ pub fn in_container() -> bool {
     }
     #[cfg(not(target_os = "android"))]
     {
-        home().is_some()
+        root().is_some() || home().is_some()
     }
 }
 
-/// `Documents/` — visible in the Files app (Android: over USB from a PC).
+/// `Documents/` — visible in the Files app (Android: over USB from a PC; Windows: the root).
 pub fn documents() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
@@ -92,11 +231,13 @@ pub fn documents() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        home().map(|h| h.join("Documents"))
+        root()
+            .map(Path::to_path_buf)
+            .or_else(|| home().map(|h| h.join("Documents")))
     }
 }
 
-/// `Library/Application Support/iNilla/` (Android: `<documents>/.vanillish/`).
+/// `Library/Application Support/iNilla/` (Android: `<documents>/.vanillish/`; Windows: the root).
 pub fn app_support() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
@@ -104,11 +245,14 @@ pub fn app_support() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        home().map(|h| h.join("Library").join("Application Support").join("iNilla"))
+        root().map(Path::to_path_buf).or_else(|| {
+            home().map(|h| h.join("Library").join("Application Support").join("iNilla"))
+        })
     }
 }
 
-/// `Library/Caches/iNilla/` — may be purged by the OS under storage pressure.
+/// `Library/Caches/iNilla/` — may be purged by the OS under storage pressure (Windows:
+/// `<root>\Cache`).
 pub fn caches() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
@@ -116,12 +260,20 @@ pub fn caches() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        home().map(|h| h.join("Library").join("Caches").join("iNilla"))
+        root()
+            .map(|r| r.join("Cache"))
+            .or_else(|| home().map(|h| h.join("Library").join("Caches").join("iNilla")))
     }
 }
 
-/// The game data folder (`WOW_DATA`).
+/// The game data folder (`WOW_DATA`). Vanillish (Windows): the player's own client's, when they
+/// pointed Vanillish at one ([`wow_folder`]).
 pub fn data_dir() -> Option<PathBuf> {
+    if root().is_some() {
+        if let Some(own) = wow_folder() {
+            return Some(own);
+        }
+    }
     app_support().map(|d| d.join("Data"))
 }
 
@@ -140,11 +292,16 @@ pub enum Host {
     Desktop,
     /// Vanillish: the Android app.
     Android,
+    /// Vanillish: the Windows app, in its own folder ([`set_root`]).
+    Windows,
 }
 
 pub fn host() -> Host {
     if cfg!(target_os = "android") {
         return Host::Android;
+    }
+    if root().is_some() {
+        return Host::Windows;
     }
     if !cfg!(target_os = "ios") {
         return Host::Desktop;
@@ -210,12 +367,71 @@ pub fn files_location_for(host: Host, home: &str) -> String {
             Some(d) => d.display().to_string(),
             None => "benilla-config beside the binary".to_string(),
         },
+        // The root, as File Explorer's address bar shows it.
+        Host::Windows => documents()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh scratch folder under the system's temp dir.
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("inilla-paths-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_windows_root_is_local_app_data_unless_portable() {
+        let exe = scratch("exe");
+        let local = scratch("local");
+        assert_eq!(
+            choose_root(Some(&exe), Some(&local)),
+            Some(local.join("Vanillish"))
+        );
+        // No local app data: the exe's own folder.
+        assert_eq!(choose_root(Some(&exe), None), Some(exe.clone()));
+        assert_eq!(choose_root(None, None), None);
+        // `portable.txt`, or a portable run's state folder, keeps everything beside the exe.
+        std::fs::write(exe.join("portable.txt"), "").unwrap();
+        assert_eq!(choose_root(Some(&exe), Some(&local)), Some(exe.clone()));
+        std::fs::remove_file(exe.join("portable.txt")).unwrap();
+        std::fs::create_dir(exe.join("benilla-config")).unwrap();
+        assert_eq!(choose_root(Some(&exe), Some(&local)), Some(exe.clone()));
+        let _ = std::fs::remove_dir_all(&exe);
+        let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn a_wow_install_is_never_the_root() {
+        let wow = scratch("wow");
+        std::fs::write(wow.join("WoW.exe"), "").unwrap();
+        std::fs::create_dir(wow.join("Data")).unwrap();
+        std::fs::write(wow.join("portable.txt"), "").unwrap();
+        let local = scratch("local2");
+        assert_eq!(
+            choose_root(Some(&wow), Some(&local)),
+            Some(local.join("Vanillish"))
+        );
+        assert_eq!(choose_root(Some(&wow), None), None);
+        let _ = std::fs::remove_dir_all(&wow);
+        let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn a_picked_client_folder_means_its_data() {
+        let wow = scratch("picked");
+        assert_eq!(wow_data_in(&wow), wow);
+        std::fs::create_dir(wow.join("Data")).unwrap();
+        assert_eq!(wow_data_in(&wow), wow.join("Data"));
+        assert_eq!(wow_data_in(&wow.join("Data")), wow.join("Data"));
+        let _ = std::fs::remove_dir_all(&wow);
+    }
 
     #[test]
     fn the_android_drop_box_is_named_by_its_package() {
