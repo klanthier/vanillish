@@ -3956,6 +3956,7 @@ dependencies = [
 name = "inilla-platform"
 version = "0.2.0"
 dependencies = [
+ "arboard",
  "block2 0.6.2",
  "crossbeam-channel",
  "inilla-core",
@@ -3966,6 +3967,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "security-framework",
  "toml",
+ "windows 0.62.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -32,3 +32,31 @@ toml = "0.8"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
+
+# Vanillish: the Windows host glue (`src/windows/`). windows-sys 0.59 (benilla-app's and arboard's)
+# for the Win32 calls; windows 0.62 (cpal's and gilrs's) for the folder dialog's COM and the
+# connection cost's WinRT; arboard 3 (benilla-app's text boxes') for the clipboard. None adds a crate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.62", features = [
+    "Networking_Connectivity",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
+arboard = { version = "3", default-features = false }

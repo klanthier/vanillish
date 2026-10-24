@@ -1,6 +1,7 @@
 //! The system pasteboard (`UIPasteboard.generalPasteboard`) — the iOS backend for benilla's
 //! copy/paste chords. On other platforms benilla keeps its own backends (arboard, Wayland); these
-//! answer `None` / do nothing. Vanillish: Android's `ClipboardManager` answers here too.
+//! answer `None` / do nothing. Vanillish: Android's `ClipboardManager` answers here too, and on
+//! Windows the clipboard (through arboard), for iNilla's own Copy buttons.
 
 /// The pasteboard's text, if it holds any.
 pub fn get() -> Option<String> {
@@ -12,7 +13,11 @@ pub fn get() -> Option<String> {
     {
         crate::android::clipboard::get()
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(windows)]
+    {
+        crate::windows::pasteboard::get()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         None
     }
@@ -28,7 +33,11 @@ pub fn set(text: &str) -> bool {
     {
         crate::android::clipboard::set(text)
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(windows)]
+    {
+        crate::windows::pasteboard::set(text)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         let _ = text;
         false

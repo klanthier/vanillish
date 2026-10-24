@@ -8,7 +8,8 @@
 //!
 //! Vanillish: on Android they are sealed with a key in the **Android Keystore** and kept in the
 //! app's private storage (`crate::android::keychain`); the fallback dir — on Android a folder a
-//! PC can browse — is never used there.
+//! PC can browse — is never used there. On Windows the same map is sealed with **DPAPI** for the
+//! Windows account (`crate::windows::keychain`), as `secrets.bin` in the fallback dir.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -18,11 +19,18 @@ const SERVICE: &str = "inilla";
 
 static FALLBACK: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Where the desktop fallback file lives (`<dir>/secrets.toml`). Ignored on iOS.
+/// Where the desktop fallback file lives (`<dir>/secrets.toml`; Vanillish: `<dir>/secrets.bin`
+/// on Windows). Ignored on iOS.
 pub fn set_fallback_dir(dir: PathBuf) {
     if let Ok(mut g) = FALLBACK.lock() {
         *g = Some(dir);
     }
+}
+
+/// Vanillish: the folder [`set_fallback_dir`] named, for Windows' sealed file.
+#[cfg(windows)]
+pub(crate) fn fallback_dir() -> Option<PathBuf> {
+    FALLBACK.lock().ok().and_then(|g| g.clone())
 }
 
 pub fn get(key: &str) -> Option<String> {
@@ -36,7 +44,11 @@ pub fn get(key: &str) -> Option<String> {
     {
         crate::android::keychain::get(key)
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(windows)]
+    {
+        crate::windows::keychain::get(key)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         file::load().remove(key)
     }
@@ -52,7 +64,11 @@ pub fn set(key: &str, secret: &str) -> Result<(), String> {
     {
         crate::android::keychain::set(key, secret)
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(windows)]
+    {
+        crate::windows::keychain::set(key, secret)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         let mut all = file::load();
         all.insert(key.to_string(), secret.to_string());
@@ -69,7 +85,11 @@ pub fn delete(key: &str) {
     {
         crate::android::keychain::delete(key);
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(windows)]
+    {
+        crate::windows::keychain::delete(key);
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         let mut all = file::load();
         if all.remove(key).is_some() {
@@ -79,10 +99,10 @@ pub fn delete(key: &str) {
 }
 
 /// Vanillish: what one read of Android's sealed password file comes to
-/// (`crate::android::keychain`). Pure, so the decision that may forget every saved password is
-/// tested on the host.
+/// (`crate::android::keychain`; Windows' too, `crate::windows::keychain`). Pure, so the decision
+/// that may forget every saved password is tested on the host.
 #[cfg(not(target_os = "ios"))]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", windows)), allow(dead_code))]
 #[derive(Debug, PartialEq)]
 pub(crate) enum Unsealed {
     /// The saved passwords.
@@ -97,10 +117,10 @@ pub(crate) enum Unsealed {
     Failed,
 }
 
-/// Judge `Bridge.unseal`'s answer: `Ok(Some)` the plain bytes, `Ok(None)` gone for good, `Err`
-/// failed this time.
+/// Judge `Bridge.unseal`'s answer (Windows: [`dpapi_answer`]'s): `Ok(Some)` the plain bytes,
+/// `Ok(None)` gone for good, `Err` failed this time.
 #[cfg(not(target_os = "ios"))]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", windows)), allow(dead_code))]
 pub(crate) fn judge(unsealed: Result<Option<Vec<u8>>, ()>) -> Unsealed {
     match unsealed {
         Err(()) => Unsealed::Failed,
@@ -113,7 +133,26 @@ pub(crate) fn judge(unsealed: Result<Option<Vec<u8>>, ()>) -> Unsealed {
     }
 }
 
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+/// Vanillish: `CryptUnprotectData`'s answer — the plain bytes, or the error it left in
+/// `GetLastError` — as [`judge`] takes it. Only a system that could not answer this time fails
+/// this time (out of memory, busy, the security service's RPC down); any other refusal is about
+/// the blob, which then never unseals: sealed by another Windows account or on another PC
+/// (`NTE_BAD_KEY_STATE`), damaged (`ERROR_INVALID_DATA`, `NTE_BAD_DATA`).
+#[cfg(not(target_os = "ios"))]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn dpapi_answer(unsealed: Result<Vec<u8>, u32>) -> Result<Option<Vec<u8>>, ()> {
+    /// ERROR_NOT_ENOUGH_MEMORY, ERROR_OUTOFMEMORY, ERROR_BUSY, ERROR_TIMEOUT,
+    /// RPC_S_SERVER_UNAVAILABLE, RPC_S_SERVER_TOO_BUSY, RPC_S_CALL_FAILED,
+    /// RPC_S_CALL_FAILED_DNE, E_OUTOFMEMORY.
+    const THIS_TIME: [u32; 9] = [8, 14, 170, 1460, 1722, 1723, 1726, 1727, 0x8007_000E];
+    match unsealed {
+        Ok(plain) => Ok(Some(plain)),
+        Err(code) if THIS_TIME.contains(&code) => Err(()),
+        Err(_) => Ok(None),
+    }
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
 mod file {
     use std::collections::BTreeMap;
 
@@ -187,5 +226,19 @@ mod tests {
         assert_eq!(judge(Ok(Some(b"not = [toml".to_vec()))), Unsealed::Gone);
         // A busy Keystore or a JNI failure keeps everything for the next try.
         assert_eq!(judge(Err(())), Unsealed::Failed);
+    }
+
+    #[test]
+    fn only_a_busy_windows_keeps_a_file_dpapi_refused() {
+        let plain = b"\"account:a\" = \"hunter2\"\n".to_vec();
+        assert_eq!(dpapi_answer(Ok(plain.clone())), Ok(Some(plain)));
+        // Another account's or another PC's blob, a damaged one: gone for good.
+        assert_eq!(dpapi_answer(Err(0x8009_000B)), Ok(None));
+        assert_eq!(dpapi_answer(Err(13)), Ok(None));
+        assert_eq!(dpapi_answer(Err(0x8009_0005)), Ok(None));
+        assert_eq!(judge(dpapi_answer(Err(87))), Unsealed::Gone);
+        // The security service out of reach, or no memory: this time only.
+        assert_eq!(dpapi_answer(Err(1722)), Err(()));
+        assert_eq!(judge(dpapi_answer(Err(8))), Unsealed::Failed);
     }
 }

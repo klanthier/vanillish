@@ -63,9 +63,11 @@ pub fn choose_root(exe_dir: Option<&Path>, local_app_data: Option<&Path>) -> Opt
     if let Some(d) = portable {
         return Some(d.to_path_buf());
     }
-    local_app_data
-        .map(|l| l.join("Vanillish"))
-        .or_else(|| exe_dir.filter(|d| !is_wow_install(d)).map(Path::to_path_buf))
+    local_app_data.map(|l| l.join("Vanillish")).or_else(|| {
+        exe_dir
+            .filter(|d| !is_wow_install(d))
+            .map(Path::to_path_buf)
+    })
 }
 
 /// Vanillish (Windows): [`choose_root`] for this process — the exe's folder and
@@ -82,8 +84,11 @@ pub fn default_root() -> Option<PathBuf> {
 /// A 1.12.1 client's own folder: its `WoW.exe` (any case) beside a `Data` folder.
 fn is_wow_install(dir: &Path) -> bool {
     let has_exe = std::fs::read_dir(dir).is_ok_and(|rd| {
-        rd.flatten()
-            .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("wow.exe"))
+        rd.flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("wow.exe")
+        })
     });
     has_exe && dir.join("Data").is_dir()
 }
@@ -128,7 +133,9 @@ pub fn wow_folder() -> Option<PathBuf> {
 /// `Data` folder again. The archives are opened at launch, so this takes a restart.
 pub fn set_wow_folder(data: Option<&Path>) -> std::io::Result<()> {
     let Some(file) = install_file() else {
-        return Err(std::io::Error::other("no Vanillish folder on this platform"));
+        return Err(std::io::Error::other(
+            "no Vanillish folder on this platform",
+        ));
     };
     match data {
         None => match std::fs::remove_file(&file) {
@@ -155,7 +162,9 @@ pub fn set_wow_folder(data: Option<&Path>) -> std::io::Result<()> {
             std::fs::rename(&tmp, &file)
         }
         #[cfg(target_os = "ios")]
-        Some(_) => Err(std::io::Error::other("no Vanillish folder on this platform")),
+        Some(_) => Err(std::io::Error::other(
+            "no Vanillish folder on this platform",
+        )),
     }
 }
 

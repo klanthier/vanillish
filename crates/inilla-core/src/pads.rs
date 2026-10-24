@@ -58,13 +58,23 @@ mod tests {
     fn gilrs_names_meet_their_family() {
         // gilrs names SDL-mapped pads after the mapping ("PS5 Controller"), which the name test
         // alone reads as Xbox; the family puts it right.
-        let style = |name: &str, v, p| GlyphStyle::from_product(&format!("{name} {}", family(v, p)));
-        assert_eq!(style("PS5 Controller", 0x054C, 0x0CE6), GlyphStyle::PlayStation);
-        assert_eq!(style("PS4 Controller", 0x054C, 0x09CC), GlyphStyle::PlayStation);
+        let style =
+            |name: &str, v, p| GlyphStyle::from_product(&format!("{name} {}", family(v, p)));
+        assert_eq!(
+            style("PS5 Controller", 0x054C, 0x0CE6),
+            GlyphStyle::PlayStation
+        );
+        assert_eq!(
+            style("PS4 Controller", 0x054C, 0x09CC),
+            GlyphStyle::PlayStation
+        );
         assert_eq!(
             style("Nintendo Switch Pro Controller", 0x057E, 0x2009),
             GlyphStyle::Nintendo
         );
-        assert_eq!(style("Xbox Wireless Controller", 0x045E, 0x0B13), GlyphStyle::Xbox);
+        assert_eq!(
+            style("Xbox Wireless Controller", 0x045E, 0x0B13),
+            GlyphStyle::Xbox
+        );
     }
 }
