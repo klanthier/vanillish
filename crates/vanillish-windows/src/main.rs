@@ -28,7 +28,11 @@ fn main() -> std::process::ExitCode {
     }
     benilla_app::inilla_boot();
     let build = BuildId {
-        version: env!("CARGO_PKG_VERSION"),
+        // A release's own version (`vanillish-vX.Y.Z`, as the exe's version resource says it).
+        version: match option_env!("VANILLISH_VERSION_NAME") {
+            Some(v) => v,
+            None => env!("CARGO_PKG_VERSION"),
+        },
         describe: env!("BENILLA_GIT_DESCRIBE"),
         sha: env!("BENILLA_GIT_SHA"),
         short: env!("BENILLA_GIT_SHORT"),
@@ -38,10 +42,53 @@ fn main() -> std::process::ExitCode {
         project_dir: "",
         ..Default::default()
     };
-    match benilla_app::run(build) {
-        benilla_app::AppExit::Success => std::process::ExitCode::SUCCESS,
-        benilla_app::AppExit::Error(code) => std::process::ExitCode::from(code.get()),
+    // A GUI exe that panics just vanishes: say so, and where the crash report went (benilla's
+    // hook wrote it before the unwind reached here).
+    match std::panic::catch_unwind(|| benilla_app::run(build)) {
+        Ok(benilla_app::AppExit::Success) => std::process::ExitCode::SUCCESS,
+        Ok(benilla_app::AppExit::Error(code)) => std::process::ExitCode::from(code.get()),
+        Err(payload) => {
+            let why = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            stopped(&why);
+            std::process::ExitCode::FAILURE
+        }
     }
+}
+
+/// The message box a player sees when the game stopped on a panic.
+#[cfg(windows)]
+fn stopped(why: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let first = why
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(300)
+        .collect::<String>();
+    let folder = inilla_platform::paths::config_dir()
+        .map(|c| c.join("Diagnostics").display().to_string())
+        .unwrap_or_else(|| "benilla-config\\Diagnostics".into());
+    let text = format!(
+        "Vanillish stopped unexpectedly.\n\n{first}\n\nA crash report and the session log are in \
+         {folder}."
+    );
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (text, title) = (wide(&text), wide("Vanillish"));
+    // SAFETY: two NUL-terminated UTF-16 strings that outlive the call; no owner window.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
 }
 
 /// `--console`: print into the terminal that started the exe (a GUI-subsystem exe has none of its

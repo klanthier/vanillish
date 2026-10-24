@@ -182,6 +182,11 @@ impl DataState {
     fn use_wow_folder(&mut self, tree: &str, label: &str) {
         picker::forget(tree);
         let data = inilla_platform::paths::wow_data_in(Path::new(tree));
+        // Vanillish's own folder is where its own copy lives, not a client to play in place.
+        if inilla_platform::paths::root().is_some_and(|r| data.starts_with(r)) {
+            self.message = Some((false, words::WOW_FOLDER_IS_OURS.into()));
+            return;
+        }
         let st = kd::status(&data);
         if !st.complete() {
             self.message = Some((

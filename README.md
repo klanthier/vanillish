@@ -47,6 +47,13 @@ Vanillish is tuned for the **Samsung Galaxy Z Fold8 Ultra**:
 - And Android's own: the system keyboard with its suggestions, Back as the game's Escape, passwords
   sealed with an Android Keystore key, logcat and the share sheet for logs.
 
+**Vanillish for Windows** is the same client as a Windows PC game: one `Vanillish.exe` in a zip,
+Connect first, the launcher and the admin menu. An Xbox controller works the moment it is
+connected, in iNilla's WoW Forever layout, and the button glyphs follow the pad. It plays a 1.12.1
+client already on the PC where it is (*Use my WoW folder…*: nothing copied, nothing written into
+it), or downloads the files from your server ([docs/WINDOWS.md](docs/WINDOWS.md); building:
+[docs/WINDOWS-BUILD.md](docs/WINDOWS-BUILD.md)).
+
 Other arm64 phones and tablets get the phone or the inner-screen layout by their screen's shape.
 Vanillish has been built and checked on Linux only so far; [docs/ANDROID.md](docs/ANDROID.md#what-needs-a-device)
 lists what the first device runs must confirm.
@@ -85,6 +92,8 @@ The whole APK builds on Linux or macOS, and on CI on a single Linux runner — s
 | [docs/ANDROID-DATA.md](docs/ANDROID-DATA.md) | getting the game data onto the phone |
 | [server/README.md](server/README.md) | your own server: one command on a Mac, Linux or Windows, and its admin menu (rates and gold from the app) |
 | [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md) | building, signing and installing the APK, CI, debugging on Android |
+| [docs/WINDOWS.md](docs/WINDOWS.md) | Vanillish for Windows: install, the game data (your own client in place), the Xbox controller, where the files are, known limits |
+| [docs/WINDOWS-BUILD.md](docs/WINDOWS-BUILD.md) | building `Vanillish.exe` and its zip, CI, checking Windows from Linux |
 | [docs/INILLA.md](docs/INILLA.md) | the touch controls, the controller, the launcher and the settings, which Vanillish shares |
 | [docs/DEBUGGING.md](docs/DEBUGGING.md) | the remote console, logs, the desktop rehearsal |
 | [docs/UPSTREAM.md](docs/UPSTREAM.md) | syncing iNilla and benilla, and every file of theirs Vanillish changes |

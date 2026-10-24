@@ -188,6 +188,11 @@ pub(crate) fn wow_folder_incomplete(label: &str, missing: &[&str]) -> String {
     )
 }
 
+/// Vanillish (Windows): the picked folder is Vanillish's own.
+pub(crate) const WOW_FOLDER_IS_OURS: &str =
+    "That is Vanillish's own folder, where its own copy of \
+     the game files goes: choose the folder of your World of Warcraft 1.12.1 client instead.";
+
 /// Vanillish (Windows): what the next start reads, once the player picked their client or let it
 /// go.
 pub(crate) const WOW_FOLDER_CHOSEN: &str = "Vanillish plays from this folder from its next start: \

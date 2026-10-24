@@ -192,6 +192,9 @@ rm -rf "$OUT"
 mkdir -p "$OUT/Vanillish" "$OUT/symbols"
 cp "$EXE" "$OUT/Vanillish/Vanillish.exe"
 cp "$PDB" "$OUT/symbols/vanillish.pdb"
+# Beside the exe too: a crash report's backtrace names functions only where the PDB is found, and
+# the exe names it `vanillish.pdb` alone (`/PDBALTPATH`), which the exe's own folder answers.
+cp "$PDB" "$OUT/Vanillish/vanillish.pdb"
 echo "$short" >"$OUT/symbols/commit.txt"
 cp "$ROOT/LICENSE-MIT" "$ROOT/LICENSE-APACHE" "$ROOT/windows/Vanillish-512.png" "$OUT/Vanillish/"
 # CRLF: Notepad's line endings.

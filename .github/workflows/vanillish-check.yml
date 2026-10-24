@@ -122,6 +122,14 @@ jobs:
           source windows/toolchain/linux-env.sh
           cargo clippy --target x86_64-pc-windows-gnu -p inilla-platform -p vanillish-windows --no-deps -- -D warnings
 
+      - name: Clippy (the app as the Windows product, x86_64-pc-windows-gnu)
+        # The app with its `vanillish` feature and its tests, as Vanillish.exe builds it but with
+        # default features (`dev`): the iNilla layer's Windows paths, which the entry's --no-deps
+        # step does not lint. Without `dev` three upstream imports go unused.
+        run: |
+          source windows/toolchain/linux-env.sh
+          cargo clippy --target x86_64-pc-windows-gnu -p benilla-app --features vanillish --all-targets -- -D warnings
+
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           cache-provider: basic # the open-source GitHub Actions cache, not the commercial service
