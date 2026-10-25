@@ -67,7 +67,7 @@ pub(super) fn show(
         SettingsTab::Debug => debug(ui, overlay, inilla),
         SettingsTab::About => about(ui, inilla, data, build),
         // Vanillish: the server admin menu.
-        SettingsTab::Server => super::admin::show(ui, admin),
+        SettingsTab::Server => super::admin::show(ui, admin, inilla),
     });
 }
 

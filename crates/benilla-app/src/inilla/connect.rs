@@ -128,11 +128,14 @@ impl Connect {
         self.job.as_ref().map(|(b, _)| *b)
     }
 
-    /// The server Connect found, while it is still the launcher's current one.
+    /// The server Connect found, while it is still the launcher's current one, at the address it
+    /// was found at (Settings → Server can move it: then it is asked again there).
     pub(crate) fn here(&self, current: Option<&ServerProfile>) -> Option<&Found> {
-        self.found
-            .as_ref()
-            .filter(|f| current.is_some_and(|c| c.id == f.id))
+        self.found.as_ref().filter(|f| {
+            current.is_some_and(|c| {
+                c.id == f.id && (f.info.is_none() || c.info.as_deref() == Some(f.base.as_str()))
+            })
+        })
     }
 
     /// The base to ask again on its own, once: the current server's, when Connect reopens for a

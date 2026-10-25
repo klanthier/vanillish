@@ -37,6 +37,8 @@ pub(crate) struct ServerForm {
     /// itself, and the language picked for its data.
     info: Option<String>,
     locale: Option<String>,
+    /// Vanillish: the host when the form opened: a new one takes `info` along when it was there.
+    opened_host: String,
     /// Vanillish: a sentence over the form (why Connect opened it).
     note: Option<String>,
 }
@@ -64,6 +66,7 @@ impl ServerForm {
             info: s.info.clone(),
             locale: s.data.as_ref().and_then(|d| d.locale.clone()),
             note: None,
+            opened_host: s.host.clone(),
         }
     }
 
@@ -111,7 +114,11 @@ impl ServerForm {
             locale: self.locale.clone(),
         });
         p.notes = self.notes.trim().to_string();
-        p.info = self.info.clone();
+        // Vanillish: a host edited here takes the data host Connect found on it along.
+        p.info = self
+            .info
+            .clone()
+            .map(|i| inilla_core::connect::rehost(&i, &self.opened_host, &p.host).unwrap_or(i));
         let errs = p.validate();
         if errs.is_empty() {
             Ok(p)
