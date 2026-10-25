@@ -5,14 +5,19 @@
 #   build  (read-only token)  the engine-free tests on Windows, clippy for the MSVC target, then
 #                             windows/build-exe.sh: the exe, its checks, the zip and the notes
 #
-# Run it from the Actions tab (Run workflow) for a test build: the run's artifacts are the zip itself
-# (under its own name) and Vanillish-windows-symbols-<commit> (vanillish.pdb, for a crash's
-# addresses). It has no tag trigger of its own: releases are vanillish-apk.yml's, which can call this
+# Run it from the Actions tab (Run workflow) for a test build, or open a pull request that touches the
+# client: the run's artifacts are the zip itself (under its own name) and
+# Vanillish-windows-symbols-<commit> (vanillish.pdb, for a crash's addresses), so a pull request's
+# exe can be tried on a PC before it lands. It has no tag trigger of its own: releases are vanillish-apk.yml's, which can call this
 # file (workflow_call with `release-tag`) and attach the zip beside the APK, so no second workflow
 # races it to create the same GitHub Release. Not signed: SmartScreen asks once (the notes say how).
 name: vanillish-windows
 
 on:
+  # A pull request's own build, to try on a PC (free on this public repository's standard runners).
+  # What cannot change the exe stays out.
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "ios/**", "android/**", "server/**"]
   workflow_dispatch:
     inputs:
       dev:

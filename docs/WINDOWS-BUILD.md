@@ -2,8 +2,9 @@
 
 ## The short version
 
-1. **Actions → vanillish-windows → Run workflow.** One Windows runner builds everything. Estimates:
-   about 50–80 minutes the first time, about 15–25 once the cache is warm.
+1. **Actions → vanillish-windows → Run workflow**, or open a pull request that touches the client
+   (each one builds its own zip). One Windows runner builds everything. Estimates: about 50–80
+   minutes the first time, about 15–25 once the cache is warm.
 2. Download the run's artifact `Vanillish-<commit>-windows-x64.zip`. It is the zip itself, under
    its own name.
 3. Extract it to a folder of your own (`C:\Games\Vanillish`, never Program Files) and open
@@ -88,7 +89,7 @@ no link. The shipping exe is MSVC, built on Windows.
 | workflow | when | what |
 |---|---|---|
 | `vanillish-check.yml` | every push and PR | among the rest, the Windows cross check and clippy for x86_64-pc-windows-gnu |
-| `vanillish-windows.yml` | Run workflow; called by a release later | the Windows tests, clippy for MSVC, `Vanillish.exe` and the zip |
+| `vanillish-windows.yml` | Run workflow; every pull request that touches the client; called by a release later | the Windows tests, clippy for MSVC, `Vanillish.exe` and the zip |
 
 Artifacts are kept 14 days:
 
