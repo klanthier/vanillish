@@ -196,9 +196,15 @@ fn setup_egui(app: &mut App) {
     if app.is_plugin_added::<EguiPlugin>() {
         return;
     }
-    // Vanillish: `VANILLISH_EGUI_BINDLESS=0` draws egui without its bindless texture arrays (a
-    // device feature some Direct3D 12 drivers lose the device on).
-    let bindless = std::env::var("VANILLISH_EGUI_BINDLESS").as_deref() != Ok("0");
+    // Vanillish: no bindless texture arrays for egui on Windows: drawing the first screen with
+    // them loses the Direct3D 12 device within seconds (Microsoft's WARP, measured: the game then
+    // ends), and the screens draw few textures. `VANILLISH_EGUI_BINDLESS=1` or `0` decides it on
+    // any platform.
+    let bindless = match std::env::var("VANILLISH_EGUI_BINDLESS").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => !cfg!(windows),
+    };
     app.add_plugins(EguiPlugin {
         bindless_mode_array_size: EguiPlugin::default()
             .bindless_mode_array_size

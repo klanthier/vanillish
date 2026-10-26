@@ -89,7 +89,7 @@ no link. The shipping exe is MSVC, built on Windows.
 | workflow | when | what |
 |---|---|---|
 | `vanillish-check.yml` | every push and PR | among the rest, the Windows cross check and clippy for x86_64-pc-windows-gnu |
-| `vanillish-windows.yml` | Run workflow; every pull request that touches the client; called by a release later | the Windows tests, clippy for MSVC, `Vanillish.exe` and the zip |
+| `vanillish-windows.yml` | Run workflow; every pull request that touches the client; called by a release later | the Windows tests, clippy for MSVC, `Vanillish.exe` and the zip, then a smoke run: the zip's exe started as a player starts it (no game data) must still be running after 45 s on the runner's software renderer (WARP, Direct3D 12) |
 
 Artifacts are kept 14 days:
 

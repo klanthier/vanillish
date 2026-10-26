@@ -125,9 +125,18 @@ Windows account, in `benilla-config\inilla\secrets.bin`.
   Terminal, prints the same lines there too.
 - **Without a console.** With no console attached, the lines also go to the debugger output, which
   Sysinternals' DebugView shows.
-- **A crash.** If the game stops on a panic, a message box says so and names the folder that holds
-  the crash report. The report's backtrace names functions, because `vanillish.pdb` sits beside the
-  exe.
+- **A crash.** If the game stops, on a panic or with an error code, a message box says so and
+  names the folder that holds the crash report. When the renderer stopped it (the GPU device was
+  lost), the box says the graphics driver stopped responding. The report's backtrace names
+  functions, because `vanillish.pdb` sits beside the exe. The session log's last lines say why the
+  app ended (`vanillish: the app is ending`) and when the GPU device was lost.
+- **The graphics API.** Vanillish uses Vulkan, else Direct3D 12 (never OpenGL); its log's
+  `AdapterInfo` line names the GPU and the API. To try the other one, start it from a Command
+  Prompt with `set WGPU_BACKEND=dx12` (or `vulkan`) first. `set WGPU_SETTINGS_PRIO=compatibility`
+  asks the GPU for its baseline features only.
+- **egui without bindless.** Vanillish's own screens draw without egui's bindless texture arrays on
+  Windows: with them, the first screen lost the Direct3D 12 device within seconds, and the game
+  ended (measured on Microsoft's WARP; `VANILLISH_EGUI_BINDLESS=1` turns them back on).
 - **The remote console** ([DEBUGGING.md](DEBUGGING.md)) lists the PC's LAN address: Wi-Fi and
   Ethernet first, WSL, Hyper-V, Docker and VPN adapters last. The first time, Windows Firewall
   asks whether Vanillish may accept connections: allow it on Private networks.
