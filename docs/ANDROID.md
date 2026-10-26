@@ -139,6 +139,13 @@ while you play and kept when the server restarts, and gold for players. Open Set
 **N** button in the top strip of the touch controls, then the **Server** tab (iOS has none). It is
 for the launcher's current server, under its name and the address it is asked at.
 
+- **The address**: tap it, or **Change**, and type where the server is now (as in Connect: an IP,
+  a name such as `my-mac.local`, port 8099 unless you add another), then **Use** (not while a
+  change or a gold send is on its way). It becomes the server's own: the menu and Connect ask there
+  from now on, and the realm's address moves with it when it was on the same machine (a realm on
+  another machine stays). The code, the accounts and a gold send kept for a replay stay. Editing the
+  host in **Servers → Edit** likewise takes this address along when it was on that host.
+
 - **The admin code, once per server.** The tab first says "The admin code is in the server's .env
   (ADMIN_CODE), and at the end of its setup." Type it (dashes and capitals do not matter; a plain
   keyboard, no suggestions) and **Continue**: nothing is sent before. A code that cannot be one is

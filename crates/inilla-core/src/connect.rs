@@ -149,6 +149,76 @@ pub fn bracketed(host: &str) -> String {
     }
 }
 
+/// `info` (where a server's `server.json` answered) moved from the host `old` to `new`, when it was
+/// on `old` in the form a typed address makes (`http://host:port/`): a server whose address is
+/// edited by hand takes its data host along, port kept. `None` when `info` is on another host (a
+/// data host elsewhere), is a URL typed whole (`https://`, a path: its name may be a certificate's
+/// or a proxy's), `new` is the same host or not one, or `info` is not an address.
+pub fn rehost(info: &str, old: &str, new: &str) -> Option<String> {
+    let bare = |h: &str| {
+        h.trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string()
+    };
+    let (old, new) = (bare(old), bare(new));
+    if new.is_empty() || old.eq_ignore_ascii_case(&new) || check_host(&new).is_err() {
+        return None;
+    }
+    let at = parse_address(info).ok()?;
+    if !at.host.eq_ignore_ascii_case(&old) {
+        return None;
+    }
+    let authority = at.base.strip_prefix("http://")?.strip_suffix('/')?;
+    if authority.contains('/') {
+        return None;
+    }
+    let (_, port) = host_port(authority).ok()?;
+    let host = bracketed(&new);
+    Some(match port {
+        Some(p) => format!("http://{host}:{p}/"),
+        None => format!("http://{host}/"),
+    })
+}
+
+/// Where `p`'s `server.json` is asked: where Connect found it, else its host's data host (a server
+/// entered by hand). `None` when its host is not an address.
+pub fn asked_at(p: &ServerProfile) -> Option<String> {
+    p.info
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .or_else(|| parse_address(&p.host).ok().map(|a| a.base))
+}
+
+/// `p`'s server reached at `typed` from now on (an address the way Connect takes one): its `info`,
+/// and its logon and world override when they were on the machine the old address named — the
+/// stack runs them together, so Connect asking there next finds this server, not a new one; a
+/// logon on another machine stays. `Ok(false)`: `typed` is where it is asked already, and nothing
+/// is written (a server entered by hand stays one).
+pub fn move_to(p: &mut ServerProfile, typed: &str) -> Result<bool, String> {
+    let at = parse_address(typed)?;
+    let old = asked_at(p);
+    if old.as_deref() == Some(at.base.as_str()) {
+        return Ok(false);
+    }
+    if let Some(old) = old.as_deref().and_then(|b| parse_address(b).ok()) {
+        let on_old = |h: &str| {
+            h.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .eq_ignore_ascii_case(&old.host)
+        };
+        if on_old(&p.host) {
+            p.host = at.host.clone();
+        }
+        if p.realm_override.as_deref().is_some_and(on_old) {
+            p.realm_override = Some(bracketed(&at.host));
+        }
+    }
+    p.info = Some(at.base);
+    Ok(true)
+}
+
 /// `url` resolved against `base` (a URL ending in `/`), the way a browser resolves a link on the
 /// page at `base`: an absolute URL as it is, `/path` against the base's origin, anything else
 /// against the base itself (`""` is the base). That lets a reverse proxy, another port or a website
@@ -988,6 +1058,90 @@ mod tests {
 
     fn addr(s: &str) -> Address {
         parse_address(s).unwrap()
+    }
+
+    #[test]
+    fn a_new_address_takes_the_data_host_along() {
+        let moved = |info: &str, old: &str, new: &str| rehost(info, old, new);
+        assert_eq!(
+            moved("http://192.168.1.20:8099/", "192.168.1.20", "192.168.1.30").as_deref(),
+            Some("http://192.168.1.30:8099/")
+        );
+        assert_eq!(
+            moved(
+                "http://192.168.1.20:8099/",
+                "192.168.1.20",
+                " my-mac.local "
+            )
+            .as_deref(),
+            Some("http://my-mac.local:8099/")
+        );
+        // A URL typed whole stays: its name may be a certificate's or a proxy's.
+        assert_eq!(
+            moved(
+                "https://Wow.Example.com/vanillish/",
+                "wow.example.com",
+                "10.0.0.2"
+            ),
+            None
+        );
+        assert_eq!(
+            moved("http://10.0.0.5:8099/vanillish/", "10.0.0.5", "10.0.0.6"),
+            None
+        );
+        assert_eq!(
+            moved("http://[fd00::2]:8099/", "fd00::2", "[fd00::3]").as_deref(),
+            Some("http://[fd00::3]:8099/")
+        );
+        assert_eq!(
+            moved("http://10.0.0.5:9000/", "10.0.0.5", "fd00::4").as_deref(),
+            Some("http://[fd00::4]:9000/")
+        );
+        // A data host on another machine, the same host, no host, not a host, not an address.
+        assert_eq!(
+            moved("http://10.0.0.9:8099/", "192.168.1.20", "192.168.1.30"),
+            None
+        );
+        assert_eq!(
+            moved("http://192.168.1.20:8099/", "192.168.1.20", "192.168.1.20"),
+            None
+        );
+        assert_eq!(
+            moved("http://192.168.1.20:8099/", "192.168.1.20", "  "),
+            None
+        );
+        assert_eq!(
+            moved("http://192.168.1.20:8099/", "192.168.1.20", "a b"),
+            None
+        );
+        assert_eq!(
+            moved("not an address", "192.168.1.20", "192.168.1.30"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_server_moved_takes_its_logon_along() {
+        // Connect's profile: logon, world override and data host on the machine typed.
+        let mut p = stack().profile(&addr("192.168.1.20"));
+        p.realm_override = Some("192.168.1.20".into());
+        assert_eq!(move_to(&mut p, "my-mac.local"), Ok(true));
+        assert_eq!(p.info.as_deref(), Some("http://my-mac.local:8099/"));
+        assert_eq!(p.host, "my-mac.local");
+        assert_eq!(p.realm_override.as_deref(), Some("my-mac.local"));
+        // Asked there already: nothing written, so a server entered by hand stays one.
+        assert_eq!(move_to(&mut p, "my-mac.local:3724"), Ok(false));
+        let mut by_hand = ServerProfile::new("Plain", "10.0.0.5");
+        assert_eq!(move_to(&mut by_hand, "10.0.0.5"), Ok(false));
+        assert_eq!(by_hand.info, None);
+        // A logon on another machine stays where it is.
+        let mut away = ServerProfile::new("Away", "realm.example.com");
+        away.info = Some("http://10.0.0.9:8099/".into());
+        assert_eq!(move_to(&mut away, "[fd00::2]"), Ok(true));
+        assert_eq!(away.host, "realm.example.com");
+        assert_eq!(away.info.as_deref(), Some("http://[fd00::2]:8099/"));
+        assert!(move_to(&mut away, "a b").is_err());
+        assert_eq!(away.info.as_deref(), Some("http://[fd00::2]:8099/"));
     }
 
     #[test]

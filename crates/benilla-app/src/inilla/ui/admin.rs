@@ -15,10 +15,12 @@ use inilla_core::admin::{
 };
 use inilla_core::connect as kc;
 
+use super::connect::as_typed;
 use super::{hint, ime, words};
 use crate::inilla::admin::{Admin, Busy, GoldForm, Menu, Note};
 use crate::inilla::hud::GOLD;
 use crate::inilla::platform::ImePurpose;
+use crate::inilla::Inilla;
 
 const ASKING: &str = "Asking…";
 const NO_SERVER: &str = "No server yet: add one in Servers first.";
@@ -54,14 +56,22 @@ const NO_SPEED: &str =
     "This server's vmangos has no speed setting: run its setup again to update it.";
 const TELL: &str = "Tell the players in chat";
 const DEFAULTS: &str = "Server defaults";
+const CHANGE: &str = "Change";
+const ADDRESS: &str = "Server address";
+const USE: &str = "Use";
+const CANCEL: &str = "Cancel";
+const ADDRESS_HINT: &str = "Where the admin menu is asked, as you would type it in Connect: an IP \
+     (192.168.1.20) or a name (my-mac.local), port 8099 unless you add another. Connect asks there \
+     too; the realm's own address is in Servers → Edit.";
 const NOBODY: &str = "Nobody is online: a name below still gets it, by mail.";
 
-pub(super) fn show(ui: &mut egui::Ui, admin: &mut Admin) {
+pub(super) fn show(ui: &mut egui::Ui, admin: &mut Admin, inilla: &mut Inilla) {
     if admin.server_id.is_none() {
         ui.label(NO_SERVER);
         return;
     }
     header(ui, admin);
+    address_field(ui, admin, inilla);
     status_line(ui, admin);
     if !matches!(admin.menu, Some(Menu::At(_))) {
         return;
@@ -84,15 +94,21 @@ pub(super) fn show(ui: &mut egui::Ui, admin: &mut Admin) {
     }
 }
 
-/// The server's name and where it is asked, and Refresh.
+/// The server's name and where it is asked (a tap on it, or Change, edits it), and Refresh.
 fn header(ui: &mut egui::Ui, admin: &mut Admin) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(&admin.name).strong().color(GOLD));
-        ui.label(
-            egui::RichText::new(&admin.base)
-                .small()
-                .color(egui::Color32::GRAY),
-        );
+        let at = as_typed(&admin.base);
+        let tapped = ui
+            .add(
+                egui::Label::new(egui::RichText::new(&at).small().color(egui::Color32::GRAY))
+                    .sense(egui::Sense::click()),
+            )
+            .clicked();
+        let change = ui.add_enabled(admin.can_move(), egui::Button::new(CHANGE).small());
+        if admin.address.is_none() && admin.can_move() && (tapped || change.clicked()) {
+            admin.edit_address(at);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(admin.busy().is_none(), egui::Button::new("Refresh"))
@@ -102,6 +118,54 @@ fn header(ui: &mut egui::Ui, admin: &mut Admin) {
             }
         });
     });
+}
+
+/// The address being changed: the field takes the focus as it opens, so the keyboard comes up;
+/// Use (or Enter) makes it the server's, Cancel leaves the old one.
+fn address_field(ui: &mut egui::Ui, admin: &mut Admin, inilla: &mut Inilla) {
+    let can = admin.can_move();
+    let focus = std::mem::take(&mut admin.address_focus);
+    let Some(typed) = admin.address.as_mut() else {
+        return;
+    };
+    let mut done = None;
+    ui.horizontal(|ui| {
+        ui.label(ADDRESS);
+        let width = (ui.available_width() - 190.0).clamp(160.0, 320.0);
+        let r = ui.add(
+            egui::TextEdit::singleline(typed)
+                .hint_text("192.168.1.20")
+                .desired_width(width),
+        );
+        // The focus first, then the purpose: the keyboard opens on the address layout at once.
+        if focus {
+            r.request_focus();
+        }
+        ime(&r, ImePurpose::Url);
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let button = egui::Button::new(egui::RichText::new(USE).color(GOLD))
+            .min_size(egui::vec2(80.0, 40.0));
+        if (ui.add_enabled(can, button).clicked() || enter) && can {
+            done = Some(true);
+        }
+        if ui.button(CANCEL).clicked() {
+            done = Some(false);
+        }
+    });
+    match done {
+        Some(true) => admin.use_address(&mut inilla.launcher),
+        Some(false) => {
+            admin.address = None;
+            admin.address_error = None;
+        }
+        None => {}
+    }
+    if let Some(e) = &admin.address_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, e);
+    }
+    if admin.address.is_some() {
+        hint(ui, ADDRESS_HINT);
+    }
 }
 
 /// One line for where things stand, the network's or the server's own reason under it, and the

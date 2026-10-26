@@ -6,6 +6,9 @@
 //! - with a code saved for this server, `GET <admin>nonce`, then the signed route
 //!   (`inilla_core::admin::auth_header`); a spent nonce gets one fresh one and one retry.
 //!
+//! The address is the server's own, as Connect saved it (or its host's data host); the tab can
+//! change it (`move_to`), for Connect too.
+//!
 //! Nothing but `server.json` is asked before a code is saved. The code is read from the Keystore
 //! once per server and never sent; a 401 `admin_code` or a 429 `too_many` (which answers a wrong
 //! code only) for the code still saved deletes it. A gold send that got no answer, or a refusal
@@ -21,7 +24,7 @@ use serde::de::DeserializeOwned;
 
 use inilla_core::admin::{self as ka, AdminError, Draft, GoldReply, GoldTo, Route, Status};
 use inilla_core::connect::{self as kc, InfoError};
-use inilla_core::profiles::ServerProfile;
+use inilla_core::profiles::{Launcher, ServerProfile};
 
 use super::ui::{words, Overlay, Panel, SettingsTab};
 use super::Inilla;
@@ -189,6 +192,8 @@ struct Done {
 struct Job {
     /// The server it asks: a reply for another (the player switched) is dropped.
     server_id: String,
+    /// The address it asks: a reply from the old one, once the tab moved it, is dropped too.
+    base: String,
     /// The code it signs with: a reply once another is saved (or none) is dropped too.
     signed_with: Option<String>,
     busy: Busy,
@@ -217,6 +222,11 @@ pub(crate) struct Admin {
     pub(crate) quiet: bool,
     /// Server defaults was tapped once.
     pub(crate) confirm_reset: bool,
+    /// The address field while it is open, why what was typed is refused, and its first frame
+    /// (when it takes the focus, so the keyboard opens).
+    pub(crate) address: Option<String>,
+    pub(crate) address_error: Option<String>,
+    pub(crate) address_focus: bool,
     pub(crate) gold: GoldForm,
     /// Ask again as soon as the worker is free (the tab came up, Refresh, a reply to check).
     pub(crate) want: bool,
@@ -228,6 +238,43 @@ pub(crate) struct Admin {
 impl Admin {
     pub(crate) fn busy(&self) -> Option<Busy> {
         self.job.as_ref().map(|j| j.busy)
+    }
+
+    /// The address field, opened on the address as Connect would show it.
+    pub(crate) fn edit_address(&mut self, typed: String) {
+        self.address = Some(typed);
+        self.address_error = None;
+        self.address_focus = true;
+    }
+
+    /// The address can move now: not while a change or a gold send is on its way (its answer
+    /// would come from the old one).
+    pub(crate) fn can_move(&self) -> bool {
+        !matches!(
+            self.busy(),
+            Some(Busy::Applying | Busy::Resetting | Busy::Sending)
+        )
+    }
+
+    /// The address typed, as this server's from now on (the next frame asks it); the field stays
+    /// open with the reason when it is not an address.
+    pub(crate) fn use_address(&mut self, launcher: &mut Launcher) {
+        let (Some(id), Some(typed)) = (self.server_id.clone(), self.address.clone()) else {
+            return;
+        };
+        if !self.can_move() {
+            return;
+        }
+        match move_to(launcher, &id, &typed) {
+            Ok(moved) => {
+                if moved {
+                    info!("inilla: admin: the server is asked at its new address from now on");
+                }
+                self.address = None;
+                self.address_error = None;
+            }
+            Err(e) => self.address_error = Some(e),
+        }
     }
 
     /// A code is saved for this server (the Keystore read once).
@@ -397,6 +444,7 @@ impl Admin {
             Ok(handle) => {
                 self.job = Some(Job {
                     server_id,
+                    base: self.base.clone(),
                     signed_with,
                     busy,
                     handle,
@@ -418,10 +466,19 @@ impl Admin {
         if same && base == self.base {
             return;
         }
+        // The same server at another address keeps its code and the gold sends kept for a replay
+        // (their ids are its own); another server starts with neither.
+        let (code, gold) = if same {
+            (self.code.take(), std::mem::take(&mut self.gold))
+        } else {
+            (None, GoldForm::default())
+        };
         *self = Admin {
             server_id: current.map(|s| s.id.clone()),
             name: current.map(|s| s.name.clone()).unwrap_or_default(),
             base,
+            code,
+            gold,
             job: self.job.take(),
             shown: self.shown,
             ..Admin::default()
@@ -437,7 +494,7 @@ impl Admin {
             return;
         };
         let done = job.handle.join();
-        if self.server_id.as_deref() != Some(job.server_id.as_str()) {
+        if self.server_id.as_deref() != Some(job.server_id.as_str()) || self.base != job.base {
             return;
         }
         // The stale clock runs from the last answer, a change's too: an ask that took long is not
@@ -581,12 +638,17 @@ impl Admin {
 /// Where `profile`'s `server.json` is: where Connect found it, else the host's data host (a server
 /// entered by hand).
 fn base_for(profile: &ServerProfile) -> String {
-    profile
-        .info
-        .clone()
-        .filter(|b| !b.trim().is_empty())
-        .or_else(|| kc::parse_address(&profile.host).ok().map(|a| a.base))
-        .unwrap_or_default()
+    kc::asked_at(profile).unwrap_or_default()
+}
+
+/// `typed` (an address the way Connect takes one) as the server `id`'s own (`connect::move_to`):
+/// where Connect and the admin menu ask from now on, its logon too when it was on that machine.
+/// Whether anything moved, or why `typed` is not an address.
+fn move_to(launcher: &mut Launcher, id: &str, typed: &str) -> Result<bool, String> {
+    let server = launcher
+        .server_mut(id)
+        .ok_or_else(|| "This server is not in the launcher any more.".to_string())?;
+    kc::move_to(server, typed)
 }
 
 /// A fresh request id.
@@ -1133,10 +1195,70 @@ mod tests {
         }
         Job {
             server_id: "home".into(),
+            base: String::new(),
             signed_with: Some(signed_with.into()),
             busy: Busy::Asking,
             handle,
         }
+    }
+
+    /// The tab moves the server: Connect's address and the menu's from now on, a reply from the
+    /// old address dropped; what is not an address keeps the field open, with why.
+    #[test]
+    fn the_tab_moves_the_servers_address() {
+        const OLD: &str = "http://192.168.1.20:8099/";
+        let mut launcher = Launcher::default();
+        let mut home = ServerProfile::new("Home", "192.168.1.20");
+        home.info = Some(OLD.into());
+        let id = launcher.add_server(home);
+        let mut a = Admin::default();
+        a.follow(launcher.current_server(), true);
+        assert_eq!(a.base, OLD);
+        a.edit_address("192.168.1.30/x".into());
+        assert!(a.address_focus);
+        a.use_address(&mut launcher);
+        assert!(a.address.is_some() && a.address_error.is_some());
+        assert_eq!(launcher.server(&id).unwrap().info.as_deref(), Some(OLD));
+        a.job = Some(Job {
+            server_id: id.clone(),
+            base: OLD.into(),
+            ..job(CODE, Err(AdminError::Unreachable("no route".into())))
+        });
+        a.address = Some(" 192.168.1.30 ".into());
+        // Not while a change is on its way.
+        let sending = Job {
+            busy: Busy::Sending,
+            ..job(CODE, Ok(Reply::Nothing))
+        };
+        let asking = a.job.replace(sending);
+        a.use_address(&mut launcher);
+        assert_eq!(launcher.server(&id).unwrap().info.as_deref(), Some(OLD));
+        a.job = asking;
+        a.gold.pending = Some(GoldSend {
+            id: "kept".into(),
+            to: GoldTo::Online,
+            copper: 100,
+            form: None,
+        });
+        a.code = Some(Some(CODE.into()));
+        a.use_address(&mut launcher);
+        assert!(a.address.is_none() && a.address_error.is_none());
+        let moved = "http://192.168.1.30:8099/";
+        let home = launcher.server(&id).unwrap();
+        assert_eq!(
+            (home.info.as_deref(), home.host.as_str()),
+            (Some(moved), "192.168.1.30")
+        );
+        a.follow(launcher.current_server(), true);
+        // The same server: its code and the gold send kept for a replay stay.
+        assert_eq!(a.code, Some(Some(CODE.into())));
+        assert!(a.gold.pending.as_ref().is_some_and(|g| g.id == "kept"));
+        assert_eq!(
+            (a.server_id.as_deref(), a.base.as_str()),
+            (Some(id.as_str()), moved)
+        );
+        a.take_finished();
+        assert!(a.job.is_none() && a.error.is_none() && a.due());
     }
 
     /// A 401 for a code since replaced says nothing of the one saved now: dropped, the new code

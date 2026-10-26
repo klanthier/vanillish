@@ -83,7 +83,7 @@ impl ConnectForm {
 
 /// The address as the player would have typed it, from a base `server.json` answered at: the
 /// host alone when the base is that host's default one.
-fn as_typed(base: &str) -> String {
+pub(super) fn as_typed(base: &str) -> String {
     match kc::parse_address(base) {
         Ok(a) if kc::parse_address(&a.host).is_ok_and(|b| b.base == a.base) => a.host,
         _ => base.to_string(),
