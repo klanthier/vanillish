@@ -43,7 +43,12 @@ fn main() -> std::process::ExitCode {
     // hook wrote it before the unwind reached here).
     match std::panic::catch_unwind(|| benilla_app::run(build)) {
         Ok(benilla_app::AppExit::Success) => std::process::ExitCode::SUCCESS,
-        Ok(benilla_app::AppExit::Error(code)) => std::process::ExitCode::from(code.get()),
+        // An error exit (Bevy ends the app this way when its render systems panic, a lost GPU
+        // device among them) would leave the player with a window that just vanished.
+        Ok(benilla_app::AppExit::Error(code)) => {
+            stopped(&format!("It ended with error code {}.", code.get()));
+            std::process::ExitCode::from(code.get())
+        }
         Err(payload) => {
             let why = payload
                 .downcast_ref::<&str>()
@@ -56,10 +61,17 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// The message box a player sees when the game stopped on a panic.
+/// The message box a player sees when the game stopped on a panic or an error exit.
 #[cfg(windows)]
 fn stopped(why: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    // A scripted run (CI's smoke run, an unattended one) has nobody to click the box away.
+    if std::env::var_os("VANILLISH_NO_DIALOG").is_some()
+        || std::env::var_os("WOW_UNATTENDED").is_some()
+    {
+        return;
+    }
 
     let first = why
         .lines()
