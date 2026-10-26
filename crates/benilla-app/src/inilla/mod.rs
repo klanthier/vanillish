@@ -196,7 +196,15 @@ fn setup_egui(app: &mut App) {
     if app.is_plugin_added::<EguiPlugin>() {
         return;
     }
-    app.add_plugins(EguiPlugin::default());
+    // Vanillish: `VANILLISH_EGUI_BINDLESS=0` draws egui without its bindless texture arrays (a
+    // device feature some Direct3D 12 drivers lose the device on).
+    let bindless = std::env::var("VANILLISH_EGUI_BINDLESS").as_deref() != Ok("0");
+    app.add_plugins(EguiPlugin {
+        bindless_mode_array_size: EguiPlugin::default()
+            .bindless_mode_array_size
+            .filter(|_| bindless),
+        ..default()
+    });
     {
         let mut egui = app.world_mut().resource_mut::<EguiGlobalSettings>();
         egui.auto_create_primary_context = false;

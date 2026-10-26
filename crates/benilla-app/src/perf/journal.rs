@@ -44,9 +44,12 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut journal: ResMut<Fps
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
         // Bevy's per-pass render diagnostics, the source of the GPU columns and of Tracy's GPU
-        // zones, registered in every build.
-        app.add_plugins(RenderDiagnosticsPlugin)
-            .init_resource::<FpsJournalSetting>()
+        // zones, registered in every build. Vanillish: `VANILLISH_RENDER_DIAGNOSTICS=0` leaves
+        // them out, and with them their timestamp and pipeline-statistics queries.
+        if std::env::var("VANILLISH_RENDER_DIAGNOSTICS").as_deref() != Ok("0") {
+            app.add_plugins(RenderDiagnosticsPlugin);
+        }
+        app.init_resource::<FpsJournalSetting>()
             .add_observer(on_cvar)
             .insert_resource(FpsJournal {
                 env_path: std::env::var("WOW_FPS_JOURNAL")
