@@ -70,6 +70,8 @@ use inilla_core::touch::TouchLayout;
 use crate::char_select::ClientState;
 
 pub(crate) use session::world_address;
+// Vanillish: the native login's input gate (`login/mod.rs`).
+pub(crate) use connect::login_uncovered;
 
 /// Everything iNilla persists, loaded at build and saved (debounced) when it changes.
 #[derive(Resource, Clone)]

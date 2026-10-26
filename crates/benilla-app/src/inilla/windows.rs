@@ -24,7 +24,32 @@ impl Plugin for WindowsPlugin {
         }
         #[cfg(all(windows, feature = "vanillish"))]
         app.add_systems(Update, adopt_window);
+        app.add_systems(Update, watch_the_gpu)
+            .add_systems(Last, log_the_end);
     }
+}
+
+/// The session log says why the app ended, which a window that just closes does not.
+fn log_the_end(mut exits: MessageReader<AppExit>) {
+    for exit in exits.read() {
+        info!("vanillish: the app is ending: {exit:?}");
+    }
+}
+
+/// The session log says when and why the GPU device was lost: the render systems' panics that
+/// follow it name only themselves. Once, when the render device exists.
+fn watch_the_gpu(device: Option<Res<bevy::render::renderer::RenderDevice>>, mut done: Local<bool>) {
+    let Some(device) = device.filter(|_| !*done) else {
+        return;
+    };
+    device
+        .wgpu_device()
+        .set_device_lost_callback(|reason, message| {
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                error!("vanillish: the GPU device was lost ({reason:?}): {message}");
+            }
+        });
+    *done = true;
 }
 
 /// The exe's icon on the window (`ICON_SMALL`, the title bar) and in the taskbar (`ICON_BIG`), and

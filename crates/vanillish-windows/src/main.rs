@@ -17,6 +17,17 @@
 fn main() -> std::process::ExitCode {
     use benilla_app::BuildId;
 
+    // Before the first thread (the log capture's reader): every thread std starts gets the main
+    // thread's 8 MB, Bevy's pools and render thread among them, where shaders and pipelines build.
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        std::env::set_var("RUST_MIN_STACK", "8388608");
+    }
+    // Vulkan, else Direct3D 12: wgpu's OpenGL path would make a hidden WGL window and context at
+    // start only to list an adapter every PC that runs Windows 10 outdoes.
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        std::env::set_var("WGPU_BACKEND", "vulkan,dx12");
+    }
+    record_first_panic();
     if std::env::args_os().skip(1).any(|a| a == "--console") {
         attach_console();
     }
@@ -50,21 +61,47 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(code.get())
         }
         Err(payload) => {
-            let why = payload
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_owned())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_default();
-            stopped(&why);
+            stopped(&payload_text(&*payload));
             std::process::ExitCode::FAILURE
         }
     }
 }
 
+/// The first panic of the run, and whether it came from the renderer (Bevy's render crates or
+/// wgpu: what a lost GPU device sets off). Later panics are its consequences.
+#[cfg(windows)]
+static FIRST_PANIC: std::sync::OnceLock<(String, bool)> = std::sync::OnceLock::new();
+
+/// Note the first panic, after whatever hook was there (benilla's crash report chains after this
+/// one, and calls it first).
+#[cfg(windows)]
+fn record_first_panic() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        let at = info.location().map(|l| l.file()).unwrap_or("");
+        let gpu = ["bevy_render", "bevy_pbr", "bevy_core_pipeline", "wgpu"]
+            .iter()
+            .any(|k| at.contains(k));
+        let _ = FIRST_PANIC.set((payload_text(info.payload()), gpu));
+    }));
+}
+
+#[cfg(windows)]
+fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}
+
 /// The message box a player sees when the game stopped on a panic or an error exit.
 #[cfg(windows)]
 fn stopped(why: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
 
     // A scripted run (CI's smoke run, an unattended one) has nobody to click the box away.
     if std::env::var_os("VANILLISH_NO_DIALOG").is_some()
@@ -73,7 +110,15 @@ fn stopped(why: &str) {
         return;
     }
 
-    let first = why
+    // The first panic says more than the exit that followed it; a renderer's means the GPU.
+    let first = match FIRST_PANIC.get() {
+        Some((_, true)) => "The graphics driver stopped responding (the GPU device was lost). \
+                            Updating the graphics driver often fixes this."
+            .to_owned(),
+        Some((text, false)) if !text.is_empty() => text.clone(),
+        _ => why.to_owned(),
+    };
+    let first = first
         .lines()
         .next()
         .unwrap_or("")
@@ -95,7 +140,7 @@ fn stopped(why: &str) {
             std::ptr::null_mut(),
             text.as_ptr(),
             title.as_ptr(),
-            MB_OK | MB_ICONERROR,
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST,
         )
     };
 }

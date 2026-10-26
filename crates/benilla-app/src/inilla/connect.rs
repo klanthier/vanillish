@@ -248,6 +248,14 @@ impl Connect {
 /// manifest. Either way the access code once the data host `refused` it — even where the
 /// description says no code is needed (one set since it was read, a proxy in front): asking the
 /// host again unchanged would only be refused again, and again.
+/// Vanillish: the native login screen behind Connect (no game data, so no GlueXML) takes no input
+/// while one of Vanillish's screens covers it: on a PC the real keyboard and mouse reach both, and
+/// the login's Escape quits, as its Quit button, which sits under the screens, does. iOS keeps
+/// iNilla's behaviour.
+pub(crate) fn login_uncovered(overlay: Option<Res<Overlay>>) -> bool {
+    !(words::VANILLISH && overlay.is_some_and(|o| o.blocks_game()))
+}
+
 pub(crate) fn files_step(
     found: &Found,
     profile: &ServerProfile,

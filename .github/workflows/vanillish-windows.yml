@@ -155,6 +155,12 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+      - name: The Direct3D debug layer, for the smoke run's validation runs
+        # Windows' Graphics Tools (d3d12SDKLayers.dll): a few minutes, and optional.
+        continue-on-error: true
+        shell: pwsh
+        run: Add-WindowsCapability -Online -Name "Tools.Graphics.DirectX~~~~0.0.1.0"
+
       - name: Smoke run (Vanillish.exe as a player starts it, then with one feature off at a time)
         # The zip's exe, each run in its own scratch %LOCALAPPDATA% with no game data: Connect waits
         # for an address, so it must still be running after 45 s. "player" is the player's own
@@ -203,12 +209,13 @@ jobs:
             sleep 3
           }
           try player
-          try no-static-gx WOW_STATIC_GX=0
-          try no-ffx WOW_NO_FFX=1
-          try no-msaa WOW_MSAA=off
-          try no-frame-pace WOW_NO_FRAME_PACE=1
-          try all-off WOW_STATIC_GX=0 WOW_NO_FFX=1 WOW_MSAA=off WOW_NO_FRAME_PACE=1
+          # wgpu's baseline features only: no GPU timer or pipeline-statistics queries (benilla's
+          # perf meter asks for them), no bindless.
+          try compatibility WGPU_SETTINGS_PRIO=compatibility
+          # With the Direct3D debug layer (the step before installs it), wgpu logs the call that
+          # removed the device.
           try validation WGPU_VALIDATION=1 WGPU_DEBUG=1
+          try compatibility-validation WGPU_SETTINGS_PRIO=compatibility WGPU_VALIDATION=1 WGPU_DEBUG=1
           echo "::group::verdicts"
           cat "$RUNNER_TEMP/smoke/verdicts.txt"
           echo "::endgroup::"
