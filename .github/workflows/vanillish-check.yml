@@ -8,6 +8,10 @@
 # - the desktop build of the app type-checks;
 # - the Android build type-checks with cargo-ndk and the pinned NDK — the analogue of
 #   inilla-check's iOS step, and what catches an upstream benilla change that breaks Android;
+# - the Windows build type-checks, and clippy passes on the Windows entry and inilla-platform's
+#   Windows half, cross-compiled for x86_64-pc-windows-gnu with Zig's mingw-w64 headers
+#   (windows/toolchain/linux-env.sh) — what catches a change that breaks Windows; Vanillish.exe
+#   itself is vanillish-windows.yml's;
 # - the Java compiles; Android lint reports, and never blocks.
 #
 # inilla-check.yml stays as it is beside this: its iOS step guards the fork's mergeability back
@@ -78,7 +82,7 @@ jobs:
         # files are upstream's to format (their ci.yml): a sync that brings one in unformatted must
         # not turn this gate red, and reformatting it here would be a carry.
         run: |
-          cargo fmt -p inilla-core -p inilla-platform -p inilla-ios -p vanillish-android -- --check
+          cargo fmt -p inilla-core -p inilla-platform -p inilla-ios -p vanillish-android -p vanillish-windows -- --check
           rustfmt --edition 2021 --check crates/benilla-app/src/inilla/mod.rs
 
       - name: Unit tests (engine-free)
@@ -102,6 +106,29 @@ jobs:
       - name: Clippy (Android entry and platform layer, aarch64-linux-android)
         # --no-deps: the two crates' own Android code, not the whole client's.
         run: cargo ndk -t arm64-v8a -P "$VANILLISH_MIN_SDK" clippy -p inilla-platform -p vanillish-android --no-deps -- -D warnings
+
+      - name: Windows build type-checks (Linux cross, x86_64-pc-windows-gnu)
+        # The cargo-ndk step's analogue: nothing else here compiles upstream's cfg(windows) code or
+        # ours (ci.yml is Linux-only). gnu, not msvc: Zig's mingw-w64 headers compile the graph's C
+        # (Lua, ring's C; its x86-64 assembly comes pregenerated as COFF), from the wheel the iOS
+        # sysroot pins. The shipping msvc build is vanillish-windows.yml's.
+        run: |
+          source windows/toolchain/linux-env.sh
+          cargo check --target x86_64-pc-windows-gnu -p vanillish-windows
+
+      - name: Clippy (Windows entry and platform layer, x86_64-pc-windows-gnu)
+        # --no-deps: the two crates' own Windows code, not the whole client's.
+        run: |
+          source windows/toolchain/linux-env.sh
+          cargo clippy --target x86_64-pc-windows-gnu -p inilla-platform -p vanillish-windows --no-deps -- -D warnings
+
+      - name: Clippy (the app as the Windows product, x86_64-pc-windows-gnu)
+        # The app with its `vanillish` feature and its tests, as Vanillish.exe builds it but with
+        # default features (`dev`): the iNilla layer's Windows paths, which the entry's --no-deps
+        # step does not lint. Without `dev` three upstream imports go unused.
+        run: |
+          source windows/toolchain/linux-env.sh
+          cargo clippy --target x86_64-pc-windows-gnu -p benilla-app --features vanillish --all-targets -- -D warnings
 
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:

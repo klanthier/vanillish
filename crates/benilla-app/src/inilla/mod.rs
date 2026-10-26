@@ -50,6 +50,8 @@ mod store;
 mod synth;
 mod touch;
 mod ui;
+/// Vanillish: Vanillish for Windows' window — its title, its icon, its `HWND`.
+mod windows;
 
 use std::collections::BTreeMap;
 
@@ -68,6 +70,8 @@ use inilla_core::touch::TouchLayout;
 use crate::char_select::ClientState;
 
 pub(crate) use session::world_address;
+// Vanillish: the native login's input gate (`login/mod.rs`).
+pub(crate) use connect::login_uncovered;
 
 /// Everything iNilla persists, loaded at build and saved (debounced) when it changes.
 #[derive(Resource, Clone)]
@@ -132,7 +136,9 @@ impl Plugin for InillaPlugin {
             host_pointer::HostPointerPlugin,
             connect::ConnectPlugin,
             admin::AdminPlugin,
-        ));
+        ))
+        // Vanillish: past the tuple's fifteen.
+        .add_plugins(windows::WindowsPlugin);
 
         // The seams. The mouse lands before Bevy's input systems so every reader sees it as a
         // mouse; the commands land in the binding slot, as wenilla's bridge does.
@@ -190,7 +196,21 @@ fn setup_egui(app: &mut App) {
     if app.is_plugin_added::<EguiPlugin>() {
         return;
     }
-    app.add_plugins(EguiPlugin::default());
+    // Vanillish: no bindless texture arrays for egui on Windows: drawing the first screen with
+    // them loses the Direct3D 12 device within seconds (Microsoft's WARP, measured: the game then
+    // ends), and the screens draw few textures. `VANILLISH_EGUI_BINDLESS=1` or `0` decides it on
+    // any platform.
+    let bindless = match std::env::var("VANILLISH_EGUI_BINDLESS").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => !cfg!(windows),
+    };
+    app.add_plugins(EguiPlugin {
+        bindless_mode_array_size: EguiPlugin::default()
+            .bindless_mode_array_size
+            .filter(|_| bindless),
+        ..default()
+    });
     {
         let mut egui = app.world_mut().resource_mut::<EguiGlobalSettings>();
         egui.auto_create_primary_context = false;

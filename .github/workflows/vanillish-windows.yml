@@ -1,0 +1,223 @@
+# Vanillish for Windows — Vanillish-<label>-windows-x64.zip: the client as one Vanillish.exe (x86-64,
+# MSVC, the C runtime linked in), built and checked on one Windows runner (2× Actions minutes on a
+# private repository; ~50–80 min cold, ~15–25 warm from the cache, estimates).
+#
+#   build  (read-only token)  the engine-free tests on Windows, clippy for the MSVC target, then
+#                             windows/build-exe.sh: the exe, its checks, the zip and the notes
+#
+# Run it from the Actions tab (Run workflow) for a test build, or open a pull request that touches the
+# client: the run's artifacts are the zip itself (under its own name) and
+# Vanillish-windows-symbols-<commit> (vanillish.pdb, for a crash's addresses), so a pull request's
+# exe can be tried on a PC before it lands. It has no tag trigger of its own: releases are vanillish-apk.yml's, which can call this
+# file (workflow_call with `release-tag`) and attach the zip beside the APK, so no second workflow
+# races it to create the same GitHub Release. Not signed: SmartScreen asks once (the notes say how).
+name: vanillish-windows
+
+on:
+  # A pull request's own build, to try on a PC (free on this public repository's standard runners).
+  # What cannot change the exe stays out.
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "ios/**", "android/**", "server/**"]
+  workflow_dispatch:
+    inputs:
+      dev:
+        description: "Compile benilla's dev instruments in (debug panel, perf HUD) and a console"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      dev:
+        type: boolean
+        default: false
+      release-tag:
+        description: "The release being built, e.g. vanillish-v0.3.0 (empty: a test build)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Called, github.workflow is the caller's: `-windows-` keeps this group apart from the caller's own.
+  group: ${{ github.workflow }}-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The tests' dev profile without debuginfo, as vanillish-check; the exe's own profile keeps its PDB.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    # Hundreds of crates' build scripts run in this job: its token can read, nothing more, and it is
+    # not left in .git/config.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # Git Bash: the same windows/build-exe.sh as on a PC.
+        shell: bash
+    steps:
+      - name: Keep LF line endings
+        # No root .gitattributes: a CRLF checkout would change the bash scripts and the files
+        # include_dir compiles in (assets/ui).
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 50 # `git describe` for the build stamp
+          persist-credentials: false
+
+      - name: Release or test build
+        # Decided first, so a release that cannot be one fails in seconds, not after the build.
+        env:
+          TAG: ${{ inputs.release-tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "A test build."
+            exit 0
+          fi
+          if [[ ! "$TAG" =~ ^vanillish-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::A release tag must look like vanillish-v1.2.3, got: $TAG"
+            exit 1
+          fi
+          echo "VANILLISH_VERSION_NAME=${TAG#vanillish-v}" >> "$GITHUB_ENV"
+          echo "Release $TAG."
+
+      - name: Defender off the build folders
+        # Real-time scanning of every object file and rlib is often the slowest part of cargo on
+        # Windows. A speed-up only: the build goes on without it.
+        continue-on-error: true
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+
+      - name: Toolchain
+        # rust-toolchain.toml's release, with clippy; the runner's host target is x86_64-pc-windows-msvc.
+        run: rustup toolchain install && rustc -V
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The `windows` profile's build (Cargo.toml), one cache per feature set.
+          shared-key: vanillish-windows-${{ inputs.dev && 'dev' || 'player' }}
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Unit tests (engine-free, on Windows)
+        # The one thing a Linux cross check cannot do: run them. Here the DPAPI roundtrip and the
+        # Windows paths run too.
+        run: cargo test -p inilla-core -p inilla-platform
+
+      - name: Clippy (Windows entry and platform layer, x86_64-pc-windows-msvc)
+        # --no-deps: the two crates' own code, not the app's (its unused imports without `dev` are
+        # upstream's). The entry's build script runs here, so a broken windows/vanillish.rc fails
+        # in minutes, before the long build.
+        run: cargo clippy -p inilla-platform -p vanillish-windows --target x86_64-pc-windows-msvc --no-deps -- -D warnings
+
+      - name: Build Vanillish.exe
+        # The build, the checks on the exe, the zip and the notes: windows/build-exe.sh.
+        env:
+          VANILLISH_FEATURES: ${{ inputs.dev && 'dev' || '' }}
+          VANILLISH_CI_BUILD: ${{ github.run_number }}
+        run: |
+          windows/build-exe.sh
+          # ZIP=, ZIP_NAME=, COMMIT=, SHA256= for the steps below.
+          cat target/vanillish-win-out/build.env >> "$GITHUB_ENV"
+          cat target/vanillish-win-out/build-notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Not zipped again: the artifact is the zip, under its own name.
+          path: ${{ env.ZIP }}
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # vanillish.pdb and its commit: a crash's addresses read against it (WinDbg, llvm-symbolizer).
+          name: Vanillish-windows-symbols-${{ env.COMMIT }}
+          path: target/vanillish-win-out/symbols/
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.release-tag != ''
+        with:
+          # Only for the calling workflow's release job.
+          name: vanillish-windows-release
+          path: |
+            ${{ env.ZIP }}
+            target/vanillish-win-out/build-notes.md
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Smoke run (Vanillish.exe as a player starts it, 45 s)
+        # The zip's exe in a scratch %LOCALAPPDATA%, with no game data: Connect waits for an
+        # address, so it must still be running after 45 s. The runner's renderer is Microsoft's
+        # WARP on Direct3D 12, which caught egui's bindless arrays losing the device. The session
+        # log, a crash report and Windows' own record of a crash go to the job's output and an
+        # artifact.
+        id: smoke
+        env:
+          WOW_NOSOUND: "1"
+          VANILLISH_NO_DIALOG: "1"
+        run: |
+          exe="$PWD/target/vanillish-win-out/Vanillish/Vanillish.exe"
+          failed=0
+          try() {
+            local name="$1"; shift
+            local root="$RUNNER_TEMP/smoke/$name"
+            mkdir -p "$root"
+            ( export LOCALAPPDATA="$(cygpath -w "$root")"; for kv in "$@"; do export "$kv"; done; exec "$exe" ) &
+            local pid=$! alive=0
+            for _ in $(seq 1 45); do
+              kill -0 "$pid" 2>/dev/null || break
+              alive=$((alive + 1))
+              sleep 1
+            done
+            local diag="$root/Vanillish/benilla-config/Diagnostics" verdict
+            if kill -0 "$pid" 2>/dev/null; then
+              verdict="ALIVE after ${alive} s"
+              taskkill //F //IM Vanillish.exe >/dev/null 2>&1 || true
+              wait "$pid" 2>/dev/null || true
+            else
+              local code=0
+              wait "$pid" || code=$?
+              verdict="EXITED after ~${alive} s, code $code"
+              failed=1
+            fi
+            echo "smoke[$name] ($*): $verdict" | tee -a "$RUNNER_TEMP/smoke/verdicts.txt"
+            local log
+            log="$(ls -t "$diag"/session-*.log 2>/dev/null | head -1)"
+            if [ -n "$log" ]; then
+              echo "::group::smoke[$name] session log"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+            sleep 3
+          }
+          try player
+          echo "::group::verdicts"
+          cat "$RUNNER_TEMP/smoke/verdicts.txt"
+          echo "::endgroup::"
+          cat "$RUNNER_TEMP/smoke/verdicts.txt" >> "$GITHUB_STEP_SUMMARY"
+          exit $failed
+
+      - name: Windows' record of the crash
+        if: failure() && steps.smoke.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error', 'Windows Error Reporting' } -MaxEvents 6 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'Vanillish' } | Format-List TimeCreated, ProviderName, Message
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.smoke.outcome != 'skipped'
+        with:
+          name: Vanillish-windows-smoke-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/smoke/
+          retention-days: 14
+          if-no-files-found: warn

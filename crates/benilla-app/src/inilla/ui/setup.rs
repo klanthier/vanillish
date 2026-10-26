@@ -10,12 +10,13 @@
 //!
 //! Vanillish: on Android "copy it in" is a PC over USB (File transfer) into the app's folder, or
 //! **Import from folder…** — the system's folder picker, then a resumable copy with the same
-//! progress bar and Pause as the download (`DataState::import_folder`).
+//! progress bar and Pause as the download (`DataState::import_folder`). On Windows, first, **Use
+//! my WoW folder…**: the client already on the PC, read where it is from the next start.
 
 use bevy_egui::egui;
 
 use super::{hint, ime, restart, row, words, Overlay, Panel};
-use crate::inilla::data::DataState;
+use crate::inilla::data::{DataState, PickFor};
 use crate::inilla::hud::GOLD;
 use crate::inilla::platform::ImePurpose;
 use crate::inilla::Inilla;
@@ -120,28 +121,37 @@ pub(super) fn show(
         // ── 1 · copy it in ──
         ui.add_space(6.0);
         ui.label(egui::RichText::new(words::COPY_TITLE).strong().color(GOLD));
-        ui.label(words::from_computer());
-        ui.label(words::on_device());
-        // Vanillish: a folder outside the app, through the system's picker (Android; `$INILLA_PICK`
-        // on the desktop).
-        if inilla_platform::picker::available() {
-            folder_import(ui, data);
+        // Vanillish (Windows): the player's own client, read in place, stands for the copy.
+        if words::WINDOWS {
+            wow_folder(ui, inilla, data);
         }
-        ui.horizontal(|ui| {
-            if ui
-                .add(egui::Button::new("Check for copied data").min_size(egui::vec2(220.0, 44.0)))
-                .clicked()
-            {
-                data.scan_import();
+        if !data.reads_in_place() {
+            ui.label(words::from_computer());
+            ui.label(words::on_device());
+            // Vanillish: a folder outside the app, through the system's picker (Android;
+            // `$INILLA_PICK` on the desktop; Windows' folder dialog).
+            if inilla_platform::picker::available() {
+                folder_import(ui, data);
             }
-            if ui
-                .button("Check again after restart")
-                .on_hover_text("A folder copied in before launch is imported automatically")
-                .clicked()
-            {
-                restart(inilla);
-            }
-        });
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new("Check for copied data")
+                            .min_size(egui::vec2(220.0, 44.0)),
+                    )
+                    .clicked()
+                {
+                    data.scan_import();
+                }
+                if ui
+                    .button("Check again after restart")
+                    .on_hover_text("A folder copied in before launch is imported automatically")
+                    .clicked()
+                {
+                    restart(inilla);
+                }
+            });
+        }
 
         // ── 2 · download it ──
         ui.add_space(10.0);
@@ -204,9 +214,10 @@ pub(super) fn show(
                 } else {
                     "Download / resume"
                 };
+                // Vanillish (Windows): nothing is downloaded while a client is read in place.
                 if ui
                     .add_enabled(
-                        enough,
+                        enough && !data.reads_in_place(),
                         egui::Button::new(egui::RichText::new(label).color(GOLD))
                             .min_size(egui::vec2(180.0, 44.0)),
                     )
@@ -329,10 +340,19 @@ fn folder_import(ui: &mut egui::Ui, data: &mut DataState) {
     // The picker covers this screen while it is up, so the buttons stay live: a picker whose
     // answer never came back (the system lost it) must not lock them.
     ui.horizontal_wrapped(|ui| {
+        // Vanillish (Windows): the client already on this PC, read in place, first.
+        if words::WINDOWS {
+            let in_place =
+                egui::Button::new(egui::RichText::new(words::USE_WOW_FOLDER).color(GOLD))
+                    .min_size(egui::vec2(220.0, 44.0));
+            if ui.add(in_place).clicked() {
+                data.pick(PickFor::InPlace);
+            }
+        }
         let import = egui::Button::new(egui::RichText::new(words::IMPORT_FOLDER).color(GOLD))
             .min_size(egui::vec2(220.0, 44.0));
-        if ui.add(import).clicked() && !inilla_platform::picker::pick() {
-            data.message = Some((false, "The folder picker could not open.".into()));
+        if ui.add(import).clicked() {
+            data.pick(PickFor::Copy);
         }
         if let Some((tree, label)) = data.pending_folder.clone() {
             let resume =
@@ -356,5 +376,26 @@ fn folder_import(ui: &mut egui::Ui, data: &mut DataState) {
     });
     if inilla_platform::picker::waiting() {
         hint(ui, words::PICKER_WAITING);
+    }
+}
+
+/// Vanillish (Windows): the player's own client read in place — which folder, the way back to
+/// this app's own, and the restart a change of folder takes (the archives open at launch).
+pub(super) fn wow_folder(ui: &mut egui::Ui, inilla: &mut Inilla, data: &mut DataState) {
+    if let Some(dir) = data.wow_folder().map(std::path::Path::to_path_buf) {
+        ui.label(words::wow_folder_in_use(&dir));
+        let stop = egui::Button::new(words::STOP_WOW_FOLDER).min_size(egui::vec2(220.0, 44.0));
+        if ui.add(stop).clicked() {
+            data.set_wow_folder(None);
+        }
+    }
+    if data.switches_folder() {
+        ui.label(words::NEEDS_RESTART);
+        let button = egui::Button::new(egui::RichText::new(words::RESTART_NOW).color(GOLD))
+            .min_size(egui::vec2(220.0, 44.0));
+        if ui.add(button).clicked() {
+            restart(inilla);
+        }
+        hint(ui, super::relaunch_hint());
     }
 }

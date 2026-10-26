@@ -25,6 +25,8 @@ pub mod http;
 pub mod import;
 pub mod logring;
 pub mod pad;
+/// Vanillish: which controller is which, from its USB vendor and product ids.
+pub mod pads;
 pub mod profiles;
 pub mod settings;
 pub mod touch;

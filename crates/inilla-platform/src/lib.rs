@@ -16,8 +16,12 @@
 
 pub mod audio;
 pub mod device;
+/// Vanillish: the file system's own questions (free space), where `std` has no answer.
+pub mod fs;
 pub mod gamepad;
 pub mod keychain;
+/// Vanillish: this machine's addresses on its networks, where `getifaddrs` is not the call.
+pub mod net;
 pub mod pasteboard;
 pub mod paths;
 /// Vanillish: a folder the player picks outside the app (the Storage Access Framework).
@@ -32,3 +36,7 @@ mod objc;
 /// Vanillish: the Android host (JNI into the app's `Bridge` class, the NDK).
 #[cfg(target_os = "android")]
 pub mod android;
+
+/// Vanillish: the Windows host (Win32 and WinRT through `windows-sys` and `windows`).
+#[cfg(windows)]
+mod windows;

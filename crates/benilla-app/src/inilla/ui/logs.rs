@@ -44,6 +44,8 @@ pub(super) fn show(ui: &mut egui::Ui, overlay: &mut Overlay) {
         if inilla_platform::picker::can_share() && ui.button("Share…").clicked() {
             share_session_log(overlay);
         }
+        // Vanillish (Windows): the log's folder in File Explorer.
+        open_folder_button(ui, overlay);
     });
     let shown: Vec<&(u64, String)> = filtered(&lines, &overlay.log_filter).collect();
     let skip = shown.len().saturating_sub(SHOWN);
@@ -120,6 +122,17 @@ pub(super) fn share_session_log(overlay: &mut Overlay) {
                 overlay.toast(words::SHARE_FAILED);
             }
         }
+    }
+}
+
+/// Vanillish (Windows): the Vanillish folder (`paths::root`: the logs, the settings, the AddOns)
+/// in File Explorer, where a phone has Share.
+pub(super) fn open_folder_button(ui: &mut egui::Ui, overlay: &mut Overlay) {
+    let Some(root) = inilla_platform::paths::root().filter(|_| words::WINDOWS) else {
+        return;
+    };
+    if ui.button(words::OPEN_FOLDER).clicked() && !inilla_platform::device::open_folder(root) {
+        overlay.toast(words::OPEN_FOLDER_FAILED);
     }
 }
 

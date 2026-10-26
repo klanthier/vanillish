@@ -56,7 +56,6 @@ const NO_SPEED: &str =
     "This server's vmangos has no speed setting: run its setup again to update it.";
 const TELL: &str = "Tell the players in chat";
 const DEFAULTS: &str = "Server defaults";
-const DEFAULTS_AGAIN: &str = "Tap again to go back to the server's settings";
 const CHANGE: &str = "Change";
 const ADDRESS: &str = "Server address";
 const USE: &str = "Use";
@@ -351,7 +350,7 @@ fn rates(ui: &mut egui::Ui, admin: &mut Admin, status: &Status) {
         }
         if status.overrides > 0 {
             let label = if admin.confirm_reset {
-                egui::RichText::new(DEFAULTS_AGAIN).color(egui::Color32::LIGHT_RED)
+                egui::RichText::new(words::DEFAULTS_AGAIN).color(egui::Color32::LIGHT_RED)
             } else {
                 egui::RichText::new(DEFAULTS)
             };
@@ -567,8 +566,7 @@ fn gold(ui: &mut egui::Ui, admin: &mut Admin, status: &Status) {
     let confirmed = asked.is_some() && f.confirm == asked;
     let label = match &to {
         Some((_, t)) if confirmed => {
-            egui::RichText::new(format!("Send {amount} to {}? Tap again", who(t)))
-                .color(egui::Color32::LIGHT_RED)
+            egui::RichText::new(words::send_again(&amount, &who(t))).color(egui::Color32::LIGHT_RED)
         }
         _ => egui::RichText::new(format!("Send {amount}")).color(GOLD),
     };

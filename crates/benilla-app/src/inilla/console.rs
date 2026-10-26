@@ -106,7 +106,9 @@ pub(crate) fn new_token() -> String {
 ///   dummy interfaces.
 ///
 /// Vanillish: iOS only ever needed `en0` first; Android names its interfaces differently. The
-/// sort is stable, so within a rank the system's order holds, as it did for all but `en0`.
+/// sort is stable, so within a rank the system's order holds, as it did for all but `en0`. On
+/// Windows [`adapter_rank`] ranks instead.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn iface_rank(name: &str) -> Option<u8> {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|p| name.starts_with(p));
     if starts(&["rmnet", "ccmni", "v4-", "dummy"]) {
@@ -122,10 +124,54 @@ pub(crate) fn iface_rank(name: &str) -> Option<u8> {
     }
 }
 
+/// Vanillish: [`iface_rank`] for Windows, which names an adapter for the player ("Wi-Fi",
+/// "Ethernet 2", "vEthernet (WSL)"): `0` Wi-Fi, `1` Ethernet, `2` anything else, `3` a virtual
+/// switch, a VM's or a container's network, a VPN or the loopback — only this PC, or the VPN's
+/// other ends, can reach those.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn adapter_rank(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    // "TAP" alone, as TAP-Windows names its adapters, and not inside another word.
+    let tap = n
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == "tap");
+    if tap
+        || has(&[
+            "vethernet",
+            "wsl",
+            "hyper-v",
+            "docker",
+            "virtualbox",
+            "vmware",
+            "tailscale",
+            "zerotier",
+            "wireguard",
+            "openvpn",
+            "vpn",
+            "loopback",
+        ])
+    {
+        3
+    } else if has(&["wi-fi", "wifi", "wlan", "wireless"]) {
+        0
+    } else if n.contains("ethernet") {
+        1
+    } else {
+        2
+    }
+}
+
 /// This device's IPv4 addresses on its network interfaces (Wi-Fi first, see [`iface_rank`]),
 /// loopback excluded.
 pub(crate) fn local_addresses() -> Vec<String> {
-    let mut out: Vec<(String, String)> = Vec::new();
+    // Vanillish: Windows lists its adapters through `inilla_platform::net`, ranked by name.
+    #[cfg(windows)]
+    let (out, rank) = (inilla_platform::net::ipv4_interfaces(), |n: &str| {
+        Some(adapter_rank(n))
+    });
+    #[cfg(not(windows))]
+    let (mut out, rank) = (Vec::<(String, String)>::new(), iface_rank);
     #[cfg(unix)]
     // SAFETY: getifaddrs/freeifaddrs as documented; every pointer is checked before use.
     unsafe {
@@ -153,7 +199,7 @@ pub(crate) fn local_addresses() -> Vec<String> {
     // Wi-Fi first, then the rest; cellular dropped.
     let mut ranked: Vec<(u8, String)> = out
         .into_iter()
-        .filter_map(|(n, ip)| iface_rank(&n).map(|r| (r, ip)))
+        .filter_map(|(n, ip)| rank(&n).map(|r| (r, ip)))
         .collect();
     ranked.sort_by_key(|(r, _)| *r);
     let mut ips: Vec<String> = ranked.into_iter().map(|(_, ip)| ip).collect();
@@ -526,6 +572,39 @@ mod tests {
         assert_eq!(iface_rank("rmnet0"), None);
         assert_eq!(iface_rank("ccmni1"), None);
         assert_eq!(iface_rank("dummy0"), None);
+    }
+
+    /// Vanillish: Windows' adapter names, Wi-Fi first and the virtual ones last.
+    #[test]
+    fn windows_adapters_rank_by_name() {
+        assert_eq!(adapter_rank("Wi-Fi"), 0);
+        assert_eq!(adapter_rank("Wi-Fi 2"), 0);
+        assert_eq!(adapter_rank("WLAN"), 0);
+        assert_eq!(adapter_rank("Wireless Network Connection"), 0);
+        assert_eq!(adapter_rank("Ethernet"), 1);
+        assert_eq!(adapter_rank("Ethernet 3"), 1);
+        assert_eq!(adapter_rank("Bluetooth Network Connection"), 2);
+        assert_eq!(adapter_rank("Local Area Connection* 10"), 2);
+        for virtual_one in [
+            "vEthernet (WSL)",
+            "vEthernet (Default Switch)",
+            "vEthernet (WSL (Hyper-V firewall))",
+            "Hyper-V Virtual Ethernet Adapter",
+            "DockerNAT",
+            "VirtualBox Host-Only Network",
+            "VMware Network Adapter VMnet8",
+            "Tailscale",
+            "ZeroTier One [8056c2e21c000001]",
+            "WireGuard Tunnel",
+            "OpenVPN Data Channel Offload",
+            "TAP-Windows Adapter V9",
+            "NordVPN",
+            "Loopback Pseudo-Interface 1",
+        ] {
+            assert_eq!(adapter_rank(virtual_one), 3, "{virtual_one}");
+        }
+        // A word that only holds "tap" is no TAP adapter.
+        assert_eq!(adapter_rank("Startap Ethernet"), 1);
     }
 
     #[test]

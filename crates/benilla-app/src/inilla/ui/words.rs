@@ -3,6 +3,8 @@
 //! rather than spelling "iPhone", "Keychain" or "Finder" itself, so the Android build differs from
 //! iOS in this file's text alone.
 //!
+//! Vanillish: and what Vanillish says on Windows ([`WINDOWS`]), where its sentences differ.
+//!
 //! Only glyphs the font test (`super::tests`) has proven: the arrow, the bullet, the middle dot,
 //! the em dash and the ellipsis.
 
@@ -13,13 +15,21 @@ use inilla_platform::paths::{self, Host};
 /// Vanillish: built for Android — the sentences below pick their Android form.
 pub(crate) const ANDROID: bool = cfg!(target_os = "android");
 
-#[cfg(target_os = "android")]
+/// Vanillish: built as Vanillish for Windows — benilla-app's `vanillish` feature, which only the
+/// Windows entry (`vanillish-windows`) turns on, for a Windows target: `cargo run -p benilla` never
+/// has it (a `--workspace` build on a Windows host does, through the entry).
+pub(crate) const WINDOWS: bool = cfg!(feature = "vanillish");
+
+/// Vanillish: either Vanillish, Android's or Windows'.
+pub(crate) const VANILLISH: bool = ANDROID || WINDOWS;
+
+#[cfg(any(target_os = "android", feature = "vanillish"))]
 macro_rules! app {
     () => {
         "Vanillish"
     };
 }
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", feature = "vanillish")))]
 macro_rules! app {
     () => {
         "iNilla"
@@ -40,19 +50,23 @@ pub(crate) fn relaunch_hint() -> &'static str {
         Host::Android => {
             "Vanillish starts again by itself; if it does not, open it from the apps screen."
         }
+        // Vanillish: Windows starts the exe again (`device::relaunch`).
+        h if h == Host::Windows || WINDOWS => {
+            "Vanillish starts again by itself; if it does not, open Vanillish.exe again."
+        }
         _ => "Then tap the iNilla icon on the home screen.",
     }
 }
 
 // ── setup.rs ──
 
-pub(crate) const NEEDS_RESTART: &str = if ANDROID {
+pub(crate) const NEEDS_RESTART: &str = if VANILLISH {
     "Vanillish opens the archives when it starts: restart it to play."
 } else {
     "iNilla opens the archives when it starts. Close it and open it again to play."
 };
 
-pub(crate) const RESTART_NOW: &str = if ANDROID {
+pub(crate) const RESTART_NOW: &str = if VANILLISH {
     "Restart Vanillish now"
 } else {
     "Close iNilla now"
@@ -70,15 +84,29 @@ pub(crate) const NEEDS_DATA: &str = concat!(
 pub(crate) const KEEP_OPEN: &str = if ANDROID {
     "Keep Vanillish open and the screen on; a paused or interrupted download or copy resumes \
      where it stopped."
+} else if WINDOWS {
+    "Keep Vanillish open and the PC awake; a paused or interrupted download or copy resumes where \
+     it stopped."
 } else {
     "Keep iNilla open and the screen on; a paused or interrupted download resumes where it stopped."
 };
 
-pub(crate) const COPY_TITLE: &str = concat!("1 · Copy your Data folder into ", app!());
+/// Vanillish: on Windows the client usually sits on this PC already, and is played in place.
+pub(crate) const COPY_TITLE: &str = if WINDOWS {
+    "1 · Your own 1.12.1 client"
+} else {
+    concat!("1 · Copy your Data folder into ", app!())
+};
 
-/// Where a computer puts the `Data` folder.
+/// Where a computer puts the `Data` folder. Vanillish (Windows): the computer is this PC, whose
+/// client is read where it is ([`USE_WOW_FOLDER`]).
 pub(crate) fn from_computer() -> String {
-    if ANDROID {
+    if WINDOWS {
+        format!(
+            "• Already have 1.12.1 on this PC? {USE_WOW_FOLDER} plays it where it is: nothing is \
+             copied, and nothing is written into it."
+        )
+    } else if ANDROID {
         format!(
             "• From a PC: connect the phone with a USB cable and choose File transfer on the \
              phone, then open {} and drag the client's Data folder (or the whole World of \
@@ -93,9 +121,17 @@ pub(crate) fn from_computer() -> String {
     }
 }
 
-/// How the device itself brings the `Data` folder in.
+/// How the device itself brings the `Data` folder in. Vanillish (Windows): a copy into the
+/// Vanillish folder.
 pub(crate) fn on_device() -> String {
-    if ANDROID {
+    if WINDOWS {
+        let root = drop_box();
+        format!(
+            "• Or copy it in (about 5 GB): the client's Data folder into {root} (copy, not move: \
+             your client keeps its own), so that it is {root}\\Data, then restart Vanillish. \
+             {IMPORT_FOLDER} makes the copy for you."
+        )
+    } else if ANDROID {
         "• On the phone: Import from folder… copies it from this phone's storage or a USB-C \
          stick or drive (about 5 GB; the original stays). The picker cannot use the Download \
          folder itself: put the game in a folder of its own, e.g. Download/WoW, and pick that."
@@ -110,7 +146,8 @@ pub(crate) fn on_device() -> String {
 }
 
 /// Vanillish: the drop box as a PC's file manager shows it:
-/// `Internal storage → Android → data → <package> → files` (`.debug` builds have their own).
+/// `Internal storage → Android → data → <package> → files` (`.debug` builds have their own). On
+/// Windows the Vanillish folder, as File Explorer's address bar shows it.
 pub(crate) fn drop_box() -> String {
     let docs = paths::documents()
         .map(|d| d.display().to_string())
@@ -130,11 +167,84 @@ pub(crate) fn resume_from(label: &str) -> String {
     format!("Resume copying from {label}")
 }
 
+/// Vanillish (Windows): the player's own 1.12.1 client as the game data, read in place
+/// (`paths::set_wow_folder`).
+pub(crate) const USE_WOW_FOLDER: &str = "Use my WoW folder…";
+pub(crate) const STOP_WOW_FOLDER: &str = "Stop using my WoW folder";
+
+/// Vanillish (Windows): the setup screen's line while the game data is the player's own client.
+pub(crate) fn wow_folder_in_use(data: &std::path::Path) -> String {
+    format!(
+        "Playing from your own client, in place: {}. Vanillish only reads it.",
+        data.display()
+    )
+}
+
+/// Vanillish (Windows): the picked folder is not a whole 1.12.1 client.
+pub(crate) fn wow_folder_incomplete(label: &str, missing: &[&str]) -> String {
+    format!(
+        "{label} is not a whole 1.12.1 client: {} missing. Pick the World of Warcraft folder (the \
+         one with WoW.exe) or its Data folder.",
+        missing.join(", ")
+    )
+}
+
+/// A folder import's copy is done. Vanillish (Windows): the original is often the client the
+/// player plays from, which is never theirs to delete for the room.
+pub(crate) fn copied(n: usize, label: &str, original_gb: f64) -> String {
+    if WINDOWS {
+        format!("Copied {n} archives from {label}; the original folder is untouched.")
+    } else {
+        format!(
+            "Copied {n} archives from {label}. The original folder is still there; delete it to \
+             free {original_gb:.1} GB."
+        )
+    }
+}
+
+/// Vanillish (Windows): "Check for copied data" found only a client's own folder, whose files are
+/// never moved out.
+pub(crate) fn client_not_moved(dir: &std::path::Path) -> String {
+    format!(
+        "{} is a World of Warcraft client's own folder: Vanillish never moves its files. \
+         {USE_WOW_FOLDER} plays it where it is, and {IMPORT_FOLDER} copies it.",
+        dir.display()
+    )
+}
+
+/// Vanillish (Windows): the picked folder is Vanillish's own.
+pub(crate) const WOW_FOLDER_IS_OURS: &str =
+    "That is Vanillish's own folder, where its own copy of \
+     the game files goes: choose the folder of your World of Warcraft 1.12.1 client instead.";
+
+/// Vanillish (Windows): what the next start reads, once the player picked their client or let it
+/// go.
+pub(crate) const WOW_FOLDER_CHOSEN: &str = "Vanillish plays from this folder from its next start: \
+     nothing is copied, and nothing is written into it.";
+pub(crate) const WOW_FOLDER_STOPPED: &str =
+    "Vanillish uses its own Data folder again from its next start.";
+
+pub(crate) fn wow_folder_not_saved(why: &str) -> String {
+    format!("Vanillish could not remember the folder: {why}.")
+}
+
+/// Vanillish (Windows): a download or a copy while the game data is the player's own client, which
+/// is never written into.
+pub(crate) const IN_PLACE_READ_ONLY: &str = "The game data is your own client, read in place: \
+     nothing is downloaded or copied into it. Stop using my WoW folder first (Settings → Debug → \
+     Game data…).";
+
 // ── data.rs ──
 
 /// "Check for copied data" found nothing.
 pub(crate) fn nothing_to_import() -> String {
-    if ANDROID {
+    if WINDOWS {
+        format!(
+            "No Data folder found in {} yet. Copy it in and try again, or play your client where \
+             it is: {USE_WOW_FOLDER}",
+            drop_box()
+        )
+    } else if ANDROID {
         let pkg = paths::documents()
             .and_then(|d| paths::android_package(&d.display().to_string()).map(str::to_string))
             .unwrap_or_else(|| "the app".into());
@@ -151,13 +261,15 @@ pub(crate) fn nothing_to_import() -> String {
 
 pub(crate) const REMEMBER_PASSWORD: &str = if ANDROID {
     "Remember the password (sealed on this phone with an Android Keystore key)"
+} else if WINDOWS {
+    "Remember the password (sealed on this PC with your Windows account, DPAPI)"
 } else {
     "Remember the password (kept in the iOS Keychain)"
 };
 
 pub(crate) const AUTO_LOGIN: &str = concat!("Log in automatically when ", app!(), " starts");
 
-pub(crate) const NO_SIGN_UP: &str = if ANDROID {
+pub(crate) const NO_SIGN_UP: &str = if VANILLISH {
     "1.12 has no in-game sign-up. On a server that takes sign-ups, Connect creates the account; \
      otherwise register on the server's website or with `account create` on its console, then add \
      the account here."
@@ -171,8 +283,20 @@ pub(crate) const NO_SIGN_UP: &str = if ANDROID {
 
 pub(crate) const NOT_SAVED: &str = if ANDROID {
     "Password not saved: the Android Keystore refused it"
+} else if WINDOWS {
+    "Password not saved: Windows did not seal it with your account (DPAPI)"
 } else {
     "Password not saved: the Keychain refused it"
+};
+
+/// Under the server form's world-server host (moved here from the launcher). Vanillish: a PC on
+/// Windows.
+pub(crate) const REALM_OVERRIDE_HINT: &str = if WINDOWS {
+    "Use when the realm list hands out an address this PC cannot reach (a LAN IP while you are \
+     outside, or a public IP inside a network without hairpin NAT). host or host:port."
+} else {
+    "Use when the realm list hands out an address this phone cannot reach (a LAN IP while you are \
+     outside, or a public IP inside a network without hairpin NAT). host or host:port."
 };
 
 // ── settings.rs ──
@@ -207,7 +331,7 @@ pub(crate) fn graphics_hint(max_hz: Option<f32>) -> String {
     )
 }
 
-pub(crate) const RENDER_HINT: &str = if ANDROID {
+pub(crate) const RENDER_HINT: &str = if VANILLISH {
     "The 3D world renders at this fraction of the screen; the interface stays sharp. 80 % is a \
      good default."
 } else {
@@ -216,16 +340,32 @@ pub(crate) const RENDER_HINT: &str = if ANDROID {
 
 /// Vanillish: the modern lighting switch (`modern_lighting`), read when the app starts.
 pub(crate) const MODERN_LIGHTING_ROW: &str = "Modern lighting (restart)";
-pub(crate) const MODERN_LIGHTING_HINT: &str = concat!(
-    "Sunlight and torchlight per pixel, relief and soft highlights drawn from the game's own \
-     textures, and water that catches the sky. The art stays the same. Applies the next time ",
-    app!(),
-    " starts, and costs some battery."
-);
+macro_rules! modern_lighting_hint {
+    ($cost:literal) => {
+        concat!(
+            "Sunlight and torchlight per pixel, relief and soft highlights drawn from the game's \
+             own textures, and water that catches the sky. The art stays the same. Applies the \
+             next time ",
+            app!(),
+            " starts, and costs some ",
+            $cost,
+            "."
+        )
+    };
+}
+/// Vanillish: a PC pays for it in GPU time, not battery.
+pub(crate) const MODERN_LIGHTING_HINT: &str = if WINDOWS {
+    modern_lighting_hint!("GPU time")
+} else {
+    modern_lighting_hint!("battery")
+};
 
 pub(crate) const UI_SCALE_HINT: &str = if ANDROID {
     "Automatic keeps a stock action button about a fingertip wide: 1.25 on the cover screen, \
      smaller on the inner screen, which has room for more."
+} else if WINDOWS {
+    "Automatic is 1.25 on a touch screen: action buttons near fingertip size, and quest and \
+     vendor windows still clear of the action bars."
 } else {
     "Automatic is 1.25 on a phone: action buttons near fingertip size, and quest and vendor windows still clear of the action bars."
 };
@@ -258,6 +398,9 @@ pub(crate) const STAY_CONNECTED_HINT: &str =
 pub(crate) const NO_CONTROLLER: &str = if ANDROID {
     "No controller connected. Pair one in the phone's Settings → Connections → Bluetooth, or plug \
      in a USB-C controller (Backbone One, Razer Kishi, GameSir)."
+} else if WINDOWS {
+    "No controller connected. Plug in an Xbox controller, or pair it in Windows Settings → \
+     Bluetooth & devices (or the Xbox Wireless Adapter)."
 } else {
     "No controller connected. Pair one in iOS Settings → Bluetooth, or attach a Backbone."
 };
@@ -272,7 +415,13 @@ pub(crate) fn console_hint(port: u16) -> String {
     let base = "Open that address in a browser on a computer on the same Wi-Fi";
     let rest = "the live log, Lua, game commands, screenshots and the benilla-config files. \
                 Anyone with the address can drive the game — turn it off when you are done.";
-    if ANDROID {
+    if WINDOWS {
+        format!(
+            "Open that address in a browser on this PC, or on a phone or another computer on the \
+             same network: {rest} The first time, Windows Firewall asks whether Vanillish may \
+             accept connections: allow it on Private networks."
+        )
+    } else if ANDROID {
         format!(
             "{base} or the phone's hotspot: {rest} Over USB with USB debugging: adb forward \
              tcp:{port} tcp:{port}, then http://localhost:{port}/ with the same token."
@@ -289,6 +438,22 @@ pub(crate) const SESSION_LOG_ROW: &str = if ANDROID {
     "Write a session log (Files → iNilla → benilla-config → Diagnostics)"
 };
 
+/// The session log's row. Vanillish (Windows): with the folder the logs go to, as File Explorer
+/// shows it.
+pub(crate) fn session_log_row() -> String {
+    match paths::config_dir().filter(|_| WINDOWS) {
+        Some(config) => format!(
+            "Write a session log ({})",
+            config.join("Diagnostics").display()
+        ),
+        None => SESSION_LOG_ROW.to_string(),
+    }
+}
+
+/// Vanillish (Windows): the Vanillish folder in File Explorer, where a phone has Share.
+pub(crate) const OPEN_FOLDER: &str = "Open the Vanillish folder";
+pub(crate) const OPEN_FOLDER_FAILED: &str = "File Explorer did not open";
+
 /// Vanillish: the share sheet for the session log.
 pub(crate) const SHARE_LOG: &str = "Share session log…";
 pub(crate) const NO_LOG_YET: &str = "No session log to share yet";
@@ -296,6 +461,8 @@ pub(crate) const SHARE_FAILED: &str = "The share sheet did not open";
 
 pub(crate) const ABOUT_TITLE: &str = if ANDROID {
     "Vanillish — benilla for Android"
+} else if WINDOWS {
+    "Vanillish — benilla for Windows"
 } else {
     "iNilla — benilla for iPhone"
 };
@@ -305,6 +472,11 @@ pub(crate) const CREDIT: &str = if ANDROID {
      (github.com/samwhosung/benilla); iNilla (github.com/Martze96/iNilla) is its iOS port, and \
      Vanillish is iNilla built for Android. None of them ships Blizzard content, nor is \
      affiliated with Blizzard Entertainment."
+} else if WINDOWS {
+    "benilla is a from-scratch World of Warcraft 1.12.1 client in Rust \
+     (github.com/samwhosung/benilla); iNilla (github.com/Martze96/iNilla) is its iOS port, and \
+     Vanillish is iNilla built for Android and for Windows. None of them ships Blizzard content, \
+     nor is affiliated with Blizzard Entertainment."
 } else {
     "benilla is a from-scratch World of Warcraft 1.12.1 client in Rust (github.com/samwhosung/benilla); iNilla is its iOS port. Neither ships Blizzard content, nor is affiliated with Blizzard Entertainment."
 };
@@ -313,10 +485,11 @@ pub(crate) const RESET_ALL: &str = concat!("Reset all ", app!(), " settings");
 
 // ── connect.rs (Vanillish) ──
 
-/// Vanillish: the first screen is Connect — one field, the server's address — on Android, and on
-/// a desktop rehearsing it with `$INILLA_QUICK_CONNECT=1`. Never on iOS, which keeps iNilla's flow.
+/// Vanillish: the first screen is Connect — one field, the server's address — on Android and
+/// Windows, and on a desktop rehearsing it with `$INILLA_QUICK_CONNECT=1`. Never on iOS, which
+/// keeps iNilla's flow.
 pub(crate) fn quick_connect() -> bool {
-    ANDROID
+    VANILLISH
         || (!cfg!(target_os = "ios") && std::env::var("INILLA_QUICK_CONNECT").as_deref() == Ok("1"))
 }
 
@@ -338,6 +511,14 @@ pub(crate) const OTHER_WAYS: &str = "Other ways to get the game files…";
 
 /// Nothing answered at `host`: what to check.
 pub(crate) fn unreachable(host: &str) -> String {
+    // Vanillish: a PC is on a network rather than mobile data, and may run the server itself.
+    if WINDOWS {
+        return format!(
+            "Nothing answers at {host}. Is the server running, and is this PC on the same network \
+             as it (not a guest network)? On the server's computer the firewall must let in ports \
+             3724, 8085 and 8099. A server on this same PC: type localhost."
+        );
+    }
     let device = if ANDROID { "phone" } else { "device" };
     let mut s = format!(
         "Nothing answers at {host}. Is the server running, and is this {device} on the same Wi-Fi \
@@ -414,14 +595,22 @@ pub(crate) fn not_enough_space(need_gb: f64, free_gb: f64) -> String {
     format!("Not enough space: {need_gb:.1} GB needed, {free_gb:.1} GB free.")
 }
 
-pub(crate) const METERED: &str = "This phone is on a metered connection (mobile data or a \
-     hotspot): the download counts against your plan.";
+pub(crate) const METERED: &str = if WINDOWS {
+    "This PC is on a metered connection (Windows Settings → Network & internet): the download \
+     counts against your plan."
+} else {
+    "This phone is on a metered connection (mobile data or a hotspot): the download counts \
+     against your plan."
+};
 pub(crate) const PICK_LANGUAGE: &str = "The server has the game in several languages. Pick one: \
      quests, items and NPCs follow it.";
 pub(crate) const TOKEN_ROW: &str = "Access code";
 pub(crate) const TOKEN_HINT: &str = if ANDROID {
     "The server's owner protected the game files with an access code (INILLA_DATA_TOKEN in its \
      .env). It is saved on this phone."
+} else if WINDOWS {
+    "The server's owner protected the game files with an access code (INILLA_DATA_TOKEN in its \
+     .env). It is saved on this PC, sealed with your Windows account."
 } else {
     "The server's owner protected the game files with an access code (INILLA_DATA_TOKEN in its \
      .env). It is saved on this device."
@@ -524,6 +713,9 @@ pub(crate) fn play_as(name: &str) -> String {
 pub(crate) const ADMIN_CODE_KEPT: &str = if ANDROID {
     "It is saved on this phone, sealed with an Android Keystore key; only a signature made with it \
      is sent."
+} else if WINDOWS {
+    "It is saved on this PC, sealed with your Windows account; only a signature made with it is \
+     sent."
 } else {
     "It is saved on this device; only a signature made with it is sent."
 };
@@ -532,6 +724,9 @@ pub(crate) const ADMIN_CODE_KEPT: &str = if ANDROID {
 pub(crate) const ADMIN_CODE_NOT_SAVED: &str = if ANDROID {
     "The admin code was not saved: the Android Keystore refused it. Vanillish keeps it until it \
      closes."
+} else if WINDOWS {
+    "The admin code was not saved: Windows did not seal it with your account. Vanillish keeps it \
+     until it closes."
 } else {
     concat!(
         "The admin code was not saved. ",
@@ -539,6 +734,20 @@ pub(crate) const ADMIN_CODE_NOT_SAVED: &str = if ANDROID {
         " keeps it until it closes."
     )
 };
+
+/// Vanillish: the second press that confirms Server defaults (moved here from the admin screen); a
+/// PC clicks.
+pub(crate) const DEFAULTS_AGAIN: &str = if WINDOWS {
+    "Click again to go back to the server's settings"
+} else {
+    "Tap again to go back to the server's settings"
+};
+
+/// Vanillish: the second press that confirms a gift of gold (moved here from the admin screen).
+pub(crate) fn send_again(amount: &str, to: &str) -> String {
+    let press = if WINDOWS { "Click" } else { "Tap" };
+    format!("Send {amount} to {to}? {press} again")
+}
 
 // ── logs.rs ──
 
@@ -554,7 +763,7 @@ mod tests {
     use super::*;
 
     /// The iOS build says exactly what iNilla said before these words moved here.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", feature = "vanillish")))]
     #[test]
     fn ios_keeps_its_words() {
         assert_eq!(APP, "iNilla");
@@ -574,6 +783,47 @@ mod tests {
              game commands, screenshots and the benilla-config files. Anyone with the address \
              can drive the game — turn it off when you are done."
         );
+        assert_eq!(
+            REALM_OVERRIDE_HINT,
+            "Use when the realm list hands out an address this phone cannot reach (a LAN IP \
+             while you are outside, or a public IP inside a network without hairpin NAT). host \
+             or host:port."
+        );
+        assert_eq!(send_again("5g", "Thrall"), "Send 5g to Thrall? Tap again");
+    }
+
+    /// Vanillish: the Windows build is Vanillish, starts at Connect, and says PC, not phone.
+    #[cfg(feature = "vanillish")]
+    #[test]
+    fn windows_says_vanillish() {
+        assert_eq!(APP, "Vanillish");
+        assert!(quick_connect());
+        assert_eq!(RESTART_NOW, "Restart Vanillish now");
+        assert_eq!(AUTO_LOGIN, "Log in automatically when Vanillish starts");
+        assert!(relaunch_hint().contains("Vanillish.exe"));
+        assert!(MODERN_LIGHTING_HINT.ends_with("costs some GPU time."));
+        assert!(NO_CONTROLLER.contains("Xbox Wireless Adapter"));
+        assert!(
+            unreachable("10.0.0.5").contains("this PC") && unreachable("x").contains("localhost")
+        );
+        assert!(console_hint(7878).contains("Windows Firewall"));
+        assert!(REMEMBER_PASSWORD.contains("Windows account"));
+        assert!(from_computer().contains(USE_WOW_FOLDER));
+        assert_eq!(send_again("5g", "Thrall"), "Send 5g to Thrall? Click again");
+        assert!(DEFAULTS_AGAIN.starts_with("Click again"));
+        assert!(REALM_OVERRIDE_HINT.contains("this PC cannot reach"));
+        for s in [
+            NEEDS_RESTART,
+            KEEP_OPEN,
+            NO_SIGN_UP,
+            METERED,
+            TOKEN_HINT,
+            ADMIN_CODE_KEPT,
+            ABOUT_TITLE,
+            CREDIT,
+        ] {
+            assert!(!s.contains("iNilla cannot") && !s.contains("phone"), "{s}");
+        }
     }
 
     /// Vanillish: what Connect says about the server and about a refused sign-up.
@@ -630,6 +880,17 @@ mod tests {
                 ADMIN_CODE_NOT_SAVED,
                 "The admin code was not saved: the Android Keystore refused it. Vanillish keeps \
                  it until it closes."
+            );
+        } else if WINDOWS {
+            assert_eq!(
+                ADMIN_CODE_KEPT,
+                "It is saved on this PC, sealed with your Windows account; only a signature made \
+                 with it is sent."
+            );
+            assert_eq!(
+                ADMIN_CODE_NOT_SAVED,
+                "The admin code was not saved: Windows did not seal it with your account. \
+                 Vanillish keeps it until it closes."
             );
         } else {
             assert_eq!(

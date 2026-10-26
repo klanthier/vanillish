@@ -10,6 +10,9 @@
 //!   app in the background resumes ([`pending`]) until [`forget`] gives it back.
 //! - **Desktop**: `$INILLA_PICK` names a real folder, which [`pick`] "picks" at once — the whole
 //!   import, from the button to the progress bar, rehearses on Linux.
+//! - **Windows**: without `$INILLA_PICK`, the system's folder dialog (`IFileOpenDialog`, owned by
+//!   the game's window: [`set_owner_window`]); the folder is a plain path, read as the desktop
+//!   reads one. "Share" is File Explorer, the file selected in its folder.
 //! - **iOS**: not available (yet); a folder `UIDocumentPickerViewController` would fit here.
 //!
 //! The copy itself is `inilla_core::import` (resumable, checked, tested without a device).
@@ -55,7 +58,9 @@ fn rehearsal() -> Option<String> {
     std::env::var("INILLA_PICK").ok().filter(|v| !v.is_empty())
 }
 
-/// Whether this platform can pick a folder: Android yes; the desktop when `$INILLA_PICK` is set.
+/// Whether this platform can pick a folder: Android yes; Windows in Vanillish's own folder
+/// (`paths::root`: benilla's own desktop run on Windows imports nothing into its install); the
+/// desktop when `$INILLA_PICK` is set.
 pub fn available() -> bool {
     #[cfg(target_os = "android")]
     {
@@ -65,7 +70,11 @@ pub fn available() -> bool {
     {
         false
     }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(windows)]
+    {
+        crate::paths::root().is_some() || rehearsal().is_some()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios", windows)))]
     {
         rehearsal().is_some()
     }
@@ -89,17 +98,54 @@ pub fn pick() -> bool {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let Some(path) = rehearsal() else {
-            return false;
-        };
-        let label = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
-        state().pending = Some((path.clone(), label.clone()));
-        android::deliver(Picked::Folder { tree: path, label });
-        true
+        if let Some(path) = rehearsal() {
+            deliver_folder(path);
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            if crate::paths::root().is_none() {
+                return false;
+            }
+            // One dialog at a time: a second press while it is open asks nothing new.
+            let mut s = state();
+            if s.waiting {
+                return true;
+            }
+            s.waiting = true;
+            drop(s);
+            let asked = crate::windows::picker::pick();
+            if !asked {
+                state().waiting = false;
+            }
+            asked
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
+}
+
+/// A folder picked on the desktop (the rehearsal's, Windows' dialog's): offered to resume until
+/// [`forget`], and delivered.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn deliver_folder(path: String) {
+    let label = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    state().pending = Some((path.clone(), label.clone()));
+    android::deliver(Picked::Folder { tree: path, label });
+}
+
+/// Vanillish (Windows): the game's window (its `HWND`), which owns the folder dialog [`pick`]
+/// opens, so the dialog comes up in front of the game and modal to it. Ignored elsewhere.
+pub fn set_owner_window(hwnd: isize) {
+    #[cfg(windows)]
+    crate::windows::picker::set_owner_window(hwnd);
+    #[cfg(not(windows))]
+    let _ = hwnd;
 }
 
 /// The picker is open: [`pick`] was answered with nothing yet.
@@ -188,19 +234,26 @@ pub fn forget(tree: &str) {
     }
 }
 
-/// Whether [`share_file`] can hand a file to another app here (Android's share sheet).
+/// Whether [`share_file`] can hand a file to another app here (Android's share sheet; Windows'
+/// File Explorer).
 pub fn can_share() -> bool {
-    cfg!(target_os = "android")
+    cfg!(any(target_os = "android", windows))
 }
 
 /// Offer the file at `path` to another app (mail, chat, a cloud drive) through the system's
-/// share sheet; `mime` is its type (`text/plain` for a log). `false` when it could not.
+/// share sheet; `mime` is its type (`text/plain` for a log). `false` when it could not. On
+/// Windows, File Explorer opens on its folder with the file selected, to drag or send from there.
 pub fn share_file(path: &std::path::Path, mime: &str) -> bool {
     #[cfg(target_os = "android")]
     {
         crate::android::picker::share_file(path, mime)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(windows)]
+    {
+        let _ = mime;
+        crate::windows::device::show_in_explorer(path)
+    }
+    #[cfg(not(any(target_os = "android", windows)))]
     {
         let _ = (path, mime);
         false

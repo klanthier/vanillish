@@ -11,9 +11,14 @@
 //! picker (Android's Storage Access Framework), copied in by `inilla_core::import` on the same
 //! job thread, with the same progress, Pause and resume as the download. Quick connect
 //! (`inilla::connect`) drives the same manifest and download jobs, and borrows the HTTP client.
+//!
+//! Vanillish (Windows): a fourth, **the player's own client read in place** — a 1.12.1 folder
+//! already on the PC, picked once and opened from the next start (`paths::set_wow_folder`). That
+//! folder is never written into: while it is the game data, no job puts anything in the data
+//! folder ([`IN_PLACE`]).
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -36,6 +41,20 @@ pub(crate) const SETTLE: Duration = Duration::from_secs(15);
 /// Room left beyond the archives themselves when a copy or download starts (Vanillish: quick
 /// connect's download checks the same).
 pub(crate) const SPARE: u64 = 200_000_000;
+
+/// Vanillish (Windows): the jobs that write into the data folder, which none may while it is the
+/// player's own client (`paths::data_in_place`). The addons go to benilla-config, and still run.
+const IN_PLACE: &[&str] = &["download", "import", "folder import"];
+
+/// Vanillish (Windows): what the folder picker was opened for — its answers come on one stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PickFor {
+    /// Copy the archives in (Import from folder…).
+    #[default]
+    Copy,
+    /// Read the folder in place from the next start (Use my WoW folder…).
+    InPlace,
+}
 
 /// What a finished job produced.
 enum Outcome {
@@ -106,6 +125,12 @@ pub(crate) struct DataState {
     boot_present: Vec<(String, u64)>,
     replaced: bool,
     job: Option<Job>,
+    /// Vanillish (Windows): what the open picker is for.
+    pick_for: PickFor,
+    /// Vanillish (Windows): the player's own client's `Data` folder this run reads in place, and
+    /// the one the next start will ([`Self::set_wow_folder`]).
+    in_place: Option<PathBuf>,
+    in_place_next: Option<PathBuf>,
 }
 
 impl DataState {
@@ -133,6 +158,71 @@ impl DataState {
         }
     }
 
+    /// Vanillish (Windows): the player's own client the next start reads in place, if any.
+    pub(crate) fn wow_folder(&self) -> Option<&Path> {
+        self.in_place_next.as_deref()
+    }
+
+    /// Vanillish (Windows): this run or the next reads the player's own client in place: until a
+    /// relaunch, nothing is downloaded, copied or moved into the data folder, which may be it.
+    pub(crate) fn reads_in_place(&self) -> bool {
+        self.in_place.is_some() || self.in_place_next.is_some()
+    }
+
+    /// Vanillish (Windows): the next start reads another folder than this one: a relaunch is
+    /// needed for it.
+    pub(crate) fn switches_folder(&self) -> bool {
+        self.in_place != self.in_place_next
+    }
+
+    /// Vanillish: open the system's folder picker, for a copy or (Windows) a folder in place.
+    pub(crate) fn pick(&mut self, purpose: PickFor) {
+        self.pick_for = purpose;
+        if !picker::pick() {
+            self.message = Some((false, "The folder picker could not open.".into()));
+        }
+    }
+
+    /// Vanillish (Windows): read the game data from the client the player picked (`tree`, its
+    /// folder or its `Data` folder) from the next start — once it holds the whole 1.12.1 set.
+    fn use_wow_folder(&mut self, tree: &str, label: &str) {
+        picker::forget(tree);
+        let data = inilla_platform::paths::wow_data_in(Path::new(tree));
+        // Vanillish's own Data folder is where its own copy lives, not a client to play in place.
+        if inilla_platform::paths::root().is_some_and(|r| data.starts_with(r.join("Data"))) {
+            self.message = Some((false, words::WOW_FOLDER_IS_OURS.into()));
+            return;
+        }
+        let st = kd::status(&data);
+        if !st.complete() {
+            self.message = Some((
+                false,
+                words::wow_folder_incomplete(label, &st.missing_required),
+            ));
+            return;
+        }
+        self.set_wow_folder(Some(data));
+    }
+
+    /// Vanillish (Windows): `Some` reads that `Data` folder in place from the next start, `None`
+    /// this app's own `Data` folder again. The archives open at launch: the screen offers the
+    /// restart ([`Self::switches_folder`]).
+    pub(crate) fn set_wow_folder(&mut self, data: Option<PathBuf>) {
+        match inilla_platform::paths::set_wow_folder(data.as_deref()) {
+            Ok(()) => {
+                let said = if data.is_some() {
+                    words::WOW_FOLDER_CHOSEN
+                } else {
+                    words::WOW_FOLDER_STOPPED
+                };
+                info!("inilla: the game data from the next start: {data:?}");
+                self.message = Some((true, said.into()));
+                self.in_place_next = data;
+            }
+            Err(e) => self.message = Some((false, words::wow_folder_not_saved(&e.to_string()))),
+        }
+    }
+
     fn start(
         &mut self,
         label: &'static str,
@@ -147,6 +237,14 @@ impl DataState {
         // launch does not use: nothing is written there (`paths::storage_unavailable`).
         if label != "manifest" && inilla_platform::paths::storage_unavailable() {
             self.message = Some((false, words::STORAGE_UNAVAILABLE.into()));
+            return;
+        }
+        // Vanillish (Windows): the player's own client is read in place, and never written into:
+        // this run's folder is it until a relaunch, even once the next start's is not.
+        if IN_PLACE.contains(&label)
+            && (self.reads_in_place() || inilla_platform::paths::data_in_place())
+        {
+            self.message = Some((false, words::IN_PLACE_READ_ONLY.into()));
             return;
         }
         let progress = Arc::new(Mutex::new(Progress::default()));
@@ -175,9 +273,28 @@ impl DataState {
             ));
             return;
         };
+        // Vanillish (Windows): a Data folder copied straight into place is found at the next
+        // start, with nothing to move.
+        if inilla_platform::paths::root().is_some() {
+            self.refresh();
+            if self.status.complete() {
+                self.message = Some((true, words::NEEDS_RESTART.into()));
+                return;
+            }
+        }
         self.start("import", move |progress, _| {
             let found = kd::find_imports(&docs);
+            // Vanillish: never the data folder itself (on Windows it sits inside the drop box),
+            // nor, on Windows, a client's own folder: its files are never moved out.
+            let windows = inilla_platform::paths::root().is_some();
+            let (clients, found): (Vec<_>, Vec<_>) = found
+                .into_iter()
+                .filter(|c| !c.dir.starts_with(&dir))
+                .partition(|c| windows && inilla_platform::paths::in_wow_install(&c.dir));
             let Some(c) = found.into_iter().max_by_key(|c| c.status.present.len()) else {
+                if let Some(client) = clients.first() {
+                    return Err(words::client_not_moved(&client.dir));
+                }
                 return Ok(Outcome::NothingToImport);
             };
             // Vanillish: not a folder a PC is still copying into (the boot import's guard too).
@@ -404,9 +521,10 @@ fn free_space(dir: &std::path::Path) -> Option<u64> {
     Some(s.f_bavail as u64 * s.f_frsize as u64)
 }
 
+/// Vanillish: the platform's answer (Windows: `GetDiskFreeSpaceExW`).
 #[cfg(not(unix))]
-fn free_space(_dir: &std::path::Path) -> Option<u64> {
-    None
+fn free_space(dir: &std::path::Path) -> Option<u64> {
+    inilla_platform::fs::free_space(dir)
 }
 
 /// The HTTP half of the download, over `ureq` (rustls). Vanillish: quick connect's too
@@ -515,6 +633,10 @@ impl Plugin for DataPlugin {
         let status = dir.as_deref().map(kd::status).unwrap_or_default();
         // Complete at boot iff benilla was handed it: `boot::prepare` sets `WOW_DATA` only then.
         let ready = status.complete() && std::env::var_os("WOW_DATA").is_none_or(|v| !v.is_empty());
+        // Vanillish (Windows): the player's own client, when this run reads it in place.
+        let in_place = inilla_platform::paths::data_in_place()
+            .then(inilla_platform::paths::wow_folder)
+            .flatten();
         app.insert_resource(DataState {
             dir,
             boot_present: status.present.clone(),
@@ -529,6 +651,9 @@ impl Plugin for DataPlugin {
             pending_folder: picker::pending(),
             replaced: false,
             job: None,
+            pick_for: PickFor::Copy,
+            in_place_next: in_place.clone(),
+            in_place,
         })
         .add_systems(Update, (poll_job, poll_picker));
     }
@@ -541,15 +666,24 @@ fn poll_picker(mut state: ResMut<DataState>) {
     if state.job.is_some() {
         return;
     }
-    match picker::poll() {
-        Some(Picked::Folder { tree, label }) => {
+    let Some(picked) = picker::poll() else {
+        return;
+    };
+    // Vanillish: what the picker was opened for, once.
+    let purpose = std::mem::take(&mut state.pick_for);
+    match picked {
+        Picked::Folder { tree, label } if purpose == PickFor::InPlace => {
+            info!("inilla: the picked folder {label} as the game data, in place");
+            state.use_wow_folder(&tree, &label);
+        }
+        Picked::Folder { tree, label } => {
             info!("inilla: importing from the picked folder {label}");
             state.import_folder(tree, label);
         }
-        Some(Picked::Failed(why)) => {
+        Picked::Failed(why) => {
             state.message = Some((false, format!("The folder picker failed: {why}")));
         }
-        Some(Picked::Cancelled) | None => {}
+        Picked::Cancelled => {}
     }
 }
 
@@ -630,11 +764,7 @@ fn poll_job(mut state: ResMut<DataState>) {
             let mut text = if done.copied == 0 {
                 format!("The {n} archives from {label} were already here.")
             } else {
-                format!(
-                    "Copied {n} archives from {label}. The original folder is still there; \
-                     delete it to free {:.1} GB.",
-                    original_bytes as f64 / 1e9
-                )
+                words::copied(n, &label, original_bytes as f64 / 1e9)
             };
             if !missing.is_empty() {
                 text.push_str(&format!(
@@ -728,6 +858,35 @@ mod tests {
             pending_folder: None,
             replaced: false,
             job: None,
+            pick_for: PickFor::Copy,
+            in_place: None,
+            in_place_next: None,
+        }
+    }
+
+    /// Vanillish (Windows): a run that reads the player's own client in place writes nothing into
+    /// it, even after the player let it go for the next start.
+    #[test]
+    fn a_client_read_in_place_is_never_written() {
+        for (now, next) in [
+            (Some(PathBuf::from("C:/WoW/Data")), None),
+            (
+                Some(PathBuf::from("C:/WoW/Data")),
+                Some(PathBuf::from("C:/WoW/Data")),
+            ),
+            (None, Some(PathBuf::from("C:/WoW/Data"))),
+        ] {
+            for label in IN_PLACE {
+                let mut s = state(true, Vec::new());
+                s.in_place = now.clone();
+                s.in_place_next = next.clone();
+                s.start(label, |_, _| Ok(Outcome::NothingToImport));
+                assert!(s.job.is_none(), "{label} started");
+                assert_eq!(
+                    s.message.as_ref().map(|m| m.1.as_str()),
+                    Some(words::IN_PLACE_READ_ONLY)
+                );
+            }
         }
     }
 

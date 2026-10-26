@@ -104,3 +104,13 @@ debug = false
 strip = false
 incremental = false
 
+# Vanillish: the Windows PC game. Release optimisation, built as `Vanillish.exe` for MSVC
+# (`windows/build-exe.sh`). No LTO, as for Android and iOS. `strip = false` keeps the PDB (a
+# stripped MSVC link gets `/DEBUG:NONE` and writes none): its public symbols name the functions of
+# a backtrace, and it ships beside the exe, which rustc points at it by file name alone.
+[profile.windows]
+inherits = "release"
+debug = false
+strip = false
+incremental = false
+

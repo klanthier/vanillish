@@ -1,0 +1,44 @@
+[package]
+name = "vanillish-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vanillish for Windows: the Vanillish.exe entry — the client iNilla runs on iOS and Vanillish on Android, as a Windows PC game in its own folder; build.rs stamps the git build id like the `benilla` shim and embeds the icon, manifest and version"
+
+[lints]
+workspace = true
+
+[[bin]]
+# Shipped as `Vanillish.exe` (`windows/build-exe.sh` renames it): a capitalised bin name trips
+# `non_snake_case` under `-D warnings`.
+name = "vanillish"
+path = "src/main.rs"
+test = false
+
+[features]
+default = []
+# The developer build: benilla's instruments (debug panel, perf HUD, inspector) compiled in, and
+# the console subsystem, so the log is in the terminal that started it.
+dev = ["benilla-app/dev"]
+
+# Off Windows this crate is a stub that says so: the app, and with it the `vanillish` feature,
+# is only a dependency for a Windows target, so a Linux `--workspace` gate never builds
+# `benilla-app` with the feature on (resolver 2 leaves another target's features out).
+[target.'cfg(windows)'.dependencies]
+benilla-app = { path = "../benilla-app", default-features = false, features = ["vanillish"] }
+inilla-platform = { path = "../inilla-platform" }
+# `--console`: the parent's console and the standard handles; the message box when the game
+# stopped on a panic (src/main.rs).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }
+# The icon, manifest and version (windows/vanillish.rc), compiled for an MSVC target only: rc.exe
+# on Windows, llvm-rc on another host.
+embed-resource = "3"

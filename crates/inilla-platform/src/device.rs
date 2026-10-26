@@ -6,7 +6,8 @@
 //! background session ([`set_session_service`]), the edges the system's swipes hold off
 //! ([`set_gesture_exclusion`]), [`relaunch`] and whether the network is metered
 //! ([`network_metered`]) — no-ops on iOS and the desktop, where `$INILLA_FOLD` rehearses a hinge
-//! ([`fold_in_window`]).
+//! ([`fold_in_window`]). Windows (`crate::windows::device`) answers the screen-awake, memory,
+//! identity, URL, relaunch and metered calls, and adds [`open_folder`].
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -19,7 +20,10 @@ pub fn set_idle_timer_disabled(disabled: bool) {
     // Vanillish: `FLAG_KEEP_SCREEN_ON` on the game's window.
     #[cfg(target_os = "android")]
     crate::android::device::keep_screen_on(disabled);
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    // Vanillish: a power request for the display and the system, held by the process.
+    #[cfg(windows)]
+    crate::windows::device::keep_awake(disabled);
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     let _ = disabled;
 }
 
@@ -173,7 +177,12 @@ pub fn available_memory() -> Option<u64> {
     {
         crate::android::device::available_memory()
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    // Vanillish: the free physical memory, as on Android system-wide.
+    #[cfg(windows)]
+    {
+        crate::windows::device::available_memory()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         None
     }
@@ -215,10 +224,52 @@ pub fn describe() -> String {
     {
         crate::android::device::describe()
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    // Vanillish: the Windows release and build and the CPU, from the registry ([`describe_windows`]).
+    #[cfg(windows)]
+    {
+        crate::windows::device::describe()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     {
         format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
     }
+}
+
+/// Vanillish: `"Windows 11 Pro 24H2 (build 26100.1234) · x86_64 · AMD Ryzen 7 7840U"` from the
+/// registry's `ProductName`, `DisplayVersion`, `CurrentBuildNumber` and `UBR`, the build's
+/// architecture and the CPU's name, empty parts left out. `ProductName` still says "Windows 10"
+/// on Windows 11, which is build 22000 and later.
+pub fn describe_windows(
+    product: &str,
+    version: &str,
+    build: &str,
+    ubr: Option<u32>,
+    arch: &str,
+    cpu: &str,
+) -> String {
+    let build = build.trim();
+    let mut name = product.trim().to_string();
+    if build.parse::<u32>().is_ok_and(|b| b >= 22_000) {
+        if let Some(edition) = name.strip_prefix("Windows 10") {
+            name = format!("Windows 11{edition}");
+        }
+    }
+    let version = version.trim();
+    if !version.is_empty() {
+        name = format!("{name} {version}");
+    }
+    if !build.is_empty() {
+        name = match ubr {
+            Some(ubr) => format!("{name} (build {build}.{ubr})"),
+            None => format!("{name} (build {build})"),
+        };
+    }
+    let cpu = cpu.split_whitespace().collect::<Vec<_>>().join(" ");
+    [name, arch.to_string(), cpu]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Open a URL in the system (a web page, the Settings app with `app-settings:`).
@@ -230,8 +281,38 @@ pub fn open_url(url: &str) {
     {
         crate::android::device::open_url(url);
     }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    // Vanillish: the default browser, for a web address only ([`is_web_url`]).
+    #[cfg(windows)]
+    crate::windows::device::open_url(url);
+    #[cfg(not(any(target_os = "ios", target_os = "android", windows)))]
     let _ = url;
+}
+
+/// Vanillish: whether `url` is a web page's address, the one thing Windows' `ShellExecuteW` is
+/// handed — given a path, it would run a program. `http://` or `https://` in any case, then no
+/// space, quote or control character (a URL carries those percent-encoded).
+pub fn is_web_url(url: &str) -> bool {
+    let scheme = ["http://", "https://"].iter().any(|s| {
+        url.len() > s.len() && url.as_bytes()[..s.len()].eq_ignore_ascii_case(s.as_bytes())
+    });
+    scheme
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '"')
+}
+
+/// Vanillish (Windows): show the folder at `path` in the system's file manager (File Explorer).
+/// `false` where there is none to ask, or it could not be opened.
+pub fn open_folder(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        crate::windows::device::open_folder(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// The game has quit: close the app and end the process the way the OS wants it (Android: the
@@ -241,23 +322,30 @@ pub fn quit() {
     crate::android::call_bridge_void("quit", "()V", &[]);
 }
 
-/// Start the app over in a fresh process, where the OS allows an app to (Android). `false` where
-/// it does not: the caller then exits and the player opens the app again.
+/// Start the app over in a fresh process, where the OS allows an app to (Android; Vanillish:
+/// Windows in Vanillish's own folder, the exe again with the same arguments). `false` where it
+/// does not: the caller then exits and the player opens the app again.
 pub fn relaunch() -> bool {
     #[cfg(target_os = "android")]
     {
         crate::android::device::relaunch()
     }
-    #[cfg(not(target_os = "android"))]
+    // Only the Windows product (a root its entry set); benilla's own run on Windows exits.
+    #[cfg(windows)]
+    {
+        crate::paths::root().is_some() && crate::windows::device::relaunch()
+    }
+    #[cfg(not(any(target_os = "android", windows)))]
     {
         false
     }
 }
 
 /// Vanillish: whether the network the device is on now costs by the byte — mobile data, or a
-/// hotspot marked so (Android's `ConnectivityManager.isActiveNetworkMetered`). Quick connect starts
-/// a 5 GB download by itself only on `Some(false)`. `None` where the OS does not say, or with no
-/// network; a desktop rehearses either answer with `$INILLA_METERED=1` or `0`.
+/// hotspot marked so (Android's `ConnectivityManager.isActiveNetworkMetered`; Windows' connection
+/// cost, [`metered_from_windows`]). Quick connect starts a 5 GB download by itself only on
+/// `Some(false)`. `None` where the OS does not say, or with no network; a desktop rehearses
+/// either answer with `$INILLA_METERED=1` or `0`, which Windows asks first.
 pub fn network_metered() -> Option<bool> {
     #[cfg(target_os = "android")]
     {
@@ -272,8 +360,22 @@ pub fn network_metered() -> Option<bool> {
         match std::env::var("INILLA_METERED").as_deref() {
             Ok("1") => Some(true),
             Ok("0") => Some(false),
+            #[cfg(windows)]
+            _ => crate::windows::device::network_metered(),
+            #[cfg(not(windows))]
             _ => None,
         }
+    }
+}
+
+/// Vanillish: Windows' `ConnectionCost` as [`network_metered`] answers it. `NetworkCostType`
+/// `Unrestricted` (1) is free unless roaming or over the plan's data limit; `Fixed` (2) and
+/// `Variable` (3) cost by the byte; `Unknown` (0) says nothing.
+pub fn metered_from_windows(cost_type: i32, roaming: bool, over_data_limit: bool) -> Option<bool> {
+    match cost_type {
+        1 => Some(roaming || over_data_limit),
+        2 | 3 => Some(true),
+        _ => None,
     }
 }
 
@@ -749,6 +851,58 @@ mod tests {
 
     /// A Galaxy Z Fold8 Ultra's inner screen in landscape, in dp.
     const INNER: [f32; 2] = [953.9, 859.4];
+
+    #[test]
+    fn windows_names_itself_by_its_build() {
+        assert_eq!(
+            describe_windows(
+                "Windows 10 Pro",
+                "24H2",
+                "26100",
+                Some(1234),
+                "x86_64",
+                "  AMD Ryzen 7 7840U w/ Radeon  780M Graphics   "
+            ),
+            "Windows 11 Pro 24H2 (build 26100.1234) · x86_64 · AMD Ryzen 7 7840U w/ Radeon 780M \
+             Graphics"
+        );
+        // Windows 10 stays Windows 10; what the registry lacks is left out.
+        assert_eq!(
+            describe_windows("Windows 10 Home", "22H2", "19045", None, "x86_64", ""),
+            "Windows 10 Home 22H2 (build 19045) · x86_64"
+        );
+        assert_eq!(
+            describe_windows("Windows 10 Pro", "", "", None, "aarch64", ""),
+            "Windows 10 Pro · aarch64"
+        );
+        assert_eq!(
+            describe_windows("Windows 11 Home", "25H2", "26200", Some(7), "x86_64", "x"),
+            "Windows 11 Home 25H2 (build 26200.7) · x86_64 · x"
+        );
+    }
+
+    #[test]
+    fn windows_hands_the_shell_only_web_addresses() {
+        assert!(is_web_url("https://github.com/klanthier/vanillish"));
+        assert!(is_web_url("HTTP://192.168.1.20:8099/server.json"));
+        assert!(!is_web_url("https://"));
+        assert!(!is_web_url(r"C:\Windows\System32\calc.exe"));
+        assert!(!is_web_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_web_url("ms-settings:privacy"));
+        assert!(!is_web_url("https://x\" -p"));
+        assert!(!is_web_url("https://x y"));
+        assert!(!is_web_url("https://x\ny"));
+    }
+
+    #[test]
+    fn a_windows_connection_costs_by_its_type() {
+        assert_eq!(metered_from_windows(1, false, false), Some(false));
+        assert_eq!(metered_from_windows(1, true, false), Some(true));
+        assert_eq!(metered_from_windows(1, false, true), Some(true));
+        assert_eq!(metered_from_windows(2, false, false), Some(true));
+        assert_eq!(metered_from_windows(3, false, false), Some(true));
+        assert_eq!(metered_from_windows(0, true, true), None);
+    }
 
     #[test]
     fn the_bridges_fold_reaches_the_hud_as_the_same_hinge() {

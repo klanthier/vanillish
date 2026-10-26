@@ -1305,7 +1305,7 @@ mod tests {
         }
         // The folder itself was just written (a new file in it).
         assert!(!settled(&st, Duration::from_secs(15)));
-        fs::File::open(&st.dir).unwrap().set_modified(old).unwrap();
+        set_mtime(&st.dir, old);
         assert!(settled(&st, Duration::from_secs(15)));
         // One archive touched again.
         let f = fs::File::options()
@@ -1314,6 +1314,25 @@ mod tests {
             .unwrap();
         f.set_modified(SystemTime::now()).unwrap();
         assert!(!settled(&st, Duration::from_secs(15)));
+    }
+
+    /// Set a file's or a folder's modification time. Windows opens neither read-only for that (it
+    /// takes the attribute-writing right) and a folder only with backup semantics.
+    fn set_mtime(p: &Path, t: SystemTime) {
+        let mut o = fs::File::options();
+        if p.is_dir() {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // FILE_WRITE_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS, which opens a folder.
+                o.access_mode(0x0100).custom_flags(0x0200_0000);
+            }
+            #[cfg(not(windows))]
+            o.read(true);
+        } else {
+            o.append(true);
+        }
+        o.open(p).unwrap().set_modified(t).unwrap();
     }
 
     #[test]
@@ -1336,10 +1355,7 @@ mod tests {
         let to = tmp("guard-to");
         let st = data::status(&root.join("Data"));
         let quiet = Duration::from_secs(15);
-        let age = |p: &Path| {
-            let old = SystemTime::now() - Duration::from_secs(3600);
-            fs::File::open(p).unwrap().set_modified(old).unwrap();
-        };
+        let age = |p: &Path| set_mtime(p, SystemTime::now() - Duration::from_secs(3600));
         let age_all = || {
             for (n, _) in &st.present {
                 age(&st.dir.join(n));

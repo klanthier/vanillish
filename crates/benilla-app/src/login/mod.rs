@@ -102,7 +102,12 @@ impl Plugin for LoginPlugin {
                         .chain(),
                     (
                         screen::materialize_screen,
-                        login_input.run_if(crate::ui_script::glue::native_glue),
+                        login_input
+                            .run_if(crate::ui_script::glue::native_glue)
+                            // Vanillish: not under one of Vanillish's screens (Connect, the
+                            // launcher), whose keys and clicks would otherwise reach the login
+                            // behind it: Escape is its Quit, and its Quit button sits under them.
+                            .run_if(crate::inilla::login_uncovered),
                         tick_login_caret,
                         screen::refresh_boxes,
                         screen::refresh_checkbox,

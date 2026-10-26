@@ -11,7 +11,9 @@
 //!
 //! Vanillish: an Android app's stdout and stderr are `/dev/null`, so there the pass-through goes
 //! to **logcat** instead — except tracing's own lines, which bevy_log already sends to logcat
-//! itself (they stay in the ring and the session log).
+//! itself (they stay in the ring and the session log). On Windows the standard handles are
+//! pointed at the pipe (`SetStdHandle`, `crate::windows::stdio`): a GUI exe has no console, so
+//! the capture is the only log there is.
 
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
@@ -117,10 +119,20 @@ pub fn capture(log_file: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// The desktop rehearsal on Windows keeps its console: there is no phone to read it from.
-#[cfg(not(unix))]
+/// Vanillish: the same on Windows, through the standard handles rather than descriptors.
+#[cfg(windows)]
+pub fn capture(log_file: Option<&Path>) -> Result<(), String> {
+    if CAPTURED.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    crate::windows::stdio::capture(log_file)
+        .inspect_err(|_| CAPTURED.store(false, Ordering::SeqCst))
+}
+
+/// Elsewhere the process keeps its stdout and stderr.
+#[cfg(not(any(unix, windows)))]
 pub fn capture(_log_file: Option<&Path>) -> Result<(), String> {
-    Err("stdout/stderr capture is only built for unix targets".into())
+    Err("stdout/stderr capture is only built for unix and Windows targets".into())
 }
 
 pub fn is_captured() -> bool {
